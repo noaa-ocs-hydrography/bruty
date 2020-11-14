@@ -2,6 +2,7 @@ import pathlib
 
 import numpy
 
+from xipe_dev.xipe2.raster_data import LayersEnum
 from xipe_dev.xipe2.abstract import VABC, abstractmethod
 from xipe_dev.xipe2.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles
 
@@ -22,7 +23,7 @@ class WorldTilesBackend(VABC):
         storage_class
             The data storage for the history_class to use.  Probably a MemoryHistory or DiskHistory
         data_class
-            Defines how to store the data, probably dervied from raster_data.Storage, like TiffStorage or MemoryStorage or BagStorage
+            Defines how to store the data, probably derived from raster_data.Storage, like TiffStorage or MemoryStorage or BagStorage
         data_path
             Root directory to store file structure under, if applicable.
         """
@@ -69,6 +70,8 @@ class WorldTilesBackend(VABC):
     def get_tile_history_by_index(self, tx, ty):
         tx_str, ty_str = self.tile_index_to_str(tx, ty)
         history = self.history_class(self.storage_class(self.data_class, self.data_path.joinpath(tx_str).joinpath(ty_str)))
+        lx, ly, ux, uy = self.tile_scheme.tile_index_to_xy(tx, ty)
+        history.set_corners(lx, ly, ux, uy)
         return history
 
     def iter_tiles(self, x, y, x2, y2):
@@ -195,6 +198,7 @@ class Lock:
     def notify(self):
         pass
 
+
 class ReadLock(Lock):  # actively being read
     pass
 class WriteLock(Lock):  # actively being modified
@@ -230,7 +234,7 @@ class SQLite(Storage):
 class PickleStorage(Storage):  # this would only work for single instances
     pass
 
-class WorldDatabase:
+class WorldDatabase(VABC):
     """ Class to control Tiles that cover the Earth.
     Also supplies locking of tiles for read/write.
     All access to the underlying data should go through this class to ensure data on disk is not corrupted.
@@ -244,8 +248,66 @@ class WorldDatabase:
     Otherwise a read could get an inconsistent state of some tiles having a survey applied and some not.
     """
     def __init__(self, backend):
-        pass
-    def insert_survey(self, survey_data):
+        self.db = backend
+        self.next_contributor = 0  # fixme: this is a temporary hack until we have a database of surveys with unique ids available
+    def insert_txt_survey(self, path_to_survey_data, survey_score=100, flags=0, format=None, transformer=None):
+        if not format:
+            format = [('y', 'f8'), ('x', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')]
+        data = numpy.loadtxt(path_to_survey_data, dtype=format)
+        x = data['x']
+        y = data['y']
+        if transformer:
+            x, y = transformer.transform(x, y)
+        depth = data['depth']
+        uncertainty = data['uncertainty']
+        score = numpy.full(x.shape, survey_score)
+        flags = numpy.full(x.shape, flags)
+        self.insert_survey_array(numpy.array((x, y, depth, uncertainty, score, flags)).T, path_to_survey_data)
+
+    def insert_survey_array(self, survey_data, contrib_name):
+        # Compute the tile indices for each point
+        txs, tys = self.db.tile_scheme.xy_to_tile_index(survey_data[:, 0], survey_data[:, 1])
+        tile_list = numpy.unique(numpy.array((txs, tys)).T, axis=0)
+        # itererate each tile that was found to have data
+        # @todo figure out the contributor - should be the unique id from the database of surveys
+        for tx, ty in tile_list:
+            pts = survey_data[numpy.logical_and(txs == tx, tys == ty)]
+            sorted_pts = pts[numpy.argsort(pts[:, 2])[::-1]]  # sort from deepest to shoalest
+            tile_history = self.db.get_tile_history_by_index(tx, ty)
+            try:
+                raster_data = tile_history[-1]
+            except IndexError:
+                # empty tile, allocate one
+                res_x, res_y = self.init_tile(tx, ty)
+                raster_data = tile_history.make_empty_data(res_x, res_y)
+
+            # replace x,y with row, col for the points
+            # fixme: the xy_to_rc isn't considering the tile location so is computing wrong.
+            #   either have to have the raster/tile_history know the location or have to account for offsets here.
+            #   Probably best to have the Tile itself know it's location bounds and have it compute things
+            raster_data.xy_to_rc_using_dims()
+            sorted_pts[:, 0], sorted_pts[:, 1] = self.db.tile_scheme.xy_to_rc_array(raster_data, sorted_pts[:, 0], sorted_pts[:, 1])
+
+            for x, y, depth, uncertainty, score, flag in sorted_pts:
+                # fixme: score should be a lookup into the database so that data/decay is considered correctly
+
+                # @todo If scores are all computed then we could overwrite rapidly based on index,
+                #   but has to be sorted by depth so the shallowest sounding in a cell is retained in case there were multiple
+                #   We are not trying to implement CUBE or CHRT here, just pick a value and shoalest is safest
+                overwrites = raster_data[i, j, LayersEnum.SCORE] < sorted_pts[4]
+                # raster_data = raster_data[]
+
+
+        self.next_contributor += 1
+    def init_tile(self, tx, ty):
+        # @todo lookup the resolution to use by default.
+        #   Probably will be a lookup based on the ENC cell the tile covers and then twice the resolution needed for that cell
+        # @todo once resolution is determined then convert to the right size in the coordinate system to represent that sizing in meters
+
+        # this should be ~2m when zoom 13 is the zoom level used (zoom 13 = 20m at 256 pix, so 8 times finer)
+        return 2048, 2048
+
+    def insert_survey_grid(self, survey_data):
         pass
     def export_area(self, area):
         pass

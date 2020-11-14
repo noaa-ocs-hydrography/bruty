@@ -5,7 +5,7 @@ import pytest
 import numpy
 
 from xipe_dev.xipe2.history import DiskHistory, MemoryHistory, RasterHistory
-from xipe_dev.xipe2.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum
+from xipe_dev.xipe2.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
 from xipe_dev.xipe2.test_data import master_data, data_dir
 
 
@@ -43,8 +43,10 @@ def test_layer_ordering(raster):
     uncert = numpy.array([[1, 1], [1, 1]])
     contr = numpy.array([[2, 2], [2, 2]])
     score = numpy.array([[3, 3], [3, 3]])
+    flags = numpy.array([[4, 4], [4, 4]])
+    mask = numpy.array([[0, 0], [0, 0]])
 
-    data = numpy.array((elev, uncert, contr, score))
+    data = numpy.array((elev, uncert, contr, score, flags, mask))
 
     raster.set_arrays(data)
     assert numpy.all(raster.get_array(LayersEnum.ELEVATION) == raster.get_array("ELEVATION"))
@@ -70,8 +72,9 @@ def test_fill(raster_history, data_rasters):
     for data in data_rasters:
         raster_history.append(data)
     for i, data in enumerate(data_rasters):
-        assert numpy.all(raster_history[i].get_arrays() == data.get_arrays())
-        assert numpy.all(raster_history[i].get_metadata() == data.get_metadata())
+        assert numpy.all(arrays_match(raster_history[i].get_arrays(), data.get_arrays()))
+        # assert numpy.all(raster_history[i].get_arrays() == data.get_arrays())
+        assert raster_history[i].get_metadata() == data.get_metadata()
 
 
 def test_history(rasters):

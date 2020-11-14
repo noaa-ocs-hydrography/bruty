@@ -4,8 +4,10 @@ import os
 import re
 from abc import ABC, abstractmethod
 
+import numpy
+
 from xipe_dev.xipe2.abstract import VABC
-from xipe_dev.xipe2.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage
+from xipe_dev.xipe2.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum
 
 class History(VABC, MutableSequence):
     def __init__(self, data_class, data_path="", prefix="", postfix=""):
@@ -118,12 +120,19 @@ class RasterHistory(History):
     """ This class works on top of a History 'history_data' instance to return the actual surface at a certain time
     as opposed to the deltas that the 'history_data' holds
     """
-    def __init__(self, history_data):
+    def __init__(self, history_data, min_x=None, min_y=None, max_x=None, max_y=None):
+        self.set_corners(min_x, min_y, max_x, max_y)
         self.history = history_data
+
+    def set_corners(self, min_x, min_y, max_x, max_y):
+        self.max_y = max_y
+        self.max_x = max_x
+        self.min_y = min_y
+        self.min_x = min_x
 
     def __setitem__(self, key, value):
         # @todo have to reform the deltas in the history like insert does.  Maybe a "reform" function is needed.
-        print("setitem doesn't work yet, only append (insert)")
+        print("setitem doesn't work yet, only append (not insert)")
 
     def __delitem__(self, key):
         # @todo have to reform the deltas in the history like insert does.  Maybe a "reform" function is needed.
@@ -132,6 +141,12 @@ class RasterHistory(History):
 
     def __len__(self):
         return len(self.history)
+
+    def make_empty_data(self, res_x, res_y):
+        arr = numpy.full((len(LayersEnum)-1, res_x, res_y), numpy.nan)  # don't supply mask
+        raster_val = RasterData(MemoryStorage(), arr)
+        raster_val.set_corners(self.min_x, self.min_y, self.max_x, self.max_y)
+        return raster_val
 
     def __getitem__(self, key):
         """Return full raster data at the index"""
@@ -149,6 +164,7 @@ class RasterHistory(History):
             current_val = self.history[-1]
             for delta_idx in range(len(self.history) - 2, key-1, -1):
                 current_val = current_val.apply_delta(self.history[delta_idx])
+            current_val.set_corners(self.min_x, self.min_y, self.max_x, self.max_y)
             return current_val
 
     def insert(self, key, value):

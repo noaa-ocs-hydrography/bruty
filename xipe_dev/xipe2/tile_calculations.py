@@ -27,8 +27,8 @@ class TilingScheme(VABC):
         # y index is bigger than x because there is a smaller range (-90 to 90) which makes smaller tiles in the y direction
         if zoom is None:
             zoom = self.zoom
-        tx = numpy.int(numpy.floor(((x - self.min_x) / (self.width() / self.num_tiles(zoom)))))
-        ty = numpy.int(numpy.floor(((y - self.min_y) / (self.height() / self.num_tiles(zoom)))))
+        tx = numpy.array(numpy.floor(((x - self.min_x) / (self.width() / self.num_tiles(zoom)))), dtype=numpy.int32)
+        ty = numpy.array(numpy.floor(((y - self.min_y) / (self.height() / self.num_tiles(zoom)))), dtype=numpy.int32)
         return tx, ty
 
     def tile_index_to_xy(self, tx, ty, zoom=None):
@@ -49,6 +49,8 @@ class TilingScheme(VABC):
         if zoom is None:
             zoom = self.zoom
         return 2**zoom
+
+
 
 class LatLonTiles(TilingScheme):
     def __init__(self, min_x=-180, min_y=-90.0, max_x=180.0, max_y=90.0, zoom=13):
