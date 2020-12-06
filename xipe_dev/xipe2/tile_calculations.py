@@ -72,6 +72,7 @@ class TMSTilesMercator(TilingScheme):
     """
     def __init__(self, zoom=13):
         circumference = 2 * numpy.pi * 6378137 / 2.0
+        self.epsg = 900913
         super().__init__(min_x=-circumference, min_y=-circumference, max_x=circumference, max_y=circumference, zoom=zoom)
 
 
@@ -96,6 +97,7 @@ class GoogleTilesMercator(GoogleTilesLatLon):
     """
     def __init__(self, zoom=13):
         circumference = 2 * numpy.pi * 6378137 / 2.0
+        self.epsg = 900913
         super().__init__(min_x=-circumference, min_y=-circumference, max_x=circumference, max_y=circumference, zoom=zoom)
 
     # def _flip_y(self, ty, zoom):
@@ -110,6 +112,7 @@ class GoogleTilesMercator(GoogleTilesLatLon):
 
 class UTMTiles(TilingScheme):
     def __init__(self, zoom=13):
+        self.epsg = None
         super().__init__(min_x = -1000000, min_y=-1000000, max_x=2000000, max_y=10000000, zoom=zoom)
 
 

@@ -123,12 +123,16 @@ class RasterHistory(History):
     def __init__(self, history_data, min_x=None, min_y=None, max_x=None, max_y=None):
         self.set_corners(min_x, min_y, max_x, max_y)
         self.history = history_data
+        self.sources = []
 
     def set_corners(self, min_x, min_y, max_x, max_y):
         self.max_y = max_y
         self.max_x = max_x
         self.min_y = min_y
         self.min_x = min_x
+
+    def set_epsg(self, epsg):
+        self.epsg = epsg
 
     def __setitem__(self, key, value):
         # @todo have to reform the deltas in the history like insert does.  Maybe a "reform" function is needed.
@@ -146,6 +150,7 @@ class RasterHistory(History):
         arr = numpy.full((len(LayersEnum)-1, res_x, res_y), numpy.nan)  # don't supply mask
         raster_val = RasterData(MemoryStorage(), arr)
         raster_val.set_corners(self.min_x, self.min_y, self.max_x, self.max_y)
+        raster_val.set_epsg(self.epsg)
         return raster_val
 
     def __getitem__(self, key):
@@ -165,6 +170,7 @@ class RasterHistory(History):
             for delta_idx in range(len(self.history) - 2, key-1, -1):
                 current_val = current_val.apply_delta(self.history[delta_idx])
             current_val.set_corners(self.min_x, self.min_y, self.max_x, self.max_y)
+            current_val.set_epsg(self.epsg)
             return current_val
 
     def insert(self, key, value):

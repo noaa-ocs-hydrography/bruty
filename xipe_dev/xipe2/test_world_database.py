@@ -1,5 +1,6 @@
 import pathlib
 import os
+import shutil
 
 import pytest
 import numpy
@@ -152,31 +153,43 @@ def test_add_data(history_db):
         fill_tile_history(history)
 
 def test_pbc19_tile_4():
-    db = WorldDatabase(UTMTileBackend(32619, RasterHistory, DiskHistory, TiffStorage, data_dir.joinpath('tile4_utm_db')))
+    use_dir = data_dir.joinpath('tile4_utm_db')
+    if os.path.exists(use_dir):
+        shutil.rmtree(use_dir)
+    db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+
     from pyproj import Transformer, CRS
     input_crs = CRS.from_epsg(4326)
     output_crs = CRS.from_epsg(26919)
     georef_transformer = Transformer.from_crs(input_crs, output_crs, always_xy=True)
+    if False:
+        w, n = 288757.22, 4561186.99
+        e, s = 297025.15, 4547858.16
+        db.insert_survey_array(numpy.array(([w, e], [n, s], [45, 33], [2, 2], [10, 10], [0, 0])), r"C:\Data\nbs\PBC19_Tile4_surveys\H12700_MB_2m_MLLW_2of3.bag_corners")
+        # # should be NW in tile 3519,4141 and SE in 3541,4131 for UTM 19
+        raise Exception("stopping")
+    for bag_file in [r"C:\Data\nbs\PBC19_Tile4_surveys\H12700_MB_2m_MLLW_2of3.bag",
+                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12700_MB_4m_MLLW_3of3.bag",
+                     r"C:\Data\nbs\PBC19_Tile4_surveys\RI_16_BHR_20190417_BD_2019_023_FULL_4m_interp.bag",
+                     r"C:\Data\nbs\PBC19_Tile4_surveys\RI_17_GSP_20190418_BD_2019_022_FULL_4m_interp.bag",
+                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12009_MB_2m_MLLW_1of3.bag",
+                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12009_MB_2m_MLLW_2of3.bag",
+                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12009_MB_2m_MLLW_3of3.bag",
+                     # r"C:\Data\nbs\PBC19_Tile4_surveys\H12010_MB_VR_MLLW.bag",
+                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12023_MB_2m_MLLW_2of3.bag",
+                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12023_MB_50cm_MLLW_1of3.bag",
+                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12023_VB_4m_MLLW_3of3.bag",
+                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12700_MB_1m_MLLW_1of3.bag",]:
+        print('processsing grid', bag_file)
+        db.insert_survey_gdal(bag_file)
 
     for txt_file in [r"C:\Data\nbs\PBC19_Tile4_surveys\D00111.csar.du.txt",
                      r"C:\Data\nbs\PBC19_Tile4_surveys\H06443.csar.du.txt",
                      r"C:\Data\nbs\PBC19_Tile4_surveys\H08615.csar.du.txt",
                      r"C:\Data\nbs\PBC19_Tile4_surveys\F00363.csar.du.txt",
                      r"C:\Data\nbs\PBC19_Tile4_surveys\H06442.csar.du.txt",]:
+        print('processsing txt', txt_file)
         db.insert_txt_survey(txt_file, transformer=georef_transformer)
-    for csar_file in [r"C:\Data\nbs\PBC19_Tile4_surveys\H12700_MB_2m_MLLW_2of3.bag",
-                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12700_MB_4m_MLLW_3of3.bag",
-                      r"C:\Data\nbs\PBC19_Tile4_surveys\RI_16_BHR_20190417_BD_2019_023_FULL_4m_interp.bag",
-                      r"C:\Data\nbs\PBC19_Tile4_surveys\RI_17_GSP_20190418_BD_2019_022_FULL_4m_interp.bag",
-                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12009_MB_2m_MLLW_1of3.bag",
-                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12009_MB_2m_MLLW_2of3.bag",
-                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12009_MB_2m_MLLW_3of3.bag",
-                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12010_MB_VR_MLLW.bag",
-                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12023_MB_2m_MLLW_2of3.bag",
-                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12023_MB_50cm_MLLW_1of3.bag",
-                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12023_VB_4m_MLLW_3of3.bag",
-                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12700_MB_1m_MLLW_1of3.bag",]:
-        db.insert_survey_grid(csar_file)
 
 # importlib.reload(tile_calculations)
 # g = tile_calculations.GlobalGeodetic(zoom=2); f=g.xy_to_tile; print(f(-100, 40)); print(f(100, -40)); print(f(182, -91))

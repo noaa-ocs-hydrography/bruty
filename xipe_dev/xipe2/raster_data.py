@@ -3,7 +3,7 @@ import enum
 import numpy
 from collections.abc import Sequence
 
-from osgeo import gdal
+from osgeo import gdal, osr
 
 from xipe_dev.xipe2.abstract import VABC, abstractmethod
 
@@ -70,8 +70,8 @@ class TiffStorage(Storage):
         del dataset
         return numpy.array(array_list)
     def set(self, data):
+        self.set_metadata(data.get_metadata())  # @todo set metadata first, it gets used in set_arrays for writing tiff, maybe should move this to meta!
         self.set_arrays(data.get_arrays(ALL_LAYERS), ALL_LAYERS)
-        self.set_metadata(data.get_metadata())
     def get_metadata(self):
         # @todo implement metadata
         print("metadata not supported yet")
@@ -85,7 +85,32 @@ class TiffStorage(Storage):
         else:
             driver = gdal.GetDriverByName('GTiff')
             # dataset = driver.CreateDataSource(self.path)
-            dataset = driver.Create(str(self.path), xsize=arrays.shape[2], ysize=arrays.shape[1], bands=len(LayersEnum), eType=gdal.GDT_Float32)
+            dataset = driver.Create(str(self.path), xsize=arrays.shape[2], ysize=arrays.shape[1], bands=len(LayersEnum), eType=gdal.GDT_Float32,
+                                    options=['COMPRESS=LZW'])
+            meta = self.get_metadata()
+            try:
+                min_x = meta['min_x']
+                min_y = meta['min_y']
+                max_x = meta['max_x']
+                max_y = meta['max_y']
+                dx = (max_x - min_x) / arrays.shape[1]
+                dy = (max_y - min_y) / arrays.shape[2]
+                epsg = meta['epsg']
+                gt = [min_x, dx, 0, min_y, 0, dy]
+
+                # Set location
+                dataset.SetGeoTransform(gt)
+
+                # Get raster projection
+                srs = osr.SpatialReference()
+                srs.ImportFromEPSG(epsg)
+                dest_wkt = srs.ExportToWkt()
+
+                # Set projection
+                dataset.SetProjection(dest_wkt)
+            except KeyError:
+                pass  # doesn't have full georeferencing
+
             for band_index in LayersEnum:
                 band = dataset.GetRasterBand(band_index + 1)
                 if band_index == 0:  # tiff only supports one value of nodata, supress the warning
@@ -162,6 +187,11 @@ class RasterData(VABC):
         meta['max_y'] = max_y
         self.set_metadata(meta)
 
+    def set_epsg(self, val):
+        self.set_metadata_element('epsg', val)
+    def get_epse(self):
+        return self.get_metadata()['epsg']
+
     def get_corners(self):
         meta = self.get_metadata()
         return meta['min_x'], meta['min_y'], meta['max_x'], meta['max_y']
@@ -184,8 +214,8 @@ class RasterData(VABC):
     def xy_to_rc_using_dims(self, nrows, ncols, x, y):
         """Convert from real world x,y to row, col indices given the shape of the array or tile to be used"""
         min_x, min_y, max_x, max_y = self.get_corners()
-        col = numpy.array(nrows * (x - min_x) / self.width, numpy.int32)
-        row = numpy.array(ncols * (y - min_y) / self.height, numpy.int32)
+        col = numpy.array(ncols * (x - min_x) / self.width, numpy.int32)
+        row = numpy.array(nrows * (y - min_y) / self.height, numpy.int32)
         return row, col
 
     def xy_to_rc(self, x, y):
