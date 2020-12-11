@@ -8,7 +8,7 @@ import numpy
 from xipe_dev.xipe2.history import DiskHistory, MemoryHistory, RasterHistory
 from xipe_dev.xipe2.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
 from xipe_dev.xipe2.world_raster_database import LatLonBackend, GoogleLatLonTileBackend, UTMTileBackend, GoogleMercatorTileBackend, TMSMercatorTileBackend
-from xipe_dev.xipe2.world_raster_database import WorldDatabase
+from xipe_dev.xipe2.world_raster_database import WorldDatabase, onerr, get_geotransform
 
 from xipe_dev.xipe2.test_data import master_data, data_dir
 
@@ -155,13 +155,10 @@ def test_add_data(history_db):
 def test_pbc19_tile_4():
     use_dir = data_dir.joinpath('tile4_utm_db')
     if os.path.exists(use_dir):
-        shutil.rmtree(use_dir)
+        shutil.rmtree(use_dir, onerror=onerr)
+
     db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
 
-    from pyproj import Transformer, CRS
-    input_crs = CRS.from_epsg(4326)
-    output_crs = CRS.from_epsg(26919)
-    georef_transformer = Transformer.from_crs(input_crs, output_crs, always_xy=True)
     if False:
         w, n = 288757.22, 4561186.99
         e, s = 297025.15, 4547858.16
@@ -183,6 +180,7 @@ def test_pbc19_tile_4():
         print('processsing grid', bag_file)
         db.insert_survey_gdal(bag_file)
 
+    georef_transformer = get_geotransform(4326, 26919)
     for txt_file in [r"C:\Data\nbs\PBC19_Tile4_surveys\D00111.csar.du.txt",
                      r"C:\Data\nbs\PBC19_Tile4_surveys\H06443.csar.du.txt",
                      r"C:\Data\nbs\PBC19_Tile4_surveys\H08615.csar.du.txt",

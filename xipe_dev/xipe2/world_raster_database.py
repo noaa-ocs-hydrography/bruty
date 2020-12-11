@@ -2,6 +2,7 @@ import os
 import pathlib
 import shutil
 import tempfile
+import time
 
 import numpy
 
@@ -10,11 +11,39 @@ import rasterio.crs
 from osgeo import gdal, osr
 
 from HSTB.drivers import bag
-from xipe_dev.xipe2.raster_data import LayersEnum, RasterData
+from xipe_dev.xipe2.raster_data import LayersEnum, RasterData, affine, inv_affine
 from xipe_dev.xipe2.abstract import VABC, abstractmethod
 from xipe_dev.xipe2.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles
 
 geo_debug = False
+
+
+def get_geotransform(epsg1, epsg2):
+    if epsg1 != epsg2:
+        input_crs = CRS.from_epsg(epsg1)
+        output_crs = CRS.from_epsg(epsg2)
+        georef_transformer = Transformer.from_crs(input_crs, output_crs, always_xy=True)
+    else:
+        georef_transformer = None
+    return georef_transformer
+
+
+def onerr(func, path, info):
+    r"""This is a helper function for shutil.rmtree to take care of something happening on (at least) my local machine.
+    It seems that the Windows system deletes don't remove the files immediately and the directory isn't empty when rmdir is called.
+    Running the function again will work, so adding a delay to see if the system catches up.
+    If a file handle is actually open then the call below will fail and the exception will be raised, just a bit slower.
+        File "C:\PydroTrunk\Miniconda36\envs\Pydro38_Test\lib\shutil.py", line 617, in _rmtree_unsafe
+            os.rmdir(path)
+        OSError: [WinError 145] The directory is not empty: 'C:/GIT_Repos/nbs/xipe_dev/xipe2/test_data_output/tile4_utm_db_grid/tmp1hbjeurd\\3533'
+    """
+    print("rmdir error, pausing")
+    time.sleep(1)
+    try:
+        func(path)
+    except Exception:
+        raise
+
 
 class WorldTilesBackend(VABC):
     """ Class to control Tile addressing.
@@ -94,6 +123,7 @@ class WorldTilesBackend(VABC):
     def get_tile_history(self, x, y):
         tx, ty = self.tile_scheme.xy_to_tile_index(x, y)
         return self.get_tile_history_by_index(tx, ty)
+
     def str_to_tile_index(self, strx, stry):
         """Inverses the tile_index_to_str naming"""
         return int(strx), int(stry)
@@ -126,7 +156,7 @@ class WorldTilesBackend(VABC):
 
     def iter_tiles(self, x, y, x2, y2):
         for tx, ty in self.get_tiles_indices(x, y, x2, y2):
-            yield self.get_tile_history_by_index(tx, ty)
+            yield tx, ty, self.get_tile_history_by_index(tx, ty)
 
     def get_tiles_indices(self, x, y, x2, y2):
         """ Get the indices of tiles that fall within rectangle specified by x,y to x2,y2 as a numpy array of tuples.
@@ -175,7 +205,6 @@ class WorldTilesBackend(VABC):
         xx, yy = numpy.meshgrid(xs, ys)
         return xx, yy
 
-
     def get_tiles_index_sparse(self, x, y, x2, y2):
         """ Get the indices of tiles that fall within rectangle specified by x,y to x2,y2 as a sparse list.
         Each entry of the returned list is the tx or ty index for a tile.
@@ -198,14 +227,16 @@ class WorldTilesBackend(VABC):
         """
         tx, ty = self.tile_scheme.xy_to_tile_index(x, y)
         tx2, ty2 = self.tile_scheme.xy_to_tile_index(x2, y2)
-        xs = list(range(min(tx, tx2), max(tx, tx2) +1))
-        ys = list(range(min(ty, ty2), max(ty, ty2) +1))
+        xs = list(range(min(tx, tx2), max(tx, tx2) + 1))
+        ys = list(range(min(ty, ty2), max(ty, ty2) + 1))
         return xs, ys
+
 
 class LatLonBackend(WorldTilesBackend):
     def __init__(self, history_class, storage_class, data_class, data_path, zoom_level=13):
         tile_scheme = LatLonTiles(zoom=zoom_level)
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
+
 
 class GoogleLatLonTileBackend(WorldTilesBackend):
     # https://gist.githubusercontent.com/maptiler/fddb5ce33ba995d5523de9afdf8ef118/raw/d7565390d2480bfed3c439df5826f1d9e4b41761/globalmaptiles.py
@@ -213,76 +244,81 @@ class GoogleLatLonTileBackend(WorldTilesBackend):
         tile_scheme = GoogleTilesLatLon(zoom=zoom_level)
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
 
+
 class UTMTileBackend(WorldTilesBackend):
     def __init__(self, utm_epsg, history_class, storage_class, data_class, data_path, zoom_level=13):
         tile_scheme = UTMTiles(zoom=zoom_level)
         tile_scheme.epsg = utm_epsg
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
 
+
 class GoogleMercatorTileBackend(WorldTilesBackend):
     def __init__(self, history_class, storage_class, data_class, data_path, zoom_level=13):
         tile_scheme = GoogleTilesMercator(zoom=zoom_level)
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
+
 
 class TMSMercatorTileBackend(WorldTilesBackend):
     def __init__(self, history_class, storage_class, data_class, data_path, zoom_level=13):
         tile_scheme = TMSTilesMercator(zoom=zoom_level)
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
 
+
 class WMTileBackend(WorldTilesBackend):
     def __init__(self, storage, zoom_level=13):
         super().__init__(storage)
 
 
-class Lock:
-    def __init__(self, storage, id):
-        pass
-    def aquire(self, timeout=0):
-        pass
-    def release(self):
-        pass
-    def is_active(self):
-        pass
-    def __del__(self):
-        self.release()
-    def notify(self):
-        pass
+# @todo - Implement locks
+# class Lock:
+#     def __init__(self, storage, idn):
+#         pass
+#     def aquire(self, timeout=0):
+#         pass
+#     def release(self):
+#         pass
+#     def is_active(self):
+#         pass
+#     def __del__(self):
+#         self.release()
+#     def notify(self):
+#         pass
+# class ReadLock(Lock):  # actively being read
+#     pass
+# class WriteLock(Lock):  # actively being modified
+#     pass
+# class PendingReadLock(WriteLock):  # something wants to read but there are active/pending writes
+#     pass
+# class PendingWriteLock(WriteLock):  # something wants to modify but there are active reads
+#     pass
+# class Storage(VABC):
+#     """ Class to control the metadata associated with a WorldDatabaseBackend.
+#     This would store things like read/write/pending_write locks and hashes etc per Tile id.
+#     """
+#     @abstractmethod
+#     def readable_tile(self, idnum):
+#         # lock the file for reading
+#         pass
+#
+#     @abstractmethod
+#     def writeable_tile(self, tile):
+#         # request lock for writing
+#         pass
+#
+#     def get_read_lock(self, idnum):
+#         pass
+#
+#     def get_write_lock(self, idnum):
+#         pass
 
+# @todo Implement database of files, locks, processing states etc
+# class PostgresStorage(Storage):
+#     pass
+# class SQLite(Storage):
+#     pass
+# class PickleStorage(Storage):  # this would only work for single instances
+#     pass
 
-class ReadLock(Lock):  # actively being read
-    pass
-class WriteLock(Lock):  # actively being modified
-    pass
-class PendingReadLock(WriteLock):  # something wants to read but there are active/pending writes
-    pass
-class PendingWriteLock(WriteLock):  # something wants to modify but there are active reads
-    pass
-
-
-class Storage(VABC):
-    """ Class to control the metadata associated with a WorldDatabaseBackend.
-    This would store things like read/write/pending_write locks and hashes etc per Tile id.
-    """
-    @abstractmethod
-    def readable_tile(self, id):
-        # lock the file for reading
-        pass
-
-    @abstractmethod
-    def writeable_tile(self, tile):
-        # request lock for writing
-        pass
-    def get_read_lock(self, id):
-        pass
-    def get_write_lock(self, id):
-        pass
-
-class PostgresStorage(Storage):
-    pass
-class SQLite(Storage):
-    pass
-class PickleStorage(Storage):  # this would only work for single instances
-    pass
 
 class WorldDatabase(VABC):
     """ Class to control Tiles that cover the Earth.
@@ -300,6 +336,7 @@ class WorldDatabase(VABC):
     def __init__(self, backend):
         self.db = backend
         self.next_contributor = 0  # fixme: this is a temporary hack until we have a database of surveys with unique ids available
+
     def insert_txt_survey(self, path_to_survey_data, survey_score=100, flags=0, format=None, transformer=None):
         if not format:
             format = [('y', 'f8'), ('x', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')]
@@ -331,7 +368,8 @@ class WorldDatabase(VABC):
         for i_tile, (tx, ty) in enumerate(tile_list):
             print(f'processing tile {i_tile} of {len(tile_list)}')
             pts = survey_data[:, numpy.logical_and(txs == tx, tys == ty)]
-            sorted_pts = pts[:, numpy.argsort(pts[2])[::-1]]  # sort from deepest to shoalest
+            # @todo sort based on score then on depth so the shoalest top score is kept
+            sorted_pts = pts[:, numpy.argsort(-pts[2])]  # sort from deepest to shoalest (note the negative sign on pts[2])
             tile_history = accumulation_db.get_tile_history_by_index(tx, ty)
             try:
                 raster_data = tile_history[-1]
@@ -378,7 +416,6 @@ class WorldDatabase(VABC):
             #     #   We are not trying to implement CUBE or CHRT here, just pick a value and shoalest is safest
             #     # raster_data = raster_data[]
 
-
         self.next_contributor += 1
     def init_tile(self, tx, ty):
         # @todo lookup the resolution to use by default.
@@ -394,14 +431,8 @@ class WorldDatabase(VABC):
         epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
         # fixme - do coordinate transforms correctly
         print("@todo - do transforms correctly wirht proj/vdatum etc")
-        if epsg != self.db.epsg:
-            input_crs = CRS.from_epsg(epsg)
-            output_crs = CRS.from_epsg(self.db.utm_epsg)
-            georef_transformer = Transformer.from_crs(input_crs, output_crs, always_xy=True)
-        else:
-            georef_transformer = None
+        georef_transformer = get_geotransform(epsg, self.db.epsg)
 
-        # @todo test block read and coordinate transforms
         d_val = ds.GetRasterBand(1)  # elevation or depth band
         u_val = ds.GetRasterBand(2)  # uncertainty band
         block_sizes = d_val.GetBlockSize()
@@ -414,7 +445,7 @@ class WorldDatabase(VABC):
         storage_db = self.db.make_accumulation_db(temp_path)
         # read the data array in blocks
         # for ic in tqdm(range(0, col_size, col_block_size), mininterval=.7):
-        if False:
+        if geo_debug and False:
             col_block_size = col_size
             row_block_size = row_size
         for ic in range(0, col_size, col_block_size):
@@ -430,7 +461,7 @@ class WorldDatabase(VABC):
                 # Get the depth data as an array
                 uncert = u_val.ReadAsArray(ic, ir, cols, rows)
                 data = d_val.ReadAsArray(ic, ir, cols, rows)  # depth or elevation data
-                if geo_debug:  # draw an X in each block
+                if geo_debug and False:  # draw an X in each block
                     diag = numpy.arange(min(data.shape), dtype=numpy.int32)
                     rdiag = diag[::-1]
                     data[diag, diag] = 55
@@ -446,7 +477,7 @@ class WorldDatabase(VABC):
                 if pts.size > 0:
                     x = x0 + pts[1] * dxx + pts[0] * dyx
                     y = y0 + pts[1] * dxy + pts[0] * dyy
-                    if False:
+                    if geo_debug and False:
                         s_pts = numpy.array((x, y, pts[0], pts[1], pts[2]))
                         txs, tys = storage_db.tile_scheme.xy_to_tile_index(x, y)
                         isle_tx, isle_ty = 3532, 4141
@@ -465,22 +496,140 @@ class WorldDatabase(VABC):
         self.db.append_accumulation_db(storage_db)
         shutil.rmtree(storage_db.data_path)
 
+    def export_area(self, fname, x1, y1, x2, y2, res, target_epsg=None, driver="GTiff",
+                    layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR)):
+        # 1) Create a single tif tile that covers the area desired
+        if not target_epsg:
+            target_epsg = self.db.tile_scheme.epsg
+        geotransform = get_geotransform(self.db.tile_scheme.epsg, target_epsg)
 
-    def export_area(self, area):
-        pass
+        try:
+            dx, dy = res
+        except TypeError:
+            dx = dy = res
+
+        dataset = make_gdal_dataset_area(fname, len(layers), x1, y1, x2, y2, dx, dy, target_epsg, driver)
+        # probably won't export the score layer but we need it when combining data into the export area
+        dataset_score = make_gdal_dataset_area(fname, 1, x1, y1, x2, y2, dx, dy, target_epsg, driver)
+
+        x0, dxx, dyx, y0, dxy, dyy = dataset.GetGeoTransform()
+        score_band = dataset_score.GetRasterBand(1)
+        max_cols, max_rows = score_band.XSize, score_band.YSize
+
+        # 2) Get the master db tile indices that the area overlaps and iterate them
+        for txi, tyi, tile_history in self.db.iter_tiles(x1, y1, x2, y2):
+            try:
+                raster_data = tile_history[-1]
+            except IndexError:  # empty tile, skip to the next
+                continue
+            # 3) Read the single tif sub-area as an array that covers this tile being processed
+            tx1, ty1, tx2, ty2 = tile_history.get_corners()
+            r, c = inv_affine(numpy.array([tx1, tx2]), numpy.array([ty1, ty2]), x0, dxx, dyx, y0, dxy, dyy)
+            start_col, start_row = max(0, int(min(c))), max(0, int(min(r)))
+            block_cols, block_rows = int(numpy.abs(numpy.diff(c))) + 1, int(numpy.abs(numpy.diff(r))) + 1
+            if block_cols + start_col > max_cols:
+                block_cols = max_cols - start_col
+            if block_rows + start_row > max_rows:
+                block_rows = max_rows - start_row
+
+            export_sub_area_scores = dataset_score.ReadAsArray(start_col, start_row, block_cols, block_rows)
+            export_sub_area = dataset.ReadAsArray(start_col, start_row, block_cols, block_rows)
+            # 4) Use the db.tile_scheme function to convert points from the tiles to x,y
+            # fixme - score and depth have same value, read bug?
+            tile_score = raster_data.get_arrays(LayersEnum.SCORE)
+            tile_depth = raster_data.get_arrays(LayersEnum.ELEVATION)
+            tile_layers = raster_data.get_arrays(layers)
+            tile_r, tile_c = numpy.indices(tile_layers.shape[1:])
+            tile_x, tile_y = raster_data.rc_to_xy_using_dims(tile_score.shape[0], tile_score.shape[1], tile_r, tile_c)
+            if geotransform:  # convert to target epsg
+                tile_x, tile_y = geotransform(tile_x, tile_y)
+            # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
+            # 6) Sort on score in case multiple points go into a position that the right value is retained
+            # sort based on score then on depth so the shoalest top score is kept
+            raise Exception("need to make into 1 dimensional list for sorting etc)
+            sorted_ind = numpy.lexsort((-tile_depth, tile_score))
+            sorted_pts = tile_layers[:, sorted_ind]
+            sorted_score = tile_score[sorted_ind]
+            sorted_tile_x = tile_x[sorted_ind]
+            sorted_tile_y = tile_y[sorted_ind]
+            # 7) Use affine geotransform convert x,y into the i,j for the exported area
+            export_row, export_col = inv_affine(sorted_tile_x, sorted_tile_y, x0, dxx, dyx, y0, dxy, dyy)
+            export_row -= r[0]  # adjust to the sub area in memory
+            export_col -= c[0]
+            # 8) Write the data into the export (single) tif.
+
+            # replace x,y with row, col for the points
+            replace_cells = numpy.logical_or(sorted_score >= export_sub_area_scores[export_row, export_col],
+                                             numpy.isnan(export_sub_area_scores[export_row, export_col]))
+            replacements = sorted_pts[:, replace_cells]
+            ri = export_row[replace_cells]
+            rj = export_col[replace_cells]
+            export_sub_area[:, ri, rj] = replacements
+            export_sub_area_scores[ri, rj] = sorted_score[replace_cells]
+
+            pass
+
     def export_at_date(self, area, date):
         pass
+
     def remove_survey(self, survey_id):
         pass
+
     def revise_survey(self, survey_id, survey_data):
         pass
+
     def find_contributing_surveys(self, area):
         pass
+
     def find_area_affected_by_survey(self, survey_data):
         pass
+
     def change_survey_score(self, survey_id, new_score):
         pass
+
     def __cleanup_disk(self):
         pass
 
 
+def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg, driver="GTiff"):
+    driver = gdal.GetDriverByName(driver)
+    dataset = driver.Create(str(fname), xsize=shape_x, ysize=shape_y, bands=bands, eType=gdal.GDT_Float32,
+                            options=['COMPRESS=LZW'])
+
+    # Set location
+    gt = [min_x, res_x, 0, max_y, 0, -res_y]  # north up
+    dataset.SetGeoTransform(gt)
+
+    # Get raster projection
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(epsg)
+    dest_wkt = srs.ExportToWkt()
+
+    # Set projection
+    dataset.SetProjection(dest_wkt)
+    band = dataset.GetRasterBand(1)
+    band.SetNoDataValue(numpy.nan)
+    del band
+    return dataset
+
+
+def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg, driver="GTiff"):
+    # fixme: the min/max need to be adjusted to account for them not fitting an exact number of pixels.
+    #  think about passing in 0, 0, 5, 5, 4, 4 -- max_y should be 8 not 5
+    min_x = min(x1, x2)
+    min_y = min(y1, y2)
+    max_x = max(x1, x2)
+    max_y = max(y1, y2)
+    shape_x = int(numpy.ceil((max_x - min_x) / res_x))
+    shape_y = int(numpy.ceil((max_y - min_y) / res_y))
+    dataset = make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg, driver)
+    return dataset
+
+if __name__ == "__main__":
+    from xipe_dev.xipe2.history import DiskHistory, MemoryHistory, RasterHistory
+    from xipe_dev.xipe2.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
+    from xipe_dev.xipe2.test_data import master_data, data_dir
+
+    use_dir = data_dir.joinpath('tile4_utm_db_broke')
+    db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+    db.export_area(use_dir.joinpath("export_tile4.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)

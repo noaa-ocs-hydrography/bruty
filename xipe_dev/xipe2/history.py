@@ -131,6 +131,9 @@ class RasterHistory(History):
         self.min_y = min_y
         self.min_x = min_x
 
+    def get_corners(self):
+        return self.min_x, self.min_y, self.max_x, self.max_y
+
     def set_epsg(self, epsg):
         self.epsg = epsg
 
