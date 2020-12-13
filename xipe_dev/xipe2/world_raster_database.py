@@ -338,6 +338,27 @@ class WorldDatabase(VABC):
         self.next_contributor = 0  # fixme: this is a temporary hack until we have a database of surveys with unique ids available
 
     def insert_txt_survey(self, path_to_survey_data, survey_score=100, flags=0, format=None, transformer=None):
+        """ Reads a text file and inserts into the tiled database.
+        The format parameter is passed to numpy.loadtxt and needs to have names of x, y, depth, uncertainty.
+
+        Parameters
+        ----------
+        path_to_survey_data
+            full path filename to read using numpy
+        survey_score
+            score to apply to data, if not a column in the data
+        flags
+            flags to apply to data, if not a column in the data
+        format
+            numpy dtype format to pass to numpy.loadtxt, default is [('y', 'f8'), ('x', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')]
+        transformer
+            Optional function used to transform from x,y in the file to the coordinate system of the database.
+            It will be called as new_x, new_y = func( x, y ).
+
+        Returns
+        -------
+        None
+        """
         if not format:
             format = [('y', 'f8'), ('x', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')]
         data = numpy.loadtxt(path_to_survey_data, dtype=format)
@@ -352,6 +373,23 @@ class WorldDatabase(VABC):
         self.insert_survey_array(numpy.array((x, y, depth, uncertainty, score, flags)), path_to_survey_data)
 
     def insert_survey_array(self, input_survey_data, contrib_name, accumulation_db=None):
+        """ Insert a numpy array (or list of lists) of data into the database.
+
+        Parameters
+        ----------
+        input_survey_data
+            numpy array or list of lists in this configuration (x, y, depth, uncertainty, score, flags)
+        contrib_name
+            pathname or contributor name to associate with this data.
+        accumulation_db
+            If multiple calls will be made from the same survey then an accumulation database can be supplied.
+            This will keep the contributor from having multiple records in the history.
+            A subsequent call to db.append_accumulation_db would be needed to transfer the data into this database.
+
+        Returns
+        -------
+        None
+        """
         # fixme for survey_data - use pandas?  structured arrays?
 
         # @todo Allow for pixel sizes, right now treating as point rather than say 8m or 4m coverages
@@ -426,6 +464,22 @@ class WorldDatabase(VABC):
         return 512, 512
 
     def insert_survey_gdal(self, path_to_survey_data, survey_score=100, flag=0):
+        """ Insert a gdal readable dataset into the database.
+        Currently works for BAG and probably geotiff.
+        Parameters
+        ----------
+        path_to_survey_data
+            full path to the gdal readable file
+        survey_score
+            score to use with the survey when combining into the database
+        flag
+            flag to apply when inserting the survey into the database
+
+        Returns
+        -------
+        None
+
+        """
         ds = gdal.Open(path_to_survey_data)
         x0, dxx, dyx, y0, dxy, dyy = ds.GetGeoTransform()
         epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
@@ -498,6 +552,34 @@ class WorldDatabase(VABC):
 
     def export_area(self, fname, x1, y1, x2, y2, res, target_epsg=None, driver="GTiff",
                     layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR)):
+        """ Retrieves an area from the database at the requested resolution.
+
+        Parameters
+        ----------
+        fname
+            path to export to
+        x1
+            a corner x coordinate
+        y1
+            a corner y coordinate
+        x2
+            a corner x coordinate
+        y2
+            a corner y coordinate
+        res
+            Resolution to export with.  If a tuple is supplied it is read as (res_x, res_y) while a single number will be used for x and y resolutions
+        target_epsg
+            epsg of the coordinate system to export into
+        driver
+            gdal driver name to use
+        layers
+            Layers to extract from the database into the output file.  Defaults to Elevation, Uncertainty and Contributor
+
+        Returns
+        -------
+        None
+
+        """
         # 1) Create a single tif tile that covers the area desired
         if not target_epsg:
             target_epsg = self.db.tile_scheme.epsg
@@ -518,6 +600,8 @@ class WorldDatabase(VABC):
 
         # 2) Get the master db tile indices that the area overlaps and iterate them
         for txi, tyi, tile_history in self.db.iter_tiles(x1, y1, x2, y2):
+            # if txi != 3504 or tyi != 4155:
+            #     continue
             try:
                 raster_data = tile_history[-1]
             except IndexError:  # empty tile, skip to the next
@@ -536,38 +620,48 @@ class WorldDatabase(VABC):
             export_sub_area = dataset.ReadAsArray(start_col, start_row, block_cols, block_rows)
             # 4) Use the db.tile_scheme function to convert points from the tiles to x,y
             # fixme - score and depth have same value, read bug?
-            tile_score = raster_data.get_arrays(LayersEnum.SCORE)
-            tile_depth = raster_data.get_arrays(LayersEnum.ELEVATION)
+            tile_score = raster_data.get_arrays(LayersEnum.SCORE)[0]
+            tile_depth = raster_data.get_arrays(LayersEnum.ELEVATION)[0]
             tile_layers = raster_data.get_arrays(layers)
             tile_r, tile_c = numpy.indices(tile_layers.shape[1:])
             tile_x, tile_y = raster_data.rc_to_xy_using_dims(tile_score.shape[0], tile_score.shape[1], tile_r, tile_c)
             if geotransform:  # convert to target epsg
                 tile_x, tile_y = geotransform(tile_x, tile_y)
+
             # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
             # 6) Sort on score in case multiple points go into a position that the right value is retained
             # sort based on score then on depth so the shoalest top score is kept
-            raise Exception("need to make into 1 dimensional list for sorting etc)
-            sorted_ind = numpy.lexsort((-tile_depth, tile_score))
-            sorted_pts = tile_layers[:, sorted_ind]
-            sorted_score = tile_score[sorted_ind]
-            sorted_tile_x = tile_x[sorted_ind]
-            sorted_tile_y = tile_y[sorted_ind]
+            pts = numpy.array((tile_x, tile_y, tile_score, tile_depth, *tile_layers)).reshape(4+len(layers), -1)
+            pts = pts[:, ~numpy.isnan(pts[2])]  # remove empty cells (no score = empty)
+            sorted_ind = numpy.lexsort((-pts[3], pts[2]))
+            sorted_pts = pts[:, sorted_ind]
             # 7) Use affine geotransform convert x,y into the i,j for the exported area
-            export_row, export_col = inv_affine(sorted_tile_x, sorted_tile_y, x0, dxx, dyx, y0, dxy, dyy)
-            export_row -= r[0]  # adjust to the sub area in memory
-            export_col -= c[0]
+            export_row, export_col = inv_affine(sorted_pts[0], sorted_pts[1], x0, dxx, dyx, y0, dxy, dyy)
+            export_row -= start_row  # adjust to the sub area in memory
+            export_col -= start_col
+            # clip to the edges of the export area since our db tiles can cover the earth [0:block_rows-1, 0:block_cols]
+            row_out_of_bounds = numpy.logical_or(export_row < 0, export_row >= block_rows)
+            col_out_of_bounds = numpy.logical_or(export_col < 0, export_col >= block_cols)
+            out_of_bounds = numpy.logical_or(row_out_of_bounds, col_out_of_bounds)
+            if out_of_bounds.any():
+                sorted_pts = sorted_pts[:, ~out_of_bounds]
+                export_row = export_row[~out_of_bounds]
+                export_col = export_col[~out_of_bounds]
             # 8) Write the data into the export (single) tif.
-
             # replace x,y with row, col for the points
-            replace_cells = numpy.logical_or(sorted_score >= export_sub_area_scores[export_row, export_col],
+            replace_cells = numpy.logical_or(sorted_pts[2] >= export_sub_area_scores[export_row, export_col],
                                              numpy.isnan(export_sub_area_scores[export_row, export_col]))
-            replacements = sorted_pts[:, replace_cells]
+            replacements = sorted_pts[4:, replace_cells]
             ri = export_row[replace_cells]
             rj = export_col[replace_cells]
             export_sub_area[:, ri, rj] = replacements
-            export_sub_area_scores[ri, rj] = sorted_score[replace_cells]
-
-            pass
+            export_sub_area_scores[ri, rj] = sorted_pts[2, replace_cells]
+            for band_num in range(len(layers)):
+                band = dataset.GetRasterBand(band_num + 1)
+                band.WriteArray(export_sub_area[band_num], start_col, start_row)
+            score_band.WriteArray(export_sub_area_scores, start_col, start_row)
+            dataset.FlushCache()
+            dataset_score.FlushCache()
 
     def export_at_date(self, area, date):
         pass
@@ -592,6 +686,38 @@ class WorldDatabase(VABC):
 
 
 def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg, driver="GTiff"):
+    """ Makes a north up gdal dataset with nodata = numpy.nan and LZW compression.
+    Specifying a positive res_y will be input as a negative value into the gdal file,
+    since tif/gdal likes max_y and a negative Y pixel size.
+    i.e. the geotransform in gdal will be stored as [min_x, res_x, 0, max_y, 0, -res_y]
+    Parameters
+    ----------
+    fname
+        filename to create
+    bands
+        list of names of bands in the file
+    min_x
+        minimum X coordinate
+    max_y
+        maximum Y coordinate (because tiff images like to specify max Y and a negative res_y)
+    res_x
+        pixel size in x direction
+    res_y
+        pixel size in y direction
+    shape_x
+        number of pixels in X direction (columns)
+    shape_y
+        number of pixels in Y directions (rows)
+    epsg
+        epsg of the target coordinate system
+    driver
+        gdal driver name of the output file (defaults to geotiff)
+
+    Returns
+    -------
+    gdal.dataset
+
+    """
     driver = gdal.GetDriverByName(driver)
     dataset = driver.Create(str(fname), xsize=shape_x, ysize=shape_y, bands=bands, eType=gdal.GDT_Float32,
                             options=['COMPRESS=LZW'])
@@ -614,6 +740,40 @@ def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, sh
 
 
 def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg, driver="GTiff"):
+    """ Makes a north up gdal dataset with nodata = numpy.nan and LZW compression.
+    Specifying a positive res_y will be input as a negative value into the gdal file,
+    since tif/gdal likes max_y and a negative Y pixel size.
+    i.e. the geotransform in gdal will be stored as [min_x, res_x, 0, max_y, 0, -res_y]
+
+    Calls make_gdal_dataset_size
+    Parameters
+    ----------
+    fname
+        filename to create
+    bands
+        list of names of bands in the file
+    x1
+        an X corner coordinate
+    y1
+        an Y corner coordinate
+    x2
+        an X corner coordinate
+    y2
+        an Y corner coordinate
+    res_x
+        pixel size in x direction
+    res_y
+        pixel size in y direction
+    epsg
+        epsg of the target coordinate system
+    driver
+        gdal driver name of the output file (defaults to geotiff)
+
+    Returns
+    -------
+    gdal.dataset
+
+    """
     # fixme: the min/max need to be adjusted to account for them not fitting an exact number of pixels.
     #  think about passing in 0, 0, 5, 5, 4, 4 -- max_y should be 8 not 5
     min_x = min(x1, x2)
@@ -632,4 +792,4 @@ if __name__ == "__main__":
 
     use_dir = data_dir.joinpath('tile4_utm_db_broke')
     db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
-    db.export_area(use_dir.joinpath("export_tile4.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
+    db.export_area(use_dir.joinpath("export_tile4_d.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
