@@ -12,6 +12,7 @@ from osgeo import gdal, osr
 
 from HSTB.drivers import bag
 from xipe_dev.xipe2.raster_data import LayersEnum, RasterData, affine, inv_affine
+from xipe_dev.xipe2.history import RasterHistory, AccumulationHistory
 from xipe_dev.xipe2.abstract import VABC, abstractmethod
 from xipe_dev.xipe2.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles
 
@@ -83,15 +84,19 @@ class WorldTilesBackend(VABC):
                         tile_history = self.get_tile_history_by_index(tx, ty)
                         try:
                             raster = tile_history[-1]
-                            yield tx, ty, raster
+                            yield tx, ty, raster, tile_history.get_metadata()
                         except IndexError:
                             print("accumulation db made directory but not filled?", ty_dir.path)
 
     def append_accumulation_db(self, accumulation_db):
         # iterate the acculation_db and append the last rasters from that into this db
-        for tx, ty, raster in accumulation_db.iterate_filled_tiles():
+        for tx, ty, raster, meta in accumulation_db.iterate_filled_tiles():
             tile_history = self.get_tile_history_by_index(tx, ty)
             tile_history.append(raster)
+            master_meta = tile_history.get_metadata()
+            contr = master_meta.setdefault("contributors", {})
+            contr.update(meta["contributors"])
+
 
     def make_accumulation_db(self, data_path):
         """ Make a database that has the same layout and types, probably a temporary copy while computing tiles.
@@ -106,7 +111,9 @@ class WorldTilesBackend(VABC):
             WorldTilesBackend instance
 
         """
-        new_db = WorldTilesBackend(self.tile_scheme, self.history_class, self.storage_class, self.data_class, data_path)
+        # if self.history_class is RasterHistory:
+        use_history = AccumulationHistory
+        new_db = WorldTilesBackend(self.tile_scheme, use_history, self.storage_class, self.data_class, data_path)
         return new_db
 
     @property
@@ -325,7 +332,7 @@ class WorldDatabase(VABC):
     Also supplies locking of tiles for read/write.
     All access to the underlying data should go through this class to ensure data on disk is not corrupted.
 
-    There are read and write locks.
+    There are (will be) read and write locks.
     Multiple read requests can be honored at once.
     While a read is happening then a write will have to wait until reads are finished, but a write request lock is created.
     While there is a write request pending no more read requests will be allowed.
@@ -421,7 +428,7 @@ class WorldDatabase(VABC):
                     res_x, res_y = self.init_tile(tx, ty)
                     raster_data = tile_history.make_empty_data(res_x, res_y)
                     make_outlines = raster_data.get_arrays()
-                    if True or geo_debug:  # draw a box around the tile and put a notch in the 0,0 corner
+                    if geo_debug and True:  # draw a box around the tile and put a notch in the 0,0 corner
                         make_outlines[:, :, 0] = 99  # outline around box
                         make_outlines[:, :, -1] = 99
                         make_outlines[:, 0, :] = 99
@@ -445,6 +452,9 @@ class WorldDatabase(VABC):
             rd.set_metadata(raster_data.get_metadata())  # copy the metadata to the new raster
             rd.contributor = contrib_name
             tile_history.append(rd)
+            meta = tile_history.get_metadata()
+            meta.setdefault("contributors", {})[str(self.next_contributor)] = contrib_name  # JSON only allows strings as keys - first tried an integer key which gets weird
+            tile_history.set_metadata(meta)
 
             # for x, y, depth, uncertainty, score, flag in sorted_pts:
             #     # fixme: score should be a lookup into the database so that data/decay is considered correctly
@@ -462,6 +472,56 @@ class WorldDatabase(VABC):
 
         # this should be ~2m when zoom 13 is the zoom level used (zoom 13 = 20m at 256 pix, so 8 times finer)
         return 512, 512
+
+    def insert_survey_vr(self, path_to_survey_data, survey_score=100, flag=0):
+        vr = bag.VRBag(path_to_survey_data)
+        refinement_list = numpy.argwhere(vr.get_valid_refinements())
+        print("@todo - do transforms correctly with proj/vdatum etc")
+        epsg = rasterio.crs.CRS.from_string(vr.srs.ExportToWkt()).to_epsg()
+        georef_transformer = get_geotransform(epsg, self.db.epsg)
+        temp_path = tempfile.mkdtemp(dir=self.db.data_path)
+        storage_db = self.db.make_accumulation_db(temp_path)
+
+        for iref, (ti, tj) in enumerate(refinement_list):
+            refinement = vr.read_refinement(ti, tj)
+            r, c = numpy.indices(refinement.depth.shape)  # make indices into array elements that can be converted to x,y coordinates
+            pts = numpy.array([r, c, refinement.depth, refinement.uncertainty]).reshape(4, -1)
+            pts = pts[:, pts[2] != vr.fill_value]  # remove nodata points
+##
+            bag_supergrid_dx = vr.cell_size_x
+            bag_supergrid_nx = vr.numx
+            bag_supergrid_dy = vr.cell_size_y
+            bag_supergrid_ny = vr.numy
+            bag_llx = vr.minx - bag_supergrid_dx / 2.0  # @todo seems the llx is center of the supergridd cel?????
+            bag_lly = vr.miny - bag_supergrid_dy / 2.0
+
+            # index_start = vr.varres_metadata[ti, tj, "index"]
+            # dimensions_x = vr.varres_metadata[ti, tj, "dimensions_x"]
+            # dimensions_y = vr.varres_metadata[ti, tj, "dimensions_y"]
+            resolution_x = vr.varres_metadata[ti, tj, "resolution_x"]
+            resolution_y = vr.varres_metadata[ti, tj, "resolution_y"]
+            sw_corner_x = vr.varres_metadata[ti, tj, "sw_corner_x"]
+            sw_corner_y = vr.varres_metadata[ti, tj, "sw_corner_y"]
+
+            supergrid_x = tj * bag_supergrid_dx
+            supergrid_y = ti * bag_supergrid_dy
+            refinement_llx = bag_llx + supergrid_x + sw_corner_x - resolution_x / 2.0  # @TODO implies swcorner is to the center and not the exterior
+            refinement_lly = bag_lly + supergrid_y + sw_corner_y - resolution_y / 2.0
+
+##
+            x, y = affine(pts[0], pts[1], refinement_llx, resolution_x, 0, refinement_lly, 0, resolution_y)
+            if georef_transformer:
+                x, y = georef_transformer.transform(x, y)
+            depth = pts[2]
+            uncertainty = pts[3]
+            scores = numpy.full(x.shape, survey_score)
+            flags = numpy.full(x.shape, flag)
+            self.insert_survey_array(numpy.array((x, y, depth, uncertainty, scores, flags)), path_to_survey_data, accumulation_db=storage_db)
+            self.next_contributor -= 1
+        self.next_contributor += 1
+        self.db.append_accumulation_db(storage_db)
+        shutil.rmtree(storage_db.data_path)
+
 
     def insert_survey_gdal(self, path_to_survey_data, survey_score=100, flag=0):
         """ Insert a gdal readable dataset into the database.
@@ -484,7 +544,7 @@ class WorldDatabase(VABC):
         x0, dxx, dyx, y0, dxy, dyy = ds.GetGeoTransform()
         epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
         # fixme - do coordinate transforms correctly
-        print("@todo - do transforms correctly wirht proj/vdatum etc")
+        print("@todo - do transforms correctly with proj/vdatum etc")
         georef_transformer = get_geotransform(epsg, self.db.epsg)
 
         d_val = ds.GetRasterBand(1)  # elevation or depth band
@@ -525,18 +585,19 @@ class WorldDatabase(VABC):
                 r += ir  # adjust the block r,c to the global raster r,c
                 c += ic
                 # pts = numpy.dstack([r, c, data, uncert]).reshape((-1, 4))
-                pts = numpy.array([r, c, data, uncert]).reshape(4,-1)
+                pts = numpy.array([r, c, data, uncert]).reshape(4, -1)
                 pts = pts[:, pts[2] != nodata]  # remove nodata points
                 # pts = pts[:, pts[2] > -18.2]  # reduce points to debug
                 if pts.size > 0:
-                    x = x0 + pts[1] * dxx + pts[0] * dyx
-                    y = y0 + pts[1] * dxy + pts[0] * dyy
+                    x, y = affine(pts[0], pts[1], x0, dxx, dyx, y0, dxy, dyy)
+                    # x = x0 + pts[1] * dxx + pts[0] * dyx
+                    # y = y0 + pts[1] * dxy + pts[0] * dyy
                     if geo_debug and False:
                         s_pts = numpy.array((x, y, pts[0], pts[1], pts[2]))
                         txs, tys = storage_db.tile_scheme.xy_to_tile_index(x, y)
                         isle_tx, isle_ty = 3532, 4141
                         isle_pts = s_pts[:, numpy.logical_and(txs==isle_tx, tys==isle_ty)]
-                        if isle_pts.size >0:
+                        if isle_pts.size > 0:
                             pass
                     if georef_transformer:
                         x, y = georef_transformer.transform(x, y)
@@ -790,6 +851,6 @@ if __name__ == "__main__":
     from xipe_dev.xipe2.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
     from xipe_dev.xipe2.test_data import master_data, data_dir
 
-    use_dir = data_dir.joinpath('tile4_utm_db_broke')
+    use_dir = data_dir.joinpath('tile4_vr_utm_db')
     db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
-    db.export_area(use_dir.joinpath("export_tile4_d.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
+    db.export_area(use_dir.joinpath("export_tile.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)

@@ -1,3 +1,4 @@
+import json
 from collections.abc import MutableSequence
 import pathlib
 import os
@@ -10,6 +11,9 @@ from xipe_dev.xipe2.abstract import VABC
 from xipe_dev.xipe2.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum
 
 class History(VABC, MutableSequence):
+    """ Base class for things that want to act like a list.  Intent is to maintain something that acts like a list and returns/stores
+    instances of the data_class.  Could be derived from to store in memory or on disk or in a database.
+    """
     def __init__(self, data_class, data_path="", prefix="", postfix=""):
         self.data_path = pathlib.Path(data_path)
         self.postfix = postfix
@@ -17,11 +21,25 @@ class History(VABC, MutableSequence):
         self.data_class = data_class
 
     def _abs_index(self, key):
+        """ Returns a positive integer for and index.  If key is a negative number then it computes what the equivalent positive index would be.
+        Parameters
+        ----------
+        key
+            integer index to look up.
+        Returns
+        -------
+
+        """
         if key < 0:
             key = len(self) + key
         return key
 
     def current(self):
+        """ Gets the current object at the top of the stack (i.e. index [-1]
+        Return
+        -------
+        Object at the last position
+        """
         return self[-1]
 
     # @abstractmethod
@@ -41,15 +59,60 @@ class History(VABC, MutableSequence):
 # Would this be safe for operations that 'fail' and need to revert and how to lock so operations don't read from a dataset that is being written to?
 # essentially we need a sparse matrix representation which could be scipy.sparse or zarr
 class DiskHistory(History):
+    """ Store 'data_class' objects to disk located at 'data_path' and allow access to them like a list.
+    """
     def __init__(self, data_class, data_path, prefix="", postfix=""):
+        """ Setup to store data_class objects to disk using the prefix and postfix in the filenames and store them under the directory 'data_path'.
+        Files will be named something like <prefix>_0001_<postfix>.tif
+
+        Parameters
+        ----------
+        data_class
+            Type of data to store, probably RasterData.
+        data_path
+            Location to store files.  Files will be named numerically.
+        prefix
+            prefix the data files stored under data_path.
+        postfix
+            postfix for the files storyed under data_path.
+        """
         super().__init__(data_class, data_path, prefix, postfix)
         os.makedirs(self.data_path, exist_ok=True)
     @property
     def filename_pattern(self):
+        """ Gets the pattern to use to find valid files inside the self.data_path directory.
+
+        Returns
+        -------
+        string to use with regular expression search
+        """
         return f'{self.prefix}_\\d+_{self.postfix}{self.data_class.extension}'
+
     def filename_from_index(self, key):
+        """ Create a filename based on the number 'key'
+
+        Parameters
+        ----------
+        key
+            integer to use to make the file name
+
+        Returns
+        -------
+            string of the full path to the file
+        """
         fname = self.filename_pattern.replace("\\d+", "%06d"%self._abs_index(key))
         return self.data_path.joinpath(fname)
+
+    def get_metadata(self):
+        try:
+            metadata = json.load(open(self.data_path.joinpath("metadata.json")))
+        except FileNotFoundError:
+            metadata = {}
+        return metadata
+
+    def set_metadata(self, meta):
+        json.dump(meta, open(self.data_path.joinpath("metadata.json"), "w"))
+
     def __getitem__(self, key):
         if isinstance(key, (list, tuple)):
             return [self.__getitem__(index) for index in key]
@@ -58,6 +121,7 @@ class DiskHistory(History):
         else:
             fname = self.filename_from_index(key)
             return RasterData(self.data_class(fname))
+
     def __setitem__(self, key, value):
         if isinstance(key, (list, tuple)):
             for i, col_index in enumerate(key):
@@ -69,6 +133,7 @@ class DiskHistory(History):
             fname = self.filename_from_index(key)
             data = self.data_class(fname)
             data.set(value)
+
     def __delitem__(self, key):
         if isinstance(key, (list, tuple)):
             for index in sorted(key):
@@ -83,27 +148,68 @@ class DiskHistory(History):
             os.remove(fname)
             for index in range(key+1, len(self)):
                 os.rename(self.filename_from_index(index), self.filename_from_index(index-1))
+
     def data_files(self):
+        """ Finds all the files in the data_path directory that would match the naming convention
+
+        Returns
+        -------
+        list of string filepaths
+        """
         file_list = os.listdir(self.data_path)
         return [fname for fname in file_list if re.match(self.filename_pattern, fname)]
+
     def __len__(self):
         return len(self.data_files())
+
     def insert(self, key, value):
+        """ Insert an instance into the list of data_class objects.
+        This will rename the existing files and then create a new file at the desired index.
+
+        Parameters
+        ----------
+        key
+            position in the list to insert at
+        value
+            instance to put into the list.
+        Returns
+        -------
+        None
+
+        """
         key = self._abs_index(key)
-        fname = self.filename_from_index(key)
-        try:
-            os.remove(fname)
-        except FileNotFoundError:
-            pass
+        # fname = self.filename_from_index(key)
+        # Rename the existing files from the end to the location desired and then create the new data at the position that was opened up.
         for index in range(len(self) - 1, key - 1, -1):
             os.rename(self.filename_from_index(index), self.filename_from_index(index+1))
+        # put the new data in place
         self.__setitem__(key, value)
 
 
 class MemoryHistory(History):
+    """ Stores data_class objects in memory.  This is basically a thin wrapper around a list.
+    """
     def __init__(self, data_class=None, data_path="", prefix="", postfix=""):
+        """
+        Parameters
+        ----------
+        data_class
+            instance class expected to store.
+        data_path
+            unused
+        prefix
+            unused
+        postfix
+            unused
+        """
         super().__init__(data_class, data_path, prefix, postfix)
         self.data = []
+        self.metadata = {}
+    def get_metadata(self):
+        return self.metadata
+
+    def set_metadata(self, meta):
+        self.metadata = meta
     def __getitem__(self, key):
         return self.data.__getitem__(key)
     def __setitem__(self, key, value):
@@ -117,19 +223,49 @@ class MemoryHistory(History):
 
 
 class RasterHistory(History):
-    """ This class works on top of a History 'history_data' instance to return the actual surface at a certain time
+    """ This class works on top of a History (passed in via 'history_data') instance to return the actual surface at a certain time
     as opposed to the deltas that the 'history_data' holds
     """
-    def __init__(self, history_data, min_x=None, min_y=None, max_x=None, max_y=None):
-        self.set_corners(min_x, min_y, max_x, max_y)
+    def __init__(self, history_data, x1=None, y1=None, x2=None, y2=None):
+        """ Acts like a list of RasterData while actually storing the current raster as a full dataset and the others as deltas vs the current data.
+
+        Parameters
+        ----------
+        history_data
+            A MemoryHistory or DiskHistory to use for storage
+        min_x
+            an X coordinate for the area being kept
+        min_y
+            a Y coordinate for the area being kept
+        max_x
+            an X coordinate for the area being kept
+        max_y
+            a Y coordinate for the area being kept
+        """
+        self.set_corners(x1, y1, x2, y2)
         self.history = history_data
         self.sources = []
 
     def set_corners(self, min_x, min_y, max_x, max_y):
-        self.max_y = max_y
-        self.max_x = max_x
-        self.min_y = min_y
-        self.min_x = min_x
+        if min_x is not None and max_y is not None:
+            self.max_y = max(min_y, max_y)
+            self.max_x = max(min_x, max_x)
+            self.min_y = min(min_y, max_y)
+            self.min_x = min(min_x, max_x)
+            meta = self.get_metadata()
+            meta["min_x"] = self.min_x
+            meta['min_y'] = self.min_y
+            meta["max_x"] = self.max_x
+            meta["max_y"] = self.max_y
+            self.set_metadata(meta)
+        else:
+            self.max_x = self.max_y = self.min_x = self.min_y = None
+
+    def get_metadata(self):
+        return self.history.get_metadata()
+
+    def set_metadata(self, meta):
+        self.history.set_metadata(meta)
 
     def get_corners(self):
         return self.min_x, self.min_y, self.max_x, self.max_y
@@ -149,8 +285,8 @@ class RasterHistory(History):
     def __len__(self):
         return len(self.history)
 
-    def make_empty_data(self, res_x, res_y):
-        arr = numpy.full((len(LayersEnum)-1, res_x, res_y), numpy.nan)  # don't supply mask
+    def make_empty_data(self, rows, cols):
+        arr = numpy.full((len(LayersEnum)-1, rows, cols), numpy.nan)  # don't supply mask
         raster_val = RasterData(MemoryStorage(), arr)
         raster_val.set_corners(self.min_x, self.min_y, self.max_x, self.max_y)
         raster_val.set_epsg(self.epsg)
@@ -177,13 +313,17 @@ class RasterHistory(History):
             return current_val
 
     def insert(self, key, value):
+        # First make sure the data is a RasterData instance
         if not isinstance(value, RasterData):
             raster_val = RasterData(MemoryStorage())
             raster_val.set_arrays(value)
         else:
             raster_val = value
+        # find out where the data should go in the existing list
         key = self._abs_index(key)
+
         if len(self) > 0:
+            # we need to make room on disk and also recompute the raster deltas that are stored after the insertion point
             # create a list of the rasters back to the point being inserted at
             current_val = self.history[-1]  # get the last item which is a full raster then work our way back with the deltas
             raster_stack = [current_val]
@@ -202,8 +342,18 @@ class RasterHistory(History):
                 self.history[history_index] = raster_delta  # put the new delta into the history
             self.history.append(raster_stack[-1])  # and finally add a full raster data as the end of the history
         else:
-            self.history.append(raster_val)  # if we are empty then just put the full array in
+            # if we are empty then just put the full array in
+            self.history.append(raster_val)
 
+class AccumulationHistory(RasterHistory):
+    """ This class acts like a full history but really only keeps one raster, the current data.
+    Insert is disabled except for at the last index, which is essentially [0] or [-1]
+    """
+    def insert(self, key, value):
+        if len(self) > 0:
+            # if we aren't empty then delete the existing file as it's about to be replaced
+            del self.history[0]
+        super().insert(0, value)
 
 
 class PointsHistory(History):

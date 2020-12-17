@@ -153,7 +153,7 @@ def test_add_data(history_db):
         fill_tile_history(history)
 
 def test_pbc19_tile_4():
-    use_dir = data_dir.joinpath('tile4_utm_db')
+    use_dir = data_dir.joinpath('tile4_metadata_utm_db')
     if os.path.exists(use_dir):
         shutil.rmtree(use_dir, onerror=onerr)
 
@@ -188,6 +188,16 @@ def test_pbc19_tile_4():
                      r"C:\Data\nbs\PBC19_Tile4_surveys\H06442.csar.du.txt",]:
         print('processsing txt', txt_file)
         db.insert_txt_survey(txt_file, transformer=georef_transformer)
+def test_pbc19_vr():
+    use_dir = data_dir.joinpath('tile4_VR_utm_db')
+    if os.path.exists(use_dir):
+        shutil.rmtree(use_dir, onerror=onerr)
+
+    db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+    db.insert_survey_vr(r"C:\Data\nbs\PBC19_Tile4_surveys\H12010_MB_VR_MLLW.bag")
+    print("processed_vr")
+
+
 
 # importlib.reload(tile_calculations)
 # g = tile_calculations.GlobalGeodetic(zoom=2); f=g.xy_to_tile; print(f(-100, 40)); print(f(100, -40)); print(f(182, -91))
