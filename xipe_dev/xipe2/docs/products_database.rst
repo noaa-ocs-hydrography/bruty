@@ -1,0 +1,1 @@
+..  automodapi:: xipe_dev.xipe2.products_database

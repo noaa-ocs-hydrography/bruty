@@ -474,6 +474,17 @@ class WorldDatabase(VABC):
         return 512, 512
 
     def insert_survey_vr(self, path_to_survey_data, survey_score=100, flag=0):
+        """
+        Parameters
+        ----------
+        path_to_survey_data
+        survey_score
+        flag
+
+        Returns
+        -------
+
+        """
         vr = bag.VRBag(path_to_survey_data)
         refinement_list = numpy.argwhere(vr.get_valid_refinements())
         print("@todo - do transforms correctly with proj/vdatum etc")
@@ -487,7 +498,7 @@ class WorldDatabase(VABC):
             r, c = numpy.indices(refinement.depth.shape)  # make indices into array elements that can be converted to x,y coordinates
             pts = numpy.array([r, c, refinement.depth, refinement.uncertainty]).reshape(4, -1)
             pts = pts[:, pts[2] != vr.fill_value]  # remove nodata points
-##
+
             bag_supergrid_dx = vr.cell_size_x
             bag_supergrid_nx = vr.numx
             bag_supergrid_dy = vr.cell_size_y
@@ -508,7 +519,6 @@ class WorldDatabase(VABC):
             refinement_llx = bag_llx + supergrid_x + sw_corner_x - resolution_x / 2.0  # @TODO implies swcorner is to the center and not the exterior
             refinement_lly = bag_lly + supergrid_y + sw_corner_y - resolution_y / 2.0
 
-##
             x, y = affine(pts[0], pts[1], refinement_llx, resolution_x, 0, refinement_lly, 0, resolution_y)
             if georef_transformer:
                 x, y = georef_transformer.transform(x, y)
