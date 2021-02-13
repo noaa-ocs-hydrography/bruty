@@ -465,6 +465,7 @@ class WorldDatabase(VABC):
             #     # raster_data = raster_data[]
 
         self.next_contributor += 1
+
     def init_tile(self, tx, ty):
         # @todo lookup the resolution to use by default.
         #   Probably will be a lookup based on the ENC cell the tile covers and then twice the resolution needed for that cell
@@ -702,7 +703,7 @@ class WorldDatabase(VABC):
             # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
             # 6) Sort on score in case multiple points go into a position that the right value is retained
             # sort based on score then on depth so the shoalest top score is kept
-            pts = numpy.array((tile_x, tile_y, tile_score, tile_depth, *tile_layers)).reshape(4+len(layers), -1)
+            pts = numpy.array((tile_x, tile_y, tile_score, tile_depth, *tile_layers)).reshape(4 + len(layers), -1)
             pts = pts[:, ~numpy.isnan(pts[2])]  # remove empty cells (no score = empty)
             sorted_ind = numpy.lexsort((-pts[3], pts[2]))
             sorted_pts = pts[:, sorted_ind]
@@ -720,6 +721,8 @@ class WorldDatabase(VABC):
                 export_col = export_col[~out_of_bounds]
             # 8) Write the data into the export (single) tif.
             # replace x,y with row, col for the points
+            # @todo write unit test to confirm that the sort is working in case numpy changes behavior.
+            #   currently assumes the last value is stored in the array if more than one have the same ri, rj indices.
             replace_cells = numpy.logical_or(sorted_pts[2] >= export_sub_area_scores[export_row, export_col],
                                              numpy.isnan(export_sub_area_scores[export_row, export_col]))
             replacements = sorted_pts[4:, replace_cells]
@@ -733,6 +736,155 @@ class WorldDatabase(VABC):
             score_band.WriteArray(export_sub_area_scores, start_col, start_row)
             dataset.FlushCache()
             dataset_score.FlushCache()
+
+
+    def export_area_new(self, fname, x1, y1, x2, y2, res, target_epsg=None, driver="GTiff",
+                    layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR)):
+        """ Retrieves an area from the database at the requested resolution.
+
+        Parameters
+        ----------
+        fname
+            path to export to
+        x1
+            a corner x coordinate
+        y1
+            a corner y coordinate
+        x2
+            a corner x coordinate
+        y2
+            a corner y coordinate
+        res
+            Resolution to export with.  If a tuple is supplied it is read as (res_x, res_y) while a single number will be used for x and y resolutions
+        target_epsg
+            epsg of the coordinate system to export into
+        driver
+            gdal driver name to use
+        layers
+            Layers to extract from the database into the output file.  Defaults to Elevation, Uncertainty and Contributor
+
+        Returns
+        -------
+        None
+
+        """
+        # 1) Create a single tif tile that covers the area desired
+        if not target_epsg:
+            target_epsg = self.db.tile_scheme.epsg
+        geotransform = get_geotransform(self.db.tile_scheme.epsg, target_epsg)
+
+        try:
+            dx, dy = res
+        except TypeError:
+            dx = dy = res
+
+        dataset = make_gdal_dataset_area(fname, len(layers), x1, y1, x2, y2, dx, dy, target_epsg, driver)
+        # probably won't export the score layer but we need it when combining data into the export area
+        dataset_score = make_gdal_dataset_area(fname, 1, x1, y1, x2, y2, dx, dy, target_epsg, driver)
+
+        affine_transform = dataset.GetGeoTransform()  # x0, dxx, dyx, y0, dxy, dyy
+        score_band = dataset_score.GetRasterBand(1)
+        max_cols, max_rows = score_band.XSize, score_band.YSize
+
+        # 2) Get the master db tile indices that the area overlaps and iterate them
+        for txi, tyi, tile_history in self.db.iter_tiles(x1, y1, x2, y2):
+            # if txi != 3504 or tyi != 4155:
+            #     continue
+            try:
+                raster_data = tile_history[-1]
+            except IndexError:  # empty tile, skip to the next
+                continue
+            # 3) Read the single tif sub-area as an array that covers this tile being processed
+            tx1, ty1, tx2, ty2 = tile_history.get_corners()
+            r, c = inv_affine(numpy.array([tx1, tx2]), numpy.array([ty1, ty2]), *affine_transform)
+            start_col, start_row = max(0, int(min(c))), max(0, int(min(r)))
+            # the local r, c inside of the sub area
+            # @todo - comment how this diff is working
+            block_cols, block_rows = int(numpy.abs(numpy.diff(c))) + 1, int(numpy.abs(numpy.diff(r))) + 1
+            if block_cols + start_col > max_cols:
+                block_cols = max_cols - start_col
+            if block_rows + start_row > max_rows:
+                block_rows = max_rows - start_row
+
+            # 4) Use the db.tile_scheme function to convert points from the tiles to x,y
+            # fixme - score and depth have same value, read bug?
+            tile_score = raster_data.get_arrays(LayersEnum.SCORE)[0]
+            tile_depth = raster_data.get_arrays(LayersEnum.ELEVATION)[0]
+            tile_layers = raster_data.get_arrays(layers)
+            # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
+            self.merge_rasters(tile_layers, tile_score, raster_data, tile_depth,
+                               geotransform, affine_transform, start_col, start_row, block_cols, block_rows,
+                               dataset, dataset_score, layers,
+                               score_band)
+            # send the data to disk, I forget if this has any affect other than being able to look at the data in between steps to debug progress
+            dataset.FlushCache()
+            dataset_score.FlushCache()
+
+    @staticmethod
+    def merge_rasters(tile_layers, tile_score, raster_data, tile_depth,
+                      geotransform, affine_transform, start_col, start_row, block_cols, block_rows,
+                      dataset, dataset_score, layers,
+                      score_band, reverse_sort_score=False, reverse_sort_Z=True):
+        # @todo rename parameters to more general, meaningful values
+        # merge a new dataset (array) into an existing dataset (array)
+        # the source data is compared to the existing data to determine if it should supercede the existing data.
+        # for example, this could be hydro-health score comparison for higher quality data or depths for shoal biasing.
+        #
+        # the incoming dataset uses a geotransform to go from source to destination coordinates
+        # then an affine transform to go from destination x,y to array row, column
+        export_sub_area_scores = dataset_score.ReadAsArray(start_col, start_row, block_cols, block_rows)
+        export_sub_area = dataset.ReadAsArray(start_col, start_row, block_cols, block_rows)
+
+        tile_r, tile_c = numpy.indices(tile_layers.shape[1:])
+        tile_x, tile_y = raster_data.rc_to_xy_using_dims(tile_score.shape[0], tile_score.shape[1], tile_r, tile_c)
+        if geotransform:  # convert to target epsg
+            tile_x, tile_y = geotransform(tile_x, tile_y)
+
+        # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
+        # 6) Sort on score in case multiple points go into a position that the right value is retained
+        # sort based on score then on depth so the shoalest top score is kept
+        pts = numpy.array((tile_x, tile_y, tile_score, tile_depth, *tile_layers)).reshape(4+len(layers), -1)
+        pts = pts[:, ~numpy.isnan(pts[2])]  # remove empty cells (no score = empty)
+        sort_z_multiplier = -1 if reverse_sort_Z else 1
+        sort_score_multiplier = -1 if reverse_sort_score else 1
+        sorted_ind = numpy.lexsort((sort_z_multiplier * pts[3], sort_score_multiplier * pts[2]))
+        sorted_pts = pts[:, sorted_ind]
+        # 7) Use affine geotransform convert x,y into the i,j for the exported area
+        export_row, export_col = inv_affine(sorted_pts[0], sorted_pts[1], *affine_transform)
+        export_row -= start_row  # adjust to the sub area in memory
+        export_col -= start_col
+        # clip to the edges of the export area since our db tiles can cover the earth [0:block_rows-1, 0:block_cols]
+        row_out_of_bounds = numpy.logical_or(export_row < 0, export_row >= block_rows)
+        col_out_of_bounds = numpy.logical_or(export_col < 0, export_col >= block_cols)
+        out_of_bounds = numpy.logical_or(row_out_of_bounds, col_out_of_bounds)
+        if out_of_bounds.any():
+            sorted_pts = sorted_pts[:, ~out_of_bounds]
+            export_row = export_row[~out_of_bounds]
+            export_col = export_col[~out_of_bounds]
+        # 8) Write the data into the export (single) tif.
+        # replace x,y with row, col for the points
+        # @todo write unit test to confirm that the sort is working in case numpy changes behavior.
+        #   currently assumes the last value is stored in the array if more than one have the same ri, rj indices.
+        replace_cells = numpy.logical_or(sorted_pts[2] >= export_sub_area_scores[export_row, export_col],
+                                         numpy.isnan(export_sub_area_scores[export_row, export_col]))
+        replacements = sorted_pts[4:, replace_cells]
+        ri = export_row[replace_cells]
+        rj = export_col[replace_cells]
+        export_sub_area[:, ri, rj] = replacements
+        export_sub_area_scores[ri, rj] = sorted_pts[2, replace_cells]
+        for band_num in range(len(layers)):
+            band = dataset.GetRasterBand(band_num + 1)
+            band.WriteArray(export_sub_area[band_num], start_col, start_row)
+        score_band.WriteArray(export_sub_area_scores, start_col, start_row)
+
+    def extract_soundings(self):
+        # this is the same as extract area except score = depth
+        pass
+
+    def soundings_from_caris_combined_csar(self):
+        # Either fill a world database and then extract soundings or
+        # generalize the inner loop of extract area then use it against csar data directly
+        pass
 
     def export_at_date(self, area, date):
         pass

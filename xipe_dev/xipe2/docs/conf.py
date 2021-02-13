@@ -38,15 +38,12 @@ import mock
 
 import sphinx_rtd_theme
 
-
+# prevents these modules from being loaded when creating docs - so RTD doesn't have to install everything for temporary environment
 MOCK_MODULES = ['scipy', 'matplotlib', 'matplotlib.pyplot', 'scipy.interpolate', 'osgeo', 'gdal', 'osr', 'HSTB.drivers.bag', 'bag']
 for mod_name in MOCK_MODULES:
     sys.modules[mod_name] = mock.Mock()
 
 top_classes = "collections.abc.MutableSequence, xipe_dev.xipe2.abstract.ABC, xipe_dev.xipe2.abstract.VABC"
-
-use_automodapi = True
-use_autoapi = not use_automodapi
 
 p, f = os.path.split(__file__)
 root_p = os.path.normpath(p)
@@ -280,14 +277,14 @@ todo_include_todos = False
 #
 # html_theme = 'classic'
 html_theme = "sphinx_rtd_theme"
-_style = str(pathlib.Path(__file__).parent.joinpath('templates/s100theme.css'))
+_style = str(pathlib.Path(__file__).parent.joinpath('templates/full_width_page_multiline_tables.css'))
 # These folders are copied to the documentation's HTML output
 html_static_path = ['templates']
 
 # These paths are either relative to html_static_path
 # or fully qualified paths (eg. https://...)
 html_css_files = [
-    's100theme.css',
+    'full_width_page_multiline_tables.css',
 ]
 # print(html_style, os.path.exists(html_style))
 
@@ -296,17 +293,17 @@ html_css_files = [
 # documentation.
 #
 # html_theme_options = {}
-html_theme_options = {
-    'sidebarbgcolor': "#054698",
-    'relbarbgcolor': "#29318B",
-    'footerbgcolor': "#29318B",
-    'linkcolor': "#0098DA",
-    'visitedlinkcolor': "#054698",
-    'sidebarlinkcolor': "#E0F2FF",
-    'body_max_width':'none',
-    # 'relbarlinkcolor' : "#0098DA",
-    # bgcolor
-}
+# html_theme_options = {
+#     'sidebarbgcolor': "#054698",
+#     'relbarbgcolor': "#29318B",
+#     'footerbgcolor': "#29318B",
+#     'linkcolor': "#0098DA",
+#     'visitedlinkcolor': "#054698",
+#     'sidebarlinkcolor': "#E0F2FF",
+#     'body_max_width':'none',
+#     # 'relbarlinkcolor' : "#0098DA",
+#     # bgcolor
+# }
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
