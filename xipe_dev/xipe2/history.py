@@ -157,7 +157,9 @@ class DiskHistory(History):
         list of string filepaths
         """
         file_list = os.listdir(self.data_path)
-        return [fname for fname in file_list if re.match(self.filename_pattern, fname)]
+        # note - caret is beginning of string and the dollar sign at the end means end of string
+        # which is needed since arc will put an "_0000_.tif.aux.xml" in the directory which will match without the $
+        return [fname for fname in file_list if re.match("^" + self.filename_pattern + "$", fname)]
 
     def __len__(self):
         return len(self.data_files())

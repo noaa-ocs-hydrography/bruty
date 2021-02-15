@@ -109,8 +109,8 @@ class TiffStorage(Storage):
                 min_y = meta['min_y']
                 max_x = meta['max_x']
                 max_y = meta['max_y']
-                dx = (max_x - min_x) / arrays.shape[1]
-                dy = (max_y - min_y) / arrays.shape[2]
+                dx = (max_x - min_x) / arrays.shape[2]
+                dy = (max_y - min_y) / arrays.shape[1]
                 epsg = meta['epsg']
                 gt = [min_x, dx, 0, min_y, 0, dy]
 

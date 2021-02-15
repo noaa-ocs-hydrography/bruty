@@ -11,7 +11,7 @@ import rasterio.crs
 from osgeo import gdal, osr
 
 from HSTB.drivers import bag
-from xipe_dev.xipe2.raster_data import LayersEnum, RasterData, affine, inv_affine
+from xipe_dev.xipe2.raster_data import LayersEnum, RasterData, affine, inv_affine, arrays_dont_match
 from xipe_dev.xipe2.history import RasterHistory, AccumulationHistory
 from xipe_dev.xipe2.abstract import VABC, abstractmethod
 from xipe_dev.xipe2.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles
@@ -406,15 +406,17 @@ class WorldDatabase(VABC):
         contributor = numpy.full(input_survey_data[0].shape, self.next_contributor)
         survey_data = numpy.array((input_survey_data[0], input_survey_data[1], input_survey_data[2],
                                    input_survey_data[3], contributor, input_survey_data[4], input_survey_data[5]))
+        # if a multidemensional array was passed in then reshape it to be one dimenion.
+        # ex: the input_survey_data is 4x4 data with the 6 required data fields (x,y,z, uncertainty, score, flag),
+        #   so 6 x 4 x 5 -- becomes a 6 x 20 array instead
+        if len(survey_data.shape) > 2:
+            survey_data = survey_data.reshape(survey_data.shape[0], -1)
         txs, tys = accumulation_db.tile_scheme.xy_to_tile_index(survey_data[0], survey_data[1])
         tile_list = numpy.unique(numpy.array((txs, tys)).T, axis=0)
         # itererate each tile that was found to have data
         # @todo figure out the contributor - should be the unique id from the database of surveys
         for i_tile, (tx, ty) in enumerate(tile_list):
             print(f'processing tile {i_tile} of {len(tile_list)}')
-            pts = survey_data[:, numpy.logical_and(txs == tx, tys == ty)]
-            # @todo sort based on score then on depth so the shoalest top score is kept
-            sorted_pts = pts[:, numpy.argsort(-pts[2])]  # sort from deepest to shoalest (note the negative sign on pts[2])
             tile_history = accumulation_db.get_tile_history_by_index(tx, ty)
             try:
                 raster_data = tile_history[-1]
@@ -425,8 +427,8 @@ class WorldDatabase(VABC):
                     raster_data = tile_history_main[-1]
                 except IndexError:
                     # empty tile, allocate one
-                    res_x, res_y = self.init_tile(tx, ty)
-                    raster_data = tile_history.make_empty_data(res_x, res_y)
+                    rows, cols = self.init_tile(tx, ty, tile_history)
+                    raster_data = tile_history.make_empty_data(rows, cols)
                     make_outlines = raster_data.get_arrays()
                     if geo_debug and True:  # draw a box around the tile and put a notch in the 0,0 corner
                         make_outlines[:, :, 0] = 99  # outline around box
@@ -435,18 +437,29 @@ class WorldDatabase(VABC):
                         make_outlines[:, -1, :] = 99
                         make_outlines[:, 0:15, 0:15] = 44  # registration notch at 0,0
                     raster_data.set_arrays(make_outlines)
+
             new_arrays = raster_data.get_arrays()
+            pts = survey_data[:, numpy.logical_and(txs == tx, tys == ty)]
+
             # replace x,y with row, col for the points
-            i, j = raster_data.xy_to_rc_using_dims(new_arrays.shape[1], new_arrays.shape[2], sorted_pts[0], sorted_pts[1])
-            replace_cells = numpy.logical_or(sorted_pts[4] >= new_arrays[LayersEnum.SCORE, i, j], numpy.isnan(new_arrays[LayersEnum.SCORE, i, j]))
-            replacements = sorted_pts[:, replace_cells]
-            ri = i[replace_cells]
-            rj = j[replace_cells]
-            new_arrays[:, ri, rj] = replacements[2:]
-            # new_arrays[LayersEnum., ri, rj] = replacements[2]
-            # new_arrays[2, ri, rj] = replacements[2]
-            # new_arrays[3, ri, rj] = replacements[2]
-            # new_arrays[4, ri, rj] = replacements[2]
+            i, j = raster_data.xy_to_rc_using_dims(new_arrays.shape[1], new_arrays.shape[2], pts[0], pts[1])
+            WorldDatabase.merge_arrays(i, j, pts[LayersEnum.SCORE + 2], pts[LayersEnum.ELEVATION + 2], pts[2:], new_arrays, new_arrays[LayersEnum.SCORE], reverse_sort_key2=True)
+
+            if 0:  # old code that sorted in this function rather than using the merge_arrays function
+                # @todo sort based on score then on depth so the shoalest top score is kept
+                sorted_pts = pts[:, numpy.argsort(-pts[2])]  # sort from deepest to shoalest (note the negative sign on pts[2])
+                i, j = raster_data.xy_to_rc_using_dims(new_arrays.shape[1], new_arrays.shape[2], sorted_pts[0], sorted_pts[1])
+                new_arrays2 = raster_data.get_arrays()
+                replace_cells = numpy.logical_or(sorted_pts[4] >= new_arrays2[LayersEnum.SCORE, i, j], numpy.isnan(new_arrays2[LayersEnum.SCORE, i, j]))
+                replacements = sorted_pts[:, replace_cells]
+                ri = i[replace_cells]
+                rj = j[replace_cells]
+                new_arrays2[:, ri, rj] = replacements[2:]
+
+                delta = arrays_dont_match(new_arrays2, new_arrays)
+                all_match = not numpy.any(delta)
+                print("merges match", all_match)
+                indices = numpy.argwhere(delta)
 
             rd = RasterData.from_arrays(new_arrays)
             rd.set_metadata(raster_data.get_metadata())  # copy the metadata to the new raster
@@ -466,12 +479,13 @@ class WorldDatabase(VABC):
 
         self.next_contributor += 1
 
-    def init_tile(self, tx, ty):
+    def init_tile(self, tx, ty, tile_history):
         # @todo lookup the resolution to use by default.
         #   Probably will be a lookup based on the ENC cell the tile covers and then twice the resolution needed for that cell
         # @todo once resolution is determined then convert to the right size in the coordinate system to represent that sizing in meters
 
         # this should be ~2m when zoom 13 is the zoom level used (zoom 13 = 20m at 256 pix, so 8 times finer)
+        # return rows, cols
         return 512, 512
 
     def insert_survey_vr(self, path_to_survey_data, survey_score=100, flag=0):
@@ -738,9 +752,21 @@ class WorldDatabase(VABC):
             dataset_score.FlushCache()
 
 
+
     def export_area_new(self, fname, x1, y1, x2, y2, res, target_epsg=None, driver="GTiff",
                     layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR)):
         """ Retrieves an area from the database at the requested resolution.
+
+        # 1) Create a single tif tile that covers the area desired
+        # 2) Get the master db tile indices that the area overlaps and iterate them
+        # 3) Read the single tif sub-area as an array that covers this tile being processed
+        # 4) Use the db.tile_scheme function to convert points from the tiles to x,y
+        # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
+        # 6) Sort on score in case multiple points go into a position that the right value is retained
+        #      sort based on score then on depth so the shoalest top score is kept
+        # 7) Use affine geotransform convert x,y into the i,j for the exported area
+        # 8) Write the data into the export (single) tif.
+        #      replace x,y with row, col for the points
 
         Parameters
         ----------
@@ -824,7 +850,42 @@ class WorldDatabase(VABC):
     def merge_rasters(tile_layers, tile_score, raster_data, tile_depth,
                       geotransform, affine_transform, start_col, start_row, block_cols, block_rows,
                       dataset, dataset_score, layers,
-                      score_band, reverse_sort_score=False, reverse_sort_Z=True):
+                      score_band, reverse_sort_key1=False, reverse_sort_key2=True):
+        export_sub_area_scores = dataset_score.ReadAsArray(start_col, start_row, block_cols, block_rows)
+        export_sub_area = dataset.ReadAsArray(start_col, start_row, block_cols, block_rows)
+
+        # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
+
+        tile_r, tile_c = numpy.indices(tile_layers.shape[1:])
+        tile_x, tile_y = raster_data.rc_to_xy_using_dims(tile_score.shape[0], tile_score.shape[1], tile_r, tile_c)
+        if geotransform:  # convert to target epsg
+            tile_x, tile_y = geotransform(tile_x, tile_y)
+
+        WorldDatabase.merge_arrays(tile_x, tile_y, tile_score, tile_depth, tile_layers,
+                                   export_sub_area, export_sub_area_scores, affine_transform,
+                                   start_col, start_row, block_cols, block_rows,
+                                   reverse_sort_key1=reverse_sort_key1, reverse_sort_key2=reverse_sort_key2)
+
+        # @todo should export_sub_area be returned and let the caller write into their datasets?
+        for band_num in range(len(layers)):
+            band = dataset.GetRasterBand(band_num + 1)
+            band.WriteArray(export_sub_area[band_num], start_col, start_row)
+        score_band.WriteArray(export_sub_area_scores, start_col, start_row)
+
+    @staticmethod
+    def merge_arrays(x, y, key1, key2, data, *args, **kywrds):
+        # create a combined two dimensional array that can then be indexed and reduced as needed,
+        #   if the incoming data was multidimensional this will flatten it too.
+        #   So an incoming dataset is say 6 fields of 4 rows and 5 columns will be turned into 10 x 20 -- (6+4 fields x 4 rows * 5 cols)
+        #   wouldn't be able to remove nans and potentially do some other operations otherwise(?).
+        pts = numpy.array((x, y, key1, key2, *data)).reshape(4+len(data), -1)
+        WorldDatabase.merge_array(pts, *args, **kywrds)
+
+    @staticmethod
+    def merge_array(pts, output_array, output_sort_array,
+                    affine_transform=None, start_col=0, start_row=0, block_cols=None, block_rows=None,
+                    reverse_sort_key1=False, reverse_sort_key2=False):
+
         # @todo rename parameters to more general, meaningful values
         # merge a new dataset (array) into an existing dataset (array)
         # the source data is compared to the existing data to determine if it should supercede the existing data.
@@ -832,27 +893,34 @@ class WorldDatabase(VABC):
         #
         # the incoming dataset uses a geotransform to go from source to destination coordinates
         # then an affine transform to go from destination x,y to array row, column
-        export_sub_area_scores = dataset_score.ReadAsArray(start_col, start_row, block_cols, block_rows)
-        export_sub_area = dataset.ReadAsArray(start_col, start_row, block_cols, block_rows)
 
-        tile_r, tile_c = numpy.indices(tile_layers.shape[1:])
-        tile_x, tile_y = raster_data.rc_to_xy_using_dims(tile_score.shape[0], tile_score.shape[1], tile_r, tile_c)
-        if geotransform:  # convert to target epsg
-            tile_x, tile_y = geotransform(tile_x, tile_y)
+        # basically pass in x,y,sort_key1, sort_key2, data_to_for_output_array, output_array, output_sort_key_result
 
-        # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
-        # 6) Sort on score in case multiple points go into a position that the right value is retained
-        # sort based on score then on depth so the shoalest top score is kept
-        pts = numpy.array((tile_x, tile_y, tile_score, tile_depth, *tile_layers)).reshape(4+len(layers), -1)
+        # note: modifies the output array in place
+
         pts = pts[:, ~numpy.isnan(pts[2])]  # remove empty cells (no score = empty)
-        sort_z_multiplier = -1 if reverse_sort_Z else 1
-        sort_score_multiplier = -1 if reverse_sort_score else 1
+        if block_rows is None:
+            row_index = 1 if len(output_array.shape) > 2 else 0
+            block_rows = output_array.shape[row_index] - start_row
+        if block_cols is None:
+            col_index = 2 if len(output_array.shape) > 2 else 1
+            block_cols = output_array.shape[col_index] - start_col
+
+        # 6) Sort on score in case multiple points go into a position that the right value is retained
+        #   sort based on score then on depth so the shoalest top score is kept
+        sort_z_multiplier = -1 if reverse_sort_key2 else 1
+        sort_score_multiplier = -1 if reverse_sort_key1 else 1
         sorted_ind = numpy.lexsort((sort_z_multiplier * pts[3], sort_score_multiplier * pts[2]))
         sorted_pts = pts[:, sorted_ind]
+
         # 7) Use affine geotransform convert x,y into the i,j for the exported area
-        export_row, export_col = inv_affine(sorted_pts[0], sorted_pts[1], *affine_transform)
+        if affine_transform is not None:
+            export_row, export_col = inv_affine(sorted_pts[0], sorted_pts[1], *affine_transform)
+        else:
+            export_row, export_col = sorted_pts[0].astype(numpy.int32), sorted_pts[1].astype(numpy.int32)
         export_row -= start_row  # adjust to the sub area in memory
         export_col -= start_col
+
         # clip to the edges of the export area since our db tiles can cover the earth [0:block_rows-1, 0:block_cols]
         row_out_of_bounds = numpy.logical_or(export_row < 0, export_row >= block_rows)
         col_out_of_bounds = numpy.logical_or(export_col < 0, export_col >= block_cols)
@@ -861,21 +929,18 @@ class WorldDatabase(VABC):
             sorted_pts = sorted_pts[:, ~out_of_bounds]
             export_row = export_row[~out_of_bounds]
             export_col = export_col[~out_of_bounds]
+
         # 8) Write the data into the export (single) tif.
         # replace x,y with row, col for the points
         # @todo write unit test to confirm that the sort is working in case numpy changes behavior.
         #   currently assumes the last value is stored in the array if more than one have the same ri, rj indices.
-        replace_cells = numpy.logical_or(sorted_pts[2] >= export_sub_area_scores[export_row, export_col],
-                                         numpy.isnan(export_sub_area_scores[export_row, export_col]))
+        replace_cells = numpy.logical_or(sorted_pts[2] >= output_sort_array[export_row, export_col],
+                                         numpy.isnan(output_sort_array[export_row, export_col]))
         replacements = sorted_pts[4:, replace_cells]
         ri = export_row[replace_cells]
         rj = export_col[replace_cells]
-        export_sub_area[:, ri, rj] = replacements
-        export_sub_area_scores[ri, rj] = sorted_pts[2, replace_cells]
-        for band_num in range(len(layers)):
-            band = dataset.GetRasterBand(band_num + 1)
-            band.WriteArray(export_sub_area[band_num], start_col, start_row)
-        score_band.WriteArray(export_sub_area_scores, start_col, start_row)
+        output_array[:, ri, rj] = replacements
+        output_sort_array[ri, rj] = sorted_pts[2, replace_cells]
 
     def extract_soundings(self):
         # this is the same as extract area except score = depth
@@ -1015,4 +1080,5 @@ if __name__ == "__main__":
 
     use_dir = data_dir.joinpath('tile4_vr_utm_db')
     db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
-    db.export_area(use_dir.joinpath("export_tile.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
+    db.export_area(use_dir.joinpath("export_tile_old.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
+    db.export_area_new(use_dir.joinpath("export_tile_new.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)

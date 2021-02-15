@@ -1,6 +1,7 @@
 import pathlib
 import os
 import shutil
+from functools import partial
 
 import pytest
 import numpy
@@ -188,6 +189,7 @@ def test_pbc19_tile_4():
                      r"C:\Data\nbs\PBC19_Tile4_surveys\H06442.csar.du.txt",]:
         print('processsing txt', txt_file)
         db.insert_txt_survey(txt_file, transformer=georef_transformer)
+
 def test_pbc19_vr():
     use_dir = data_dir.joinpath('tile4_VR_utm_db')
     if os.path.exists(use_dir):
@@ -196,6 +198,98 @@ def test_pbc19_vr():
     db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
     db.insert_survey_vr(r"C:\Data\nbs\PBC19_Tile4_surveys\H12010_MB_VR_MLLW.bag")
     print("processed_vr")
+
+def test_export_area_full_db():
+    use_dir = data_dir.joinpath('tile4_vr_utm_db')
+    db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+    db.export_area(use_dir.joinpath("export_tile_old.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
+    db.export_area_new(use_dir.joinpath("export_tile_new.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
+
+def make_1m_tile(self, tx, ty, tile_history):
+    dx = int(tile_history.max_x - tile_history.min_x)+1
+    dy = int(tile_history.max_y - tile_history.min_y)+1
+    # return number of rows, cols
+    return dy, dx
+
+def test_export_area():
+    use_dir = data_dir.joinpath('simple_utm3_db')
+    if os.path.exists(use_dir):
+        shutil.rmtree(use_dir, onerror=onerr)
+
+    db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+    # override the init_tile with a function to make approx 1m square resolution
+    db.init_tile = partial(make_1m_tile, db)
+
+    x, y = numpy.indices([5,5])
+    """
+(array([[0, 0, 0, 0, 0],
+        [1, 1, 1, 1, 1],
+        [2, 2, 2, 2, 2],
+        [3, 3, 3, 3, 3],
+        [4, 4, 4, 4, 4]]),
+ array([[0, 1, 2, 3, 4],
+        [0, 1, 2, 3, 4],
+        [0, 1, 2, 3, 4],
+        [0, 1, 2, 3, 4],
+        [0, 1, 2, 3, 4]]))
+    """
+
+    z = numpy.array(x + y * 10)  # numpy.array(i+j*10)
+    """
+array([[ 0, 10, 20, 30, 40],
+       [ 1, 11, 21, 31, 41],
+       [ 2, 12, 22, 32, 42],
+       [ 3, 13, 23, 33, 43],
+       [ 4, 14, 24, 34, 44]])
+    """
+    uncertainty = numpy.full(x.shape, 1.5)
+    score = numpy.full(x.shape, 2)
+    flags = numpy.full(x.shape, 1)
+
+    db.insert_survey_array(numpy.array((x, y, z, uncertainty, score, flags)), "origin")
+    db.insert_survey_array(numpy.array((x+5, y, z+100, uncertainty, score+1, flags)), "east")
+    db.insert_survey_array(numpy.array((x+5, y+5, z+200, uncertainty, score+2, flags)), "north east")
+    # overwrite some of the origin grid but keep score below east and northeast
+    db.insert_survey_array(numpy.array((x+2, y+2, z*0 + 999, uncertainty, score+.5, flags)), "overwrite origin")
+
+    """ This should make an array like this
+array([[  0,  10,  20,  30,  40], [100, 110, 120, 130, 140],
+       [  1,  11,  21,  31,  41], [101, 111, 121, 131, 141],
+       [  2,  12,  22,  32,  42], [102, 112, 122, 132, 142],
+       [  3,  13,  23,  33,  43], [103, 113, 123, 133, 143],
+       [  4,  14,  24,  34,  44], [104, 114, 124, 134, 144]])
+       [200, 210, 220, 230, 240],
+       [201, 211, 221, 231, 241],
+       [202, 212, 222, 232, 242],
+       [203, 213, 223, 233, 243],
+       [204, 214, 224, 234, 244]])
+
+Then put an array in the center with all 999. 
+
+array([[999, 999, 999, 999, 999],
+       [999, 999, 999, 999, 999],
+       [999, 999, 999, 999, 999],
+       [999, 999, 999, 999, 999],
+       [999, 999, 999, 999, 999]])
+
+Based on the scores it should overwrite some values fill some empty space       
+
+array([[  0,  10,  20,  30,  40], [100, 110, 120, 130, 140],
+       [  1,  11,  21,  31,  41], [101, 111, 121, 131, 141],
+       [  2,  12, 999, 999, 999], [102, 112, 122, 132, 142],
+       [  3,  13, 999, 999, 999], [103, 113, 123, 133, 143],
+       [  4,  14, 999, 999, 999], [104, 114, 124, 134, 144]])
+       [200, 210, 220, 230, 240],  999, 999
+       [201, 211, 221, 231, 241],  999, 999
+       [202, 212, 222, 232, 242],
+       [203, 213, 223, 233, 243],
+       [204, 214, 224, 234, 244],
+"""
+
+    db.export_area(use_dir.joinpath("old.tif"), -1, -1, 11, 11, (.5, .5))
+    db.export_area_new(use_dir.joinpath("new.tif"), -1, -1, 11, 11, (.5, .5))
+    db.export_area_new(use_dir.joinpath("new2.tif"), -1, -1, 11, 11, (2, 2))
+    db.export_area_new(use_dir.joinpath("new4.tif"), -1, -1, 11, 11, (4, 4))
 
 
 
