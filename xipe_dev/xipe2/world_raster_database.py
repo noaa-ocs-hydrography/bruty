@@ -9,12 +9,18 @@ import numpy
 from pyproj import Transformer, CRS
 import rasterio.crs
 from osgeo import gdal, osr
+try:
+    from tqdm import tqdm
+except ModuleNotFoundError:
+    def tqdm(iterate_stuff, *args, **kywrds):
+        return iterate_stuff  # if this doesn't work, try iter(iterate_stuff)
+
 
 from HSTB.drivers import bag
 from xipe_dev.xipe2.raster_data import LayersEnum, RasterData, affine, inv_affine, arrays_dont_match
 from xipe_dev.xipe2.history import RasterHistory, AccumulationHistory
 from xipe_dev.xipe2.abstract import VABC, abstractmethod
-from xipe_dev.xipe2.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles
+from xipe_dev.xipe2.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles, TilingScheme
 
 geo_debug = False
 
@@ -275,6 +281,11 @@ class WMTileBackend(WorldTilesBackend):
     def __init__(self, storage, zoom_level=13):
         super().__init__(storage)
 
+class SingleFileBackend(WorldTilesBackend):
+    def __init__(self, epsg, x1, y1, x2, y2, history_class, storage_class, data_class, data_path):
+        tile_scheme = TilingScheme(x1, y1, x2, y2, zoom=0)
+        tile_scheme.epsg = epsg
+        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
 
 # @todo - Implement locks
 # class Lock:
@@ -429,14 +440,14 @@ class WorldDatabase(VABC):
                     # empty tile, allocate one
                     rows, cols = self.init_tile(tx, ty, tile_history)
                     raster_data = tile_history.make_empty_data(rows, cols)
-                    make_outlines = raster_data.get_arrays()
                     if geo_debug and True:  # draw a box around the tile and put a notch in the 0,0 corner
+                        make_outlines = raster_data.get_arrays()
                         make_outlines[:, :, 0] = 99  # outline around box
                         make_outlines[:, :, -1] = 99
                         make_outlines[:, 0, :] = 99
                         make_outlines[:, -1, :] = 99
                         make_outlines[:, 0:15, 0:15] = 44  # registration notch at 0,0
-                    raster_data.set_arrays(make_outlines)
+                        raster_data.set_arrays(make_outlines)
 
             new_arrays = raster_data.get_arrays()
             pts = survey_data[:, numpy.logical_and(txs == tx, tys == ty)]
@@ -545,7 +556,7 @@ class WorldDatabase(VABC):
             self.next_contributor -= 1
         self.next_contributor += 1
         self.db.append_accumulation_db(storage_db)
-        shutil.rmtree(storage_db.data_path)
+        shutil.rmtree(storage_db.data_path, onerror=onerr)
 
 
     def insert_survey_gdal(self, path_to_survey_data, survey_score=100, flag=0):
@@ -575,24 +586,23 @@ class WorldDatabase(VABC):
         d_val = ds.GetRasterBand(1)  # elevation or depth band
         u_val = ds.GetRasterBand(2)  # uncertainty band
         block_sizes = d_val.GetBlockSize()
-        row_block_size = min(max(block_sizes[1], 512), 1024)
-        col_block_size = min(max(block_sizes[0], 512), 1024)
+        row_block_size = min(max(block_sizes[1], 1024), 2048)
+        col_block_size = min(max(block_sizes[0], 1024), 2048)
         col_size = d_val.XSize
         row_size = d_val.YSize
         nodata = d_val.GetNoDataValue()
         temp_path = tempfile.mkdtemp(dir=self.db.data_path)
         storage_db = self.db.make_accumulation_db(temp_path)
         # read the data array in blocks
-        # for ic in tqdm(range(0, col_size, col_block_size), mininterval=.7):
         if geo_debug and False:
             col_block_size = col_size
             row_block_size = row_size
-        for ic in range(0, col_size, col_block_size):
+        for ic in tqdm(range(0, col_size, col_block_size), mininterval=.7):
             if ic + col_block_size < col_size:
                 cols = col_block_size
             else:
                 cols = col_size - ic
-            for ir in range(0, row_size, row_block_size):
+            for ir in tqdm(range(0, row_size, row_block_size), mininterval=.7):
                 if ir + row_block_size < row_size:
                     rows = row_block_size
                 else:
@@ -631,7 +641,7 @@ class WorldDatabase(VABC):
                     scores = numpy.full(x.shape, survey_score)
                     flags = numpy.full(x.shape, flag)
                     self.insert_survey_array(numpy.array((x, y, depth, uncertainty, scores, flags)), path_to_survey_data, accumulation_db=storage_db)
-                    self.next_contributor -= 1
+                    self.next_contributor -= 1  # undoing the next_contributor increment that happens in insert_survey_array since we call it multiple times and we'll increment it below
         self.next_contributor += 1
         self.db.append_accumulation_db(storage_db)
         shutil.rmtree(storage_db.data_path)
@@ -825,7 +835,7 @@ class WorldDatabase(VABC):
             r, c = inv_affine(numpy.array([tx1, tx2]), numpy.array([ty1, ty2]), *affine_transform)
             start_col, start_row = max(0, int(min(c))), max(0, int(min(r)))
             # the local r, c inside of the sub area
-            # @todo - comment how this diff is working
+            # figure out how big the block is that we are operating on and if it would extend outside the array bounds
             block_cols, block_rows = int(numpy.abs(numpy.diff(c))) + 1, int(numpy.abs(numpy.diff(r))) + 1
             if block_cols + start_col > max_cols:
                 block_cols = max_cols - start_col
@@ -857,7 +867,8 @@ class WorldDatabase(VABC):
         # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
 
         tile_r, tile_c = numpy.indices(tile_layers.shape[1:])
-        tile_x, tile_y = raster_data.rc_to_xy_using_dims(tile_score.shape[0], tile_score.shape[1], tile_r, tile_c)
+        # treating the cells as areas means we want to export based on the center not the corner
+        tile_x, tile_y = raster_data.rc_to_xy_using_dims(tile_score.shape[0], tile_score.shape[1], tile_r, tile_c, center=True)
         if geotransform:  # convert to target epsg
             tile_x, tile_y = geotransform(tile_x, tile_y)
 
@@ -1033,6 +1044,14 @@ def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg, dri
     since tif/gdal likes max_y and a negative Y pixel size.
     i.e. the geotransform in gdal will be stored as [min_x, res_x, 0, max_y, 0, -res_y]
 
+    Note: the minimum x,y will be honored, so if there is a mismatch in the coordinates and resolution
+    then the minimum values for the coordinates will be used with the necessary cell count and the maximum value
+    will be adjusted.
+
+    Ex: x1,y1 = 0,0  x2,y2 = 5,6  resx, resy = 4,4  will result in a 2x2 matrix where
+
+    minx, miny = 0,0  and  res_x, res_y = 4,4 are retained while modifying  max_x, max_y = 8,8
+
     Calls make_gdal_dataset_size
     Parameters
     ----------
@@ -1062,23 +1081,72 @@ def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg, dri
     gdal.dataset
 
     """
-    # fixme: the min/max need to be adjusted to account for them not fitting an exact number of pixels.
-    #  think about passing in 0, 0, 5, 5, 4, 4 -- max_y should be 8 not 5
     min_x = min(x1, x2)
     min_y = min(y1, y2)
     max_x = max(x1, x2)
     max_y = max(y1, y2)
     shape_x = int(numpy.ceil((max_x - min_x) / res_x))
     shape_y = int(numpy.ceil((max_y - min_y) / res_y))
+    max_x = shape_x * res_x + min_x
+    max_y = shape_y * res_y + min_y
+
     dataset = make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg, driver)
     return dataset
+
+class SingleFile(WorldDatabase):
+    def __init__(self, epsg, x1, y1, x2, y2, res_x, res_y, storage_directory):
+        min_x = min(x1, x2)
+        min_y = min(y1, y2)
+        max_x = max(x1, x2)
+        max_y = max(y1, y2)
+        self.shape_x = int(numpy.ceil((max_x - min_x) / res_x))
+        self.shape_y = int(numpy.ceil((max_y - min_y) / res_y))
+        max_x = self.shape_x * res_x + min_x
+        max_y = self.shape_y * res_y + min_y
+
+        super().__init__(SingleFileBackend(epsg, min_x, min_y, max_x, max_y, AccumulationHistory, DiskHistory, TiffStorage, storage_directory))
+
+    def init_tile(self, tx, ty, tile_history):
+        return self.shape_y, self.shape_x  # rows and columns
 
 if __name__ == "__main__":
     from xipe_dev.xipe2.history import DiskHistory, MemoryHistory, RasterHistory
     from xipe_dev.xipe2.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
     from xipe_dev.xipe2.test_data import master_data, data_dir
 
-    use_dir = data_dir.joinpath('tile4_vr_utm_db')
-    db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
-    db.export_area(use_dir.joinpath("export_tile_old.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
-    db.export_area_new(use_dir.joinpath("export_tile_new.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
+    # use_dir = data_dir.joinpath('tile4_vr_utm_db')
+    # db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+    # db.export_area(use_dir.joinpath("export_tile_old.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
+    # db.export_area_new(use_dir.joinpath("export_tile_new.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
+
+    soundings_file = pathlib.Path(r"C:\Data\nbs\PBC19_Tile4_surveys\soundings\Tile4_4m_20201118_source.tiff")
+    ds = gdal.Open(str(soundings_file))
+    epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
+    xform = ds.GetGeoTransform()  # x0, dxx, dyx, y0, dxy, dyy
+    d_val = ds.GetRasterBand(1)
+    col_size = d_val.XSize
+    row_size = d_val.YSize
+    del d_val, ds
+    x1, y1 = affine(0, 0, *xform)
+    x2, y2 = affine(row_size, col_size, *xform)
+    res = 50
+    res_x = res
+    res_y = res
+    # move the minimum to an origin based on the resolution so future exports would match
+    if x1 < x2:
+        x1 -= x1 % res_x
+    else:
+        x2 -= x2 % res_x
+
+    if y1 < y2:
+        y1 -= y1 % res_y
+    else:
+        y2 -= y2 % res_y
+
+    db = SingleFile(26919, x1, y1, x2, y2, res_x, res_y, soundings_file.parent.joinpath('debug'))  # NAD823 zone 19.  WGS84 would be 32619
+    # db.insert_survey_gdal(str(soundings_file))
+    # fixme -- there is an issue where the database image and export image are written in reverse Y direction
+    #  because of this the first position for one is top left and bottom left for the other.
+    #  when converting the coordinate of the cell it basically ends up shifting by one
+    #  image = (273250.0, 50.0, 0.0, 4586700.0, 0.0, -50.0)  db = (273250.0, 50, 0, 4552600.0, 0, 50)
+    db.export_area_new(str(soundings_file.parent.joinpath("output_soundings_debug5.tiff")), x1, y1, x2, y2, (res_x, res_y), )

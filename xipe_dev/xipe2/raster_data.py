@@ -15,6 +15,11 @@ INFO_LAYERS = tuple(range(LayersEnum.MASK))
 
 
 def affine(r, c, x0, dxx, dyx, y0, dxy, dyy):
+    """
+    Returns the affine transform -- normally row, column to x,y position.
+    If this is the geotransform from a gdal geotiff (for example) the coordinates are the displayed pixel corners - not the center.
+    If you want the center of the pixel then use affine_center
+    """
     x = x0 + c * dxx + r * dyx
     y = y0 + c * dxy + r * dyy
     return x, y
@@ -22,13 +27,15 @@ def affine(r, c, x0, dxx, dyx, y0, dxy, dyy):
 
 def inv_affine(x, y, x0, dxx, dyx, y0, dxy, dyy):
     if dyx == 0 and dxy == 0:
-        c = numpy.array((x - x0) / dxx, dtype=numpy.int32)
-        r = numpy.array((y - y0) / dyy, dtype=numpy.int32)
+        c = numpy.array(numpy.floor((x - x0) / dxx), dtype=numpy.int32)
+        r = numpy.array(numpy.floor((y - y0) / dyy), dtype=numpy.int32)
     else:
         # @todo support skew projection
         raise ValueError("non-North up affine transforms are not supported yet")
     return r, c
 
+def affine_center(r, c, x0, dxx, dyx, y0, dxy, dyy):
+    return affine(r + 0.5, c + 0.5, x0, dxx, dyx, y0, dxy, dyy)
 
 class Storage(VABC):
     @staticmethod
@@ -239,12 +246,16 @@ class RasterData(VABC):
         array = self.get_array(0)
         return self.xy_to_rc_using_dims(array.shape[0], array.shape[1], x, y)
 
-    def rc_to_xy_using_dims(self, nrows, ncols, r, c):
+    def rc_to_xy_using_dims(self, nrows, ncols, r, c, center=False):
         """Convert from real world x,y to raster row, col indices"""
         min_x, min_y, max_x, max_y = self.get_corners()
         res_x = (max_x - min_x) / ncols
         res_y = (max_y - min_y) / nrows
-        return affine(r, c, min_x, res_x, 0, min_y, 0, res_y)
+        if center:
+            fn = affine_center
+        else:
+            fn = affine
+        return fn(r, c, min_x, res_x, 0, min_y, 0, res_y)
 
     def rc_to_xy(self, r, c):
         """Convert from real world x,y to raster row, col indices"""
