@@ -8,7 +8,7 @@ import numpy
 
 from pyproj import Transformer, CRS
 import rasterio.crs
-from osgeo import gdal, osr
+from osgeo import gdal, osr, ogr
 try:
     from tqdm import tqdm
 except ModuleNotFoundError:
@@ -17,7 +17,7 @@ except ModuleNotFoundError:
 
 
 from HSTB.drivers import bag
-from xipe_dev.xipe2.raster_data import LayersEnum, RasterData, affine, inv_affine, arrays_dont_match
+from xipe_dev.xipe2.raster_data import LayersEnum, RasterData, affine, inv_affine, affine_center, arrays_dont_match
 from xipe_dev.xipe2.history import RasterHistory, AccumulationHistory
 from xipe_dev.xipe2.abstract import VABC, abstractmethod
 from xipe_dev.xipe2.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles, TilingScheme
@@ -906,52 +906,55 @@ class WorldDatabase(VABC):
         # then an affine transform to go from destination x,y to array row, column
 
         # basically pass in x,y,sort_key1, sort_key2, data_to_for_output_array, output_array, output_sort_key_result
+        # if affine_transform is None then pass in row, column instead of x,y
 
         # note: modifies the output array in place
 
         pts = pts[:, ~numpy.isnan(pts[2])]  # remove empty cells (no score = empty)
-        if block_rows is None:
-            row_index = 1 if len(output_array.shape) > 2 else 0
-            block_rows = output_array.shape[row_index] - start_row
-        if block_cols is None:
-            col_index = 2 if len(output_array.shape) > 2 else 1
-            block_cols = output_array.shape[col_index] - start_col
+        if len(pts[0]) > 0:
+            if block_rows is None:
+                row_index = 1 if len(output_array.shape) > 2 else 0
+                block_rows = output_array.shape[row_index] - start_row
+            if block_cols is None:
+                col_index = 2 if len(output_array.shape) > 2 else 1
+                block_cols = output_array.shape[col_index] - start_col
 
-        # 6) Sort on score in case multiple points go into a position that the right value is retained
-        #   sort based on score then on depth so the shoalest top score is kept
-        sort_z_multiplier = -1 if reverse_sort_key2 else 1
-        sort_score_multiplier = -1 if reverse_sort_key1 else 1
-        sorted_ind = numpy.lexsort((sort_z_multiplier * pts[3], sort_score_multiplier * pts[2]))
-        sorted_pts = pts[:, sorted_ind]
+            # 6) Sort on score in case multiple points go into a position that the right value is retained
+            #   sort based on score then on depth so the shoalest top score is kept
+            sort_z_multiplier = -1 if reverse_sort_key2 else 1
+            sort_score_multiplier = -1 if reverse_sort_key1 else 1
+            sorted_ind = numpy.lexsort((sort_z_multiplier * pts[3], sort_score_multiplier * pts[2]))
+            sorted_pts = pts[:, sorted_ind]
 
-        # 7) Use affine geotransform convert x,y into the i,j for the exported area
-        if affine_transform is not None:
-            export_row, export_col = inv_affine(sorted_pts[0], sorted_pts[1], *affine_transform)
-        else:
-            export_row, export_col = sorted_pts[0].astype(numpy.int32), sorted_pts[1].astype(numpy.int32)
-        export_row -= start_row  # adjust to the sub area in memory
-        export_col -= start_col
+            # 7) Use affine geotransform convert x,y into the i,j for the exported area
+            if affine_transform is not None:
+                export_row, export_col = inv_affine(sorted_pts[0], sorted_pts[1], *affine_transform)
+            else:
+                export_row, export_col = sorted_pts[0].astype(numpy.int32), sorted_pts[1].astype(numpy.int32)
+            export_row -= start_row  # adjust to the sub area in memory
+            export_col -= start_col
 
-        # clip to the edges of the export area since our db tiles can cover the earth [0:block_rows-1, 0:block_cols]
-        row_out_of_bounds = numpy.logical_or(export_row < 0, export_row >= block_rows)
-        col_out_of_bounds = numpy.logical_or(export_col < 0, export_col >= block_cols)
-        out_of_bounds = numpy.logical_or(row_out_of_bounds, col_out_of_bounds)
-        if out_of_bounds.any():
-            sorted_pts = sorted_pts[:, ~out_of_bounds]
-            export_row = export_row[~out_of_bounds]
-            export_col = export_col[~out_of_bounds]
+            # clip to the edges of the export area since our db tiles can cover the earth [0:block_rows-1, 0:block_cols]
+            row_out_of_bounds = numpy.logical_or(export_row < 0, export_row >= block_rows)
+            col_out_of_bounds = numpy.logical_or(export_col < 0, export_col >= block_cols)
+            out_of_bounds = numpy.logical_or(row_out_of_bounds, col_out_of_bounds)
+            if out_of_bounds.any():
+                sorted_pts = sorted_pts[:, ~out_of_bounds]
+                export_row = export_row[~out_of_bounds]
+                export_col = export_col[~out_of_bounds]
 
-        # 8) Write the data into the export (single) tif.
-        # replace x,y with row, col for the points
-        # @todo write unit test to confirm that the sort is working in case numpy changes behavior.
-        #   currently assumes the last value is stored in the array if more than one have the same ri, rj indices.
-        replace_cells = numpy.logical_or(sorted_pts[2] >= output_sort_array[export_row, export_col],
-                                         numpy.isnan(output_sort_array[export_row, export_col]))
-        replacements = sorted_pts[4:, replace_cells]
-        ri = export_row[replace_cells]
-        rj = export_col[replace_cells]
-        output_array[:, ri, rj] = replacements
-        output_sort_array[ri, rj] = sorted_pts[2, replace_cells]
+            # 8) Write the data into the export (single) tif.
+            # replace x,y with row, col for the points
+            # @todo write unit test to confirm that the sort is working in case numpy changes behavior.
+            #   currently assumes the last value is stored in the array if more than one have the same ri, rj indices.
+            comp_func = numpy.less_equal if reverse_sort_key1 else numpy.greater_equal
+            replace_cells = numpy.logical_or(comp_func(sorted_pts[2], output_sort_array[export_row, export_col]),
+                                             numpy.isnan(output_sort_array[export_row, export_col]))
+            replacements = sorted_pts[4:, replace_cells]
+            ri = export_row[replace_cells]
+            rj = export_col[replace_cells]
+            output_array[:, ri, rj] = replacements
+            output_sort_array[ri, rj] = sorted_pts[2, replace_cells]
 
     def extract_soundings(self):
         # this is the same as extract area except score = depth
@@ -1038,6 +1041,46 @@ def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, sh
     return dataset
 
 
+def calc_area_array_params(x1, y1, x2, y2, res_x, res_y):
+    """ Compute a coherent min and max position and shape given a resolution.
+    Basically we may know the desired corners but they won't fit perfectly based on the resolution.
+    So we will compute what the adjusted corners would be and number of cells needed based on the resolution provided.
+
+    ex: (0, 10, 5, 0, 4, 3) would return (0, 0, 8, 12, 2, 4)
+    The minimum is held constant (0,0) the other corner would be moved from (5, 10) to (8, 12) because the resolution was (4,3)
+    and there would be 2 columns (xsize) and 4 rows (ysize)
+
+    Parameters
+    ----------
+    x1
+        an X corner coordinate
+    y1
+        an Y corner coordinate
+    x2
+        an X corner coordinate
+    y2
+        an Y corner coordinate
+    res_x
+        pixel size in x direction
+    res_y
+        pixel size in y direction
+
+    Returns
+    -------
+    min_x, min_y, max_x, max_y, cols (shape_x), rows (shape_y)
+
+    """
+    min_x = min(x1, x2)
+    min_y = min(y1, y2)
+    max_x = max(x1, x2)
+    max_y = max(y1, y2)
+    shape_x = int(numpy.ceil((max_x - min_x) / res_x))
+    shape_y = int(numpy.ceil((max_y - min_y) / res_y))
+    max_x = shape_x * res_x + min_x
+    max_y = shape_y * res_y + min_y
+    return min_x, min_y, max_x, max_y, shape_x, shape_y
+
+
 def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg, driver="GTiff"):
     """ Makes a north up gdal dataset with nodata = numpy.nan and LZW compression.
     Specifying a positive res_y will be input as a negative value into the gdal file,
@@ -1081,33 +1124,171 @@ def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg, dri
     gdal.dataset
 
     """
-    min_x = min(x1, x2)
-    min_y = min(y1, y2)
-    max_x = max(x1, x2)
-    max_y = max(y1, y2)
-    shape_x = int(numpy.ceil((max_x - min_x) / res_x))
-    shape_y = int(numpy.ceil((max_y - min_y) / res_y))
-    max_x = shape_x * res_x + min_x
-    max_y = shape_y * res_y + min_y
-
+    min_x, min_y, max_x, max_y, shape_x, shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
     dataset = make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg, driver)
     return dataset
 
+
 class SingleFile(WorldDatabase):
     def __init__(self, epsg, x1, y1, x2, y2, res_x, res_y, storage_directory):
-        min_x = min(x1, x2)
-        min_y = min(y1, y2)
-        max_x = max(x1, x2)
-        max_y = max(y1, y2)
-        self.shape_x = int(numpy.ceil((max_x - min_x) / res_x))
-        self.shape_y = int(numpy.ceil((max_y - min_y) / res_y))
-        max_x = self.shape_x * res_x + min_x
-        max_y = self.shape_y * res_y + min_y
-
+        min_x, min_y, max_x, max_y, shape_x, shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
         super().__init__(SingleFileBackend(epsg, min_x, min_y, max_x, max_y, AccumulationHistory, DiskHistory, TiffStorage, storage_directory))
 
     def init_tile(self, tx, ty, tile_history):
         return self.shape_y, self.shape_x  # rows and columns
+
+
+def iterate_gdal_image(dataset, band_nums = (1,), min_block_size=512, max_block_size=1024):
+    bands = [dataset.GetRasterBand(num) for num in band_nums]
+    block_sizes = bands[0].GetBlockSize()
+    row_block_size = min(max(block_sizes[1], min_block_size), max_block_size)
+    col_block_size = min(max(block_sizes[0], min_block_size), max_block_size)
+    col_size = bands[0].XSize
+    row_size = bands[0].YSize
+    nodata = bands[0].GetNoDataValue()
+    # read the data array in blocks
+    for ic in tqdm(range(0, col_size, col_block_size), mininterval=.7):
+        if ic + col_block_size < col_size:
+            cols = col_block_size
+        else:
+            cols = col_size - ic
+        for ir in tqdm(range(0, row_size, row_block_size), mininterval=.7):
+            if ir + row_block_size < row_size:
+                rows = row_block_size
+            else:
+                rows = row_size - ir
+            yield ic, ir, nodata, [band.ReadAsArray(ic, ir, cols, rows) for band in bands]
+
+
+def soundings_from_image(fname, res):
+    ds = gdal.Open(str(fname))
+    srs = osr.SpatialReference(wkt=ds.GetProjection())
+    affine_params = ds.GetGeoTransform()
+    epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
+    xform = ds.GetGeoTransform()  # x0, dxx, dyx, y0, dxy, dyy
+    d_val = ds.GetRasterBand(1)
+    col_size = d_val.XSize
+    row_size = d_val.YSize
+    del d_val
+    x1, y1 = affine(0, 0, *xform)
+    x2, y2 = affine(row_size, col_size, *xform)
+    try:  #allow res to be tuple or single value
+        res_x, res_y = res
+    except TypeError:
+        res_x = res_y = res
+
+    # move the minimum to an origin based on the resolution so future exports would match
+    # ex: res = 50 would make origin be 0 or 50 or 100 but not contain 77.3 etc.
+    if x1 < x2:
+        x1 -= x1 % res_x
+    else:
+        x2 -= x2 % res_x
+
+    if y1 < y2:
+        y1 -= y1 % res_y
+    else:
+        y2 -= y2 % res_y
+    min_x, min_y, max_x, max_y, shape_x, shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
+    # create an x,y,z array of nans in the necessary shape
+    output_array = numpy.full([3, shape_y, shape_x], numpy.nan, dtype=numpy.float64)
+    output_xform = [min_x, res_x, 0, max_y, 0, -res_y]
+    layers = [ds.GetRasterBand(b+1).GetDescription().lower() for b in range(ds.RasterCount)]
+    band_num = None
+    for name in ('elevation', 'depth'):
+        if name in layers:
+            band_num = layers.index(name) + 1
+            break
+    if band_num is None:
+        band_num = 1
+    for ic, ir, nodata, (depths,) in iterate_gdal_image(ds, (band_num,)):
+        depths[depths==nodata] = numpy.nan
+        r, c = numpy.indices(depths.shape)
+        x, y = affine_center(r + ir, c + ic, *xform)
+        WorldDatabase.merge_arrays(x, y, depths, depths, (x,y,depths), output_array, output_array[2], output_xform)
+    return srs, output_array
+
+
+def save_soundings_from_image(inputname, outputname, res, flip_depth=True):
+    # import pickle
+    # tmpname="c:\\temp\\sounding.numpy"
+    # if os.path.exists(tmpname):
+    #     fil = open(tmpname, "rb")
+    #     wkt = pickle.load(fil)
+    #     srs = osr.SpatialReference(wkt=wkt)
+    #     sounding_array = pickle.load(fil)
+    # else:
+
+    srs, sounding_array = soundings_from_image(inputname, res)
+    # make a geopackage of the x,y,z values held in the sounding matrix
+    sounding_array = sounding_array.reshape(sounding_array.shape[0], -1)
+    sounding_array = sounding_array[:, ~numpy.isnan(sounding_array[2])]
+    if flip_depth:
+        sounding_array[2] *= -1
+
+
+    # fil = open(tmpname, "wb")
+    # pickle.dump(srs.ExportToWkt(),fil)
+    # pickle.dump(sounding_array, fil)
+
+    dst_ds = ogr.GetDriverByName('Memory').CreateDataSource(outputname)
+    lyr = dst_ds.CreateLayer('SOUNDG', srs, ogr.wkbPoint)
+
+    # match the geopackage format from Caris
+    for field in (
+            # ogr.FieldDefn('SCAMIN', ogr.OFTInteger64),
+            # ogr.FieldDefn('SCAMAX', ogr.OFTInteger64),
+            # ogr.FieldDefn('EXPSOU', ogr.OFTString),
+            # ogr.FieldDefn('NOBJNM', ogr.OFTString),
+            # ogr.FieldDefn('OBJNAM', ogr.OFTString),
+            # ogr.FieldDefn('QUASOU', ogr.OFTString),
+            ogr.FieldDefn('SOUACC', ogr.OFTReal),
+            # ogr.FieldDefn('STATUS', ogr.OFTString),
+            # ogr.FieldDefn('TECSOU', ogr.OFTString),
+            # ogr.FieldDefn('VERDAT', ogr.OFTString),
+            ogr.FieldDefn('SORDAT', ogr.OFTString),
+            ogr.FieldDefn('SORIND', ogr.OFTString),
+            # ogr.FieldDefn('remrks', ogr.OFTString),
+            # ogr.FieldDefn('descrp', ogr.OFTString),
+            # ogr.FieldDefn('recomd', ogr.OFTString),
+            # ogr.FieldDefn('sftype', ogr.OFTString),
+            # ogr.FieldDefn('obstim', ogr.OFTString),
+            # ogr.FieldDefn('INFORM', ogr.OFTString),
+            # ogr.FieldDefn('NINFOM', ogr.OFTString),
+            # ogr.FieldDefn('NTXTDS', ogr.OFTString),
+            # ogr.FieldDefn('TXTDSC', ogr.OFTString),
+            # ogr.FieldDefn('userid', ogr.OFTString),
+            # ogr.FieldDefn('prmsec', ogr.OFTString),
+            # ogr.FieldDefn('prkyid', ogr.OFTString),
+            # ogr.FieldDefn('asgnmt', ogr.OFTString),
+            # ogr.FieldDefn('invreq', ogr.OFTString),
+            # ogr.FieldDefn('acqsts', ogr.OFTString),
+            # ogr.FieldDefn('images', ogr.OFTString),
+            # ogr.FieldDefn('keywrd', ogr.OFTString),
+            # ogr.FieldDefn('obsdpt', ogr.OFTReal),
+            # ogr.FieldDefn('tidadj', ogr.OFTReal),
+            # ogr.FieldDefn('tidfil', ogr.OFTString),
+            # ogr.FieldDefn('cnthgt', ogr.OFTReal),
+            # ogr.FieldDefn('updtim', ogr.OFTString),
+            # ogr.FieldDefn('dbkyid', ogr.OFTString),
+            # ogr.FieldDefn('hsdrec', ogr.OFTString),
+            # ogr.FieldDefn('onotes', ogr.OFTString)
+            ):
+        # if field.GetType()==ogr.OFTString:
+        #     field.SetWidth(254)
+        if 0 != lyr.CreateField(field):
+            raise RuntimeError("Creating field failed.", field.GetName())
+
+    sounding_array = sounding_array.astype(numpy.float).T
+    for x,y,z in sounding_array:
+        point = ogr.Geometry(ogr.wkbPoint)
+        point.AddPoint(float(x),float(y),float(z))
+        # Create a feature, using the attributes/fields that are required for this layer
+        feat = ogr.Feature(feature_def=lyr.GetLayerDefn())
+        feat.SetGeometry(point)
+        lyr.CreateFeature(feat)
+        # Clean up
+        feat.Destroy()
+    ogr.GetDriverByName('GPKG').CopyDataSource(dst_ds, dst_ds.GetName())
 
 if __name__ == "__main__":
     from xipe_dev.xipe2.history import DiskHistory, MemoryHistory, RasterHistory
@@ -1143,10 +1324,11 @@ if __name__ == "__main__":
     else:
         y2 -= y2 % res_y
 
-    db = SingleFile(26919, x1, y1, x2, y2, res_x, res_y, soundings_file.parent.joinpath('debug'))  # NAD823 zone 19.  WGS84 would be 32619
+    # db = SingleFile(26919, x1, y1, x2, y2, res_x, res_y, soundings_file.parent.joinpath('debug'))  # NAD823 zone 19.  WGS84 would be 32619
     # db.insert_survey_gdal(str(soundings_file))
     # fixme -- there is an issue where the database image and export image are written in reverse Y direction
     #  because of this the first position for one is top left and bottom left for the other.
     #  when converting the coordinate of the cell it basically ends up shifting by one
     #  image = (273250.0, 50.0, 0.0, 4586700.0, 0.0, -50.0)  db = (273250.0, 50, 0, 4552600.0, 0, 50)
-    db.export_area_new(str(soundings_file.parent.joinpath("output_soundings_debug5.tiff")), x1, y1, x2, y2, (res_x, res_y), )
+    # db.export_area_new(str(soundings_file.parent.joinpath("output_soundings_debug5.tiff")), x1, y1, x2, y2, (res_x, res_y), )
+    save_soundings_from_image(soundings_file, str(soundings_file)+"_test_positive.gpkg", 50)
