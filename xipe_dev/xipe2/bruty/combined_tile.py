@@ -1,4 +1,4 @@
-from xipe_dev.xipe2.abstract import VABC, abstractmethod
+from xipe_dev.xipe2.bruty.abstract import VABC, abstractmethod
 
 class Tile(VABC):
     """ Class to encapulate a raster that has a history.

@@ -4,9 +4,9 @@ import os
 import pytest
 import numpy
 
-from xipe_dev.xipe2.history import DiskHistory, MemoryHistory, RasterHistory
-from xipe_dev.xipe2.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
-from xipe_dev.xipe2.test_data import master_data, data_dir
+from xipe_dev.xipe2.bruty.history import DiskHistory, MemoryHistory, RasterHistory
+from xipe_dev.xipe2.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
+from xipe_dev.xipe2.bruty.test_data import master_data, data_dir
 
 
 @pytest.fixture(scope="module", params=list(master_data.values()), ids=list(master_data.keys()))

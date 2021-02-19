@@ -1,4 +1,4 @@
-from xipe2.abstract import VABC
+from xipe2.bruty.abstract import VABC
 
 class RasterDelta(VABC):
     def __init__(self, data_raster):
