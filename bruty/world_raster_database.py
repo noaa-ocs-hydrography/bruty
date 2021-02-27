@@ -17,10 +17,10 @@ except ModuleNotFoundError:
         return iterate_stuff  # if this doesn't work, try iter(iterate_stuff)
 
 from HSTB.drivers import bag
-from xipe_dev.xipe2.bruty.raster_data import LayersEnum, RasterData, affine, inv_affine, affine_center, arrays_dont_match
-from xipe_dev.xipe2.bruty.history import RasterHistory, AccumulationHistory
-from xipe_dev.xipe2.bruty.abstract import VABC, abstractmethod
-from xipe_dev.xipe2.bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles, TilingScheme
+from bruty.raster_data import LayersEnum, RasterData, affine, inv_affine, affine_center, arrays_dont_match
+from bruty.history import RasterHistory, AccumulationHistory
+from bruty.abstract import VABC, abstractmethod
+from bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles, TilingScheme
 
 geo_debug = False
 
@@ -1315,9 +1315,9 @@ def save_soundings_from_image(inputname, outputname, res, flip_depth=True):
 
 
 if __name__ == "__main__":
-    from xipe_dev.xipe2.bruty.history import DiskHistory, MemoryHistory, RasterHistory
-    from xipe_dev.xipe2.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
-    # from xipe_dev.xipe2.tests.test_data import master_data, data_dir
+    from bruty.history import DiskHistory, MemoryHistory, RasterHistory
+    from bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
+    # from tests.test_data import master_data, data_dir
 
     # use_dir = data_dir.joinpath('tile4_vr_utm_db')
     # db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619

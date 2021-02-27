@@ -1,6 +1,6 @@
 import numpy
 
-from xipe_dev.xipe2.bruty.abstract import VABC
+from bruty.abstract import VABC
 
 class TilingScheme(VABC):
     """
