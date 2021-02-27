@@ -39,7 +39,7 @@ import mock
 import sphinx_rtd_theme
 
 # prevents these modules from being loaded when creating docs - so RTD doesn't have to install everything for temporary environment
-MOCK_MODULES = ['scipy', 'matplotlib', 'matplotlib.pyplot', 'scipy.interpolate', 'osgeo', 'gdal', 'osr', 'HSTB.drivers.bag', 'bag']
+MOCK_MODULES = ['scipy', 'matplotlib', 'matplotlib.pyplot', 'scipy.interpolate', 'osgeo', 'gdal', 'osr', "rasterio", "rasterio.crs", 'HSTB.drivers.bag', 'bag']
 for mod_name in MOCK_MODULES:
     sys.modules[mod_name] = mock.Mock()
 
