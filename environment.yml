@@ -1,0 +1,17 @@
+name: ENVs100py
+channels:
+  - conda-forge
+dependencies:
+  - python=3.8   # or 2.7, 3.6 etc
+# things needed to build the docs
+  - sphinx
+  - sphinx-automodapi
+  - sphinx-autodoc-typehints
+  - python-graphviz
+  - sphinxcontrib-fulltoc
+  - sphinx_rtd_theme
+  - m2r2
+  - numpydoc
+# things the module needs to import
+  - numpy
+  - gdal
