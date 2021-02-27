@@ -1,1 +1,1 @@
-..  automodapi:: xipe_dev.xipe2.products_database
+..  automodapi:: bruty.products_database

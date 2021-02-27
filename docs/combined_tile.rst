@@ -1,1 +1,1 @@
-..  automodapi:: xipe_dev.xipe2.combined_tile
+..  automodapi:: bruty.combined_tile

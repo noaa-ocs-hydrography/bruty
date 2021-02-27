@@ -1,7 +1,7 @@
 ..
     .. mdinclude:: ../README.md
 
-NBS Xipe2 Product Modules
+NBS Bruty Product Modules
 ---------------------
 
 .. toctree::

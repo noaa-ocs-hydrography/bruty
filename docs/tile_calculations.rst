@@ -1,1 +1,1 @@
-..  automodapi:: xipe_dev.xipe2.tile_calculations
+..  automodapi:: bruty.tile_calculations

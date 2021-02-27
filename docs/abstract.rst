@@ -1,1 +1,1 @@
-..  automodapi:: xipe_dev.xipe2.abstract
+..  automodapi:: bruty.abstract

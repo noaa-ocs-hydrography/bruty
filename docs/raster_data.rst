@@ -1,1 +1,1 @@
-..  automodapi:: xipe_dev.xipe2.raster_data
+..  automodapi:: bruty.raster_data

@@ -1,1 +1,1 @@
-..  automodapi:: xipe_dev.xipe2.world_raster_database
+..  automodapi:: bruty.world_raster_database

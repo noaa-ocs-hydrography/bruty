@@ -1,1 +1,1 @@
-..  automodapi:: xipe_dev.xipe2.raster_delta
+..  automodapi:: bruty.raster_delta

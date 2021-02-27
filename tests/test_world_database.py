@@ -7,13 +7,13 @@ import pytest
 import numpy
 from osgeo import gdal
 
-from xipe_dev.xipe2.bruty.history import DiskHistory, MemoryHistory, RasterHistory
-from xipe_dev.xipe2.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
-from xipe_dev.xipe2.bruty.world_raster_database import LatLonBackend, GoogleLatLonTileBackend, UTMTileBackend, GoogleMercatorTileBackend, \
+from bruty.history import DiskHistory, MemoryHistory, RasterHistory
+from bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
+from bruty.world_raster_database import LatLonBackend, GoogleLatLonTileBackend, UTMTileBackend, GoogleMercatorTileBackend, \
     TMSMercatorTileBackend, merge_arrays
-from xipe_dev.xipe2.bruty.world_raster_database import WorldDatabase, onerr, get_geotransform
+from bruty.world_raster_database import WorldDatabase, onerr, get_geotransform
 
-from xipe_dev.xipe2.tests.test_data import master_data, data_dir, SW_5x5, NW_5x5, SE_5x5, MID_5x5
+from tests.test_data import master_data, data_dir, SW_5x5, NW_5x5, SE_5x5, MID_5x5
 
 nan = numpy.nan
 os.makedirs(data_dir, exist_ok=True)
@@ -215,7 +215,7 @@ def test_export_area():
 # g = tile_calculations.GlobalGeodetic(zoom=2); f=g.xy_to_tile; print(f(-100, 40)); print(f(100, -40)); print(f(182, -91))
 # g.tile_to_xy(0,0, 2)
 # tx, ty = g.xy_to_tile_index(45, 45); print(tx,ty); print(g.tile_index_to_xy(tx, ty))
-# from xipe_dev.xipe2.bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator
+# from bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator
 # merc = TMSTilesMercator(13)
 # tx, ty = merc.xy_to_tile_index(-8494906.0, 4419895.0); print(tx,ty); print(merc.tile_index_to_xy(tx, ty))
 # gmerc = GoogleTilesMercator(13)
