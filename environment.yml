@@ -13,5 +13,6 @@ dependencies:
   - m2r2
   - numpydoc
 # things the module needs to import
+  - pyproj
   - numpy
   - gdal
