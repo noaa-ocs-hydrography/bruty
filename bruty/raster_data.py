@@ -6,36 +6,13 @@ from collections.abc import Sequence
 from osgeo import gdal, osr
 
 from bruty.abstract import VABC, abstractmethod
+from bruty.utils import affine, affine_center, inv_affine
 
 # @todo - investigate the two choices: store full data arrays which should be faster and deltas could be created vs storing deltas which may be smaller but slower
 # @todo - also deltas need a mask (could use a mask or contributor value of -1) so we can tell the difference between no-change and was empty  (both are a nan right now that doesn't work)
 LayersEnum = enum.IntEnum('Layers', (("ELEVATION", 0), ("UNCERTAINTY", 1), ("CONTRIBUTOR", 2), ("SCORE", 3), ("FLAGS", 4), ("MASK", 5)))
 ALL_LAYERS = tuple(range(LayersEnum.MASK+1))
 INFO_LAYERS = tuple(range(LayersEnum.MASK))
-
-
-def affine(r, c, x0, dxx, dyx, y0, dxy, dyy):
-    """
-    Returns the affine transform -- normally row, column to x,y position.
-    If this is the geotransform from a gdal geotiff (for example) the coordinates are the displayed pixel corners - not the center.
-    If you want the center of the pixel then use affine_center
-    """
-    x = x0 + c * dxx + r * dyx
-    y = y0 + c * dxy + r * dyy
-    return x, y
-
-
-def inv_affine(x, y, x0, dxx, dyx, y0, dxy, dyy):
-    if dyx == 0 and dxy == 0:
-        c = numpy.array(numpy.floor((x - x0) / dxx), dtype=numpy.int32)
-        r = numpy.array(numpy.floor((y - y0) / dyy), dtype=numpy.int32)
-    else:
-        # @todo support skew projection
-        raise ValueError("non-North up affine transforms are not supported yet")
-    return r, c
-
-def affine_center(r, c, x0, dxx, dyx, y0, dxy, dyy):
-    return affine(r + 0.5, c + 0.5, x0, dxx, dyx, y0, dxy, dyy)
 
 class Storage(VABC):
     @staticmethod

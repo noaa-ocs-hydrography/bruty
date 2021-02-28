@@ -11,7 +11,7 @@ from bruty.history import DiskHistory, MemoryHistory, RasterHistory
 from bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
 from bruty.world_raster_database import LatLonBackend, GoogleLatLonTileBackend, UTMTileBackend, GoogleMercatorTileBackend, \
     TMSMercatorTileBackend, merge_arrays
-from bruty.world_raster_database import WorldDatabase, onerr, get_geotransform
+from bruty.world_raster_database import WorldDatabase, onerr, get_geotransformer
 
 from tests.test_data import master_data, data_dir, SW_5x5, NW_5x5, SE_5x5, MID_5x5
 
@@ -386,7 +386,7 @@ def test_pbc19_tile_4():
         print('processsing grid', bag_file)
         db.insert_survey_gdal(bag_file)
 
-    georef_transformer = get_geotransform(4326, 26919)
+    georef_transformer = get_geotransformer(4326, 26919)
     for txt_file in [r"C:\Data\nbs\PBC19_Tile4_surveys\D00111.csar.du.txt",
                      r"C:\Data\nbs\PBC19_Tile4_surveys\H06443.csar.du.txt",
                      r"C:\Data\nbs\PBC19_Tile4_surveys\H08615.csar.du.txt",
