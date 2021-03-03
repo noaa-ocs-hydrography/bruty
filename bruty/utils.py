@@ -47,9 +47,9 @@ def inv_affine(x, y, x0, dxx, dyx, y0, dxy, dyy):
         raise ValueError("non-North up affine transforms are not supported yet")
     return r, c
 
+
 def affine_center(r, c, x0, dxx, dyx, y0, dxy, dyy):
     return affine(r + 0.5, c + 0.5, x0, dxx, dyx, y0, dxy, dyy)
-
 
 
 def get_geotransformer(epsg1, epsg2):
@@ -75,18 +75,59 @@ def merge_array(pts, output_data, output_sort_key_values,
                 affine_transform=None, start_col=0, start_row=0, block_cols=None, block_rows=None,
                 reverse_sort=None, key_bounds=None
                 ):
-    # @todo add range limits on sort keys, so someone could say 0 < depth < 40
-    # merge a new dataset (array) into an existing dataset (array)
-    # the source data is compared to the existing data to determine if it should supercede the existing data.
-    # for example, this could be hydro-health score comparison for higher quality data or depths for shoal biasing.
-    #
-    # the incoming dataset uses a geotransform to go from source to destination coordinates
-    # then an affine transform to go from destination x,y to array row, column
+    """  Merge a new dataset (array) into an existing dataset (array).
+    The source data is compared to the existing data to determine if it should supercede the existing data.
+    For example, this could be hydro-health score comparison for higher quality data or depths for shoal biasing.
 
-    # basically pass in x,y,sort_key1, sort_key2, data_to_for_output_array, output_array, output_sort_key_result
-    # if affine_transform is None then pass in row, column instead of x,y
+    The incoming dataset uses a geotransform to go from source to destination coordinates
+    then an affine transform to go from destination x,y to array row, column
 
-    # note: modifies the output array in place
+    Basically pass in x,y,(sort_key1, sort_key2, ...), data_to_for_output_array, output_array, output_sort_key_result
+    if affine_transform is None then pass in row, column instead of x,y
+
+    note: modifies the output array in place
+
+    Parameters
+    ----------
+    pts
+        x,y, sort_key1, sort_key2, ..., data_for_output_array
+        The number of sort keys is defined by the length of the supplied output_sort_key_values array.
+    output_data
+        array of length that matches the 'data_for_output_array' without desired rows/cols for the data to be inserted to.
+        Must match the number of arrays passed in after the sort_keys
+    output_sort_key_values
+        array of length must match the number of sort keys passed in.
+        Must match the row/column size of the output_data
+    affine_transform
+        If supplied, converts from x,y to row,col
+    start_col
+        column offset value for the output_array.
+    start_row
+        row offset value for the output_array.
+    block_cols
+        maximum column to fill with data
+    block_rows
+        maximum row to fill with data
+    reverse_sort
+        If supplied, an iterable of booleans specifying if the corresponding sort_key is reversed.
+        ex: if sort keys were (z,x,y) and the smallest z was desired then (True, False, False) would be the reverse_sort value
+    key_bounds
+        Ranges of acceptable values for each sort passed in as (min, max).  Values outside this range will be discarded.
+        None can be supplied if no min or max is needed.  Either min or max could also be None.
+
+        ex: given a (z,lat,lon) sort, if elevations were desired between 0m and 40m and only from 30deg to 40deg latitude you
+        would specify ((0, 40), (30, 40), None).
+
+        ex: given a (z,lat,lon) sort, if elevations were desired below 0m and above 40deg latitude you
+        would specify ((None, 0), (40, None), None).
+
+        !!Note - exclusive bands do not work!!  passing in (40, 0) to try and get above 40 or below 0 will return nothing.
+        @todo add the ability to have a callback or specify the range is and/or so excludes would work.
+
+    Returns
+    -------
+    None
+    """
 
     pts = pts[:, ~numpy.isnan(pts[2])]  # remove empty cells (no score = empty)
     if len(pts[0]) > 0:
