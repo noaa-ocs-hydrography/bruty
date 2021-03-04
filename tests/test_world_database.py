@@ -13,7 +13,7 @@ from bruty.world_raster_database import LatLonBackend, GoogleLatLonTileBackend, 
     TMSMercatorTileBackend, merge_arrays
 from bruty.world_raster_database import WorldDatabase, onerr, get_geotransformer
 
-from tests.test_data import master_data, data_dir, SW_5x5, NW_5x5, SE_5x5, MID_5x5
+from test_data import master_data, data_dir, SW_5x5, NW_5x5, SE_5x5, MID_5x5
 
 nan = numpy.nan
 os.makedirs(data_dir, exist_ok=True)

@@ -6,7 +6,7 @@ import numpy
 
 from bruty.history import DiskHistory, MemoryHistory, RasterHistory
 from bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
-from tests.test_data import master_data, data_dir
+from test_data import master_data, data_dir
 
 
 @pytest.fixture(scope="module", params=list(master_data.values()), ids=list(master_data.keys()))
