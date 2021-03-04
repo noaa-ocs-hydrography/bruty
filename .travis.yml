@@ -23,9 +23,9 @@ install:
   # Useful for debugging any issues with conda
   - conda info -a
 
-  - conda create -q -n test-environment python=$TRAVIS_PYTHON_VERSION gdal numpy pytest pytest-mock pytest-cov
+  - conda create -q -n test-environment python=$TRAVIS_PYTHON_VERSION
   - conda activate test-environment
-  - conda install -c conda-forge rasterio pyproj
+  - conda install -c conda-forge gdal=3 pyproj rasterio numpy pytest pytest-mock pytest-cov
   - pip install -U pip
   # - python setup.py install
   - conda install git pip

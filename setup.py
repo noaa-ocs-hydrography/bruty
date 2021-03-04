@@ -21,7 +21,6 @@ VERSION = ''
 REQUIRED = [
             'numpy>=1.18.4',
             'pyproj>=2.6.1.post1',
-            'rasterio',
             ]
 
 # What packages are optional?
