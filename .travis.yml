@@ -31,6 +31,7 @@ install:
   - conda install git pip
   - pip install git+https://github.com/noaa-ocs-hydrography/bruty.git#egg=bruty
   - pip install git+https://github.com/noaa-ocs-hydrography/drivers.git#egg=hstb.drivers
+  - pip install git+https://github.com/noaa-ocs-hydrography/shared.git#egg=hstb.shared
 script:
   - pytest -vv
 
