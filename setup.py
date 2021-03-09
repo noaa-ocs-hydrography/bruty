@@ -3,7 +3,7 @@ import os
 import sys
 from shutil import rmtree
 
-from setuptools import find_packages, setup, Command
+from setuptools import find_namespace_packages, setup, Command
 
 # see https://github.com/navdeep-G/setup.py/blob/master/setup.py
 
@@ -16,7 +16,7 @@ EMAIL = "barry.gallagher@noaa.gov, eric.g.younkin@noaa.gov, Jack.Riley@noaa.gov,
 AUTHOR = "Barry Gallagher; Eric Younkin; Jack Riley; Chen Zhang; Glen Rice"
 REQUIRES_PYTHON = '>=3.8.2'
 VERSION = ''
-PACKAGES = ["bruty"] + find_packages(exclude=["tests", "*.tests", "*.tests.*", "tests.*"])
+PACKAGES = find_namespace_packages(exclude=["tests", "*.tests", "*.tests.*", "tests.*"])
 
 # What packages are required for this module to be executed?
 REQUIRED = [
