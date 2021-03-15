@@ -7,8 +7,8 @@ from abc import ABC, abstractmethod
 
 import numpy
 
-from bruty.abstract import VABC
-from bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum
+from nbs.bruty.abstract import VABC
+from nbs.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum
 
 class History(VABC, MutableSequence):
     """ Base class for things that want to act like a list.  Intent is to maintain something that acts like a list and returns/stores

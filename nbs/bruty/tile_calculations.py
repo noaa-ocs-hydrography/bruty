@@ -1,6 +1,6 @@
 import numpy
 
-from bruty.abstract import VABC
+from nbs.bruty.abstract import VABC
 
 class TilingScheme(VABC):
     """

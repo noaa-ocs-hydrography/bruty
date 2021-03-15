@@ -10,11 +10,11 @@ import rasterio.crs
 from osgeo import gdal, osr, ogr
 
 from HSTB.drivers import bag
-from bruty.utils import merge_arrays, merge_array, get_geotransformer, onerr, tqdm, make_gdal_dataset_area, calc_area_array_params
-from bruty.raster_data import LayersEnum, RasterData, affine, inv_affine, affine_center, arrays_dont_match
-from bruty.history import RasterHistory, AccumulationHistory
-from bruty.abstract import VABC, abstractmethod
-from bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles, TilingScheme
+from nbs.bruty.utils import merge_arrays, merge_array, get_geotransformer, onerr, tqdm, make_gdal_dataset_area, calc_area_array_params
+from nbs.bruty.raster_data import LayersEnum, RasterData, affine, inv_affine, affine_center, arrays_dont_match
+from nbs.bruty.history import RasterHistory, AccumulationHistory
+from nbs.bruty.abstract import VABC, abstractmethod
+from nbs.bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles, TilingScheme
 
 geo_debug = False
 
@@ -382,6 +382,8 @@ class WorldDatabase(VABC):
         # fixme for survey_data - use pandas?  structured arrays?
 
         # @todo Allow for pixel sizes, right now treating as point rather than say 8m or 4m coverages
+        if not isinstance(contrib_name, str):
+            contrib_name = str(contrib_name)
         if not accumulation_db:
             accumulation_db = self.db
         # Compute the tile indices for each point
@@ -517,7 +519,7 @@ class WorldDatabase(VABC):
         self.db.append_accumulation_db(storage_db)
         shutil.rmtree(storage_db.data_path, onerror=onerr)
 
-    def insert_survey_gdal(self, path_to_survey_data, survey_score=100, flag=0):
+    def insert_survey_gdal(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=None):
         """ Insert a gdal readable dataset into the database.
         Currently works for BAG and probably geotiff.
         Parameters
@@ -534,9 +536,12 @@ class WorldDatabase(VABC):
         None
 
         """
-        ds = gdal.Open(path_to_survey_data)
+        ds = gdal.Open(str(path_to_survey_data))
         x0, dxx, dyx, y0, dxy, dyy = ds.GetGeoTransform()
-        epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
+        if override_epsg is None:
+            epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
+        else:
+            epsg = override_epsg
         # fixme - do coordinate transforms correctly
         print("@todo - do transforms correctly with proj/vdatum etc")
         georef_transformer = get_geotransformer(epsg, self.db.epsg)
@@ -941,9 +946,9 @@ class SingleFile(WorldDatabase):
 
 
 if __name__ == "__main__":
-    from bruty.history import DiskHistory, MemoryHistory, RasterHistory
-    from bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
-    from bruty.utils import save_soundings_from_image
+    from nbs.bruty.history import DiskHistory, MemoryHistory, RasterHistory
+    from nbs.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
+    from nbs.bruty.utils import save_soundings_from_image
 
     # from tests.test_data import master_data, data_dir
 
@@ -952,40 +957,77 @@ if __name__ == "__main__":
     # db.export_area_old(use_dir.joinpath("export_tile_old.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
     # db.export_area(use_dir.joinpath("export_tile_new.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
 
-    soundings_files = [pathlib.Path(r"C:\Data\nbs\PBC19_Tile4_surveys\soundings\Tile4_4m_20210219_source.tiff"),
-                       pathlib.Path(r"C:\Data\nbs\PBC19_Tile4_surveys\soundings\Tile4_4m_20201118_source.tiff"), ]
+    test_mississippi = True
+    if test_mississippi:
+        use_dir = r'E:\Mississipi\tile4_metadata_utm_db'
+        if os.path.exists(use_dir):
+            shutil.rmtree(use_dir, onerror=onerr)
 
-    for soundings_file in soundings_files:
-        ds = gdal.Open(str(soundings_file))
-        # epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
-        xform = ds.GetGeoTransform()  # x0, dxx, dyx, y0, dxy, dyy
-        d_val = ds.GetRasterBand(1)
-        col_size = d_val.XSize
-        row_size = d_val.YSize
-        del d_val, ds
-        x1, y1 = affine(0, 0, *xform)
-        x2, y2 = affine(row_size, col_size, *xform)
-        res = 50
-        res_x = res
-        res_y = res
-        # move the minimum to an origin based on the resolution so future exports would match
-        if x1 < x2:
-            x1 -= x1 % res_x
-        else:
-            x2 -= x2 % res_x
+        db = WorldDatabase(UTMTileBackend(26915, RasterHistory, DiskHistory, TiffStorage,
+                                          use_dir))  # NAD823 zone 19.  WGS84 would be 32619
 
-        if y1 < y2:
-            y1 -= y1 % res_y
-        else:
-            y2 -= y2 % res_y
+        soundings_dirs = ["G:\Data\NBS\UTM15\NCEI\H13193_MB_VR_LWRP.bag",
+                          # "G:\Data\NBS\UTM15\NCEI\H13194_MB_VR_LWRP.bag",
+                          "G:\Data\NBS\UTM15\NCEI\H13330_MB_VR_LWRP.bag",
+                          "G:\Data\NBS\UTM15\NCEI\H13188_MB_VR_LWRP.bag",
+                          "G:\Data\NBS\UTM15\NCEI\H13189_MB_VR_LWRP.bag",
+                          "G:\Data\NBS\UTM15\NCEI\H13190_MB_VR_LWRP.bag",
+                          "G:\Data\NBS\UTM15\NCEI\H13191_MB_VR_LWRP.bag",
+                          "G:\Data\NBS\UTM15\NCEI\H13192_MB_VR_LWRP.bag",
+                          ## r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13194",
+                          # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13330",
+                          # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13188",
+                          # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13189",
+                          # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13190",
+                          # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13191",
+                          # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13192",
+                          # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13193",
+                          ]
+        for soundings_dir in soundings_dirs:
+            directory = pathlib.Path(soundings_dir)
+            bag_file = directory.joinpath(directory.name + "_MB_VR_LWRP.bag")
+            if directory == r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13194":
+                epsg = 26916
+            else:
+                epsg = 26915
+            db.insert_survey_gdal(bag_file, override_epsg=epsg)
 
-        #  note: there is an issue where the database image and export image are written in reverse Y direction
-        #  because of this the first position for one is top left and bottom left for the other.
-        #  when converting the coordinate of the cell it basically ends up shifting by one
-        #  image = (273250.0, 50.0, 0.0, 4586700.0, 0.0, -50.0)  db = (273250.0, 50, 0, 4552600.0, 0, 50)
-        #  fixed by using cell centers rather than corners.
-        #  Same problem could happen of course if the centers are the edges of the export tiff
-        # db = SingleFile(26919, x1, y1, x2, y2, res_x, res_y, soundings_file.parent.joinpath('debug'))  # NAD823 zone 19.  WGS84 would be 32619
-        # db.insert_survey_gdal(str(soundings_file))
-        # db.export_area_new(str(soundings_file.parent.joinpath("output_soundings_debug5.tiff")), x1, y1, x2, y2, (res_x, res_y), )
-        save_soundings_from_image(soundings_file, str(soundings_file) + "_3.gpkg", 50)
+    test_soundings = False
+    if test_soundings:
+        soundings_files = [pathlib.Path(r"C:\Data\nbs\PBC19_Tile4_surveys\soundings\Tile4_4m_20210219_source.tiff"),
+                           pathlib.Path(r"C:\Data\nbs\PBC19_Tile4_surveys\soundings\Tile4_4m_20201118_source.tiff"),
+                           ]
+        for soundings_file in soundings_files:
+            ds = gdal.Open(str(soundings_file))
+            # epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
+            xform = ds.GetGeoTransform()  # x0, dxx, dyx, y0, dxy, dyy
+            d_val = ds.GetRasterBand(1)
+            col_size = d_val.XSize
+            row_size = d_val.YSize
+            del d_val, ds
+            x1, y1 = affine(0, 0, *xform)
+            x2, y2 = affine(row_size, col_size, *xform)
+            res = 50
+            res_x = res
+            res_y = res
+            # move the minimum to an origin based on the resolution so future exports would match
+            if x1 < x2:
+                x1 -= x1 % res_x
+            else:
+                x2 -= x2 % res_x
+
+            if y1 < y2:
+                y1 -= y1 % res_y
+            else:
+                y2 -= y2 % res_y
+
+            #  note: there is an issue where the database image and export image are written in reverse Y direction
+            #  because of this the first position for one is top left and bottom left for the other.
+            #  when converting the coordinate of the cell it basically ends up shifting by one
+            #  image = (273250.0, 50.0, 0.0, 4586700.0, 0.0, -50.0)  db = (273250.0, 50, 0, 4552600.0, 0, 50)
+            #  fixed by using cell centers rather than corners.
+            #  Same problem could happen of course if the centers are the edges of the export tiff
+            # db = SingleFile(26919, x1, y1, x2, y2, res_x, res_y, soundings_file.parent.joinpath('debug'))  # NAD823 zone 19.  WGS84 would be 32619
+            # db.insert_survey_gdal(str(soundings_file))
+            # db.export_area_new(str(soundings_file.parent.joinpath("output_soundings_debug5.tiff")), x1, y1, x2, y2, (res_x, res_y), )
+            save_soundings_from_image(soundings_file, str(soundings_file) + "_3.gpkg", 50)

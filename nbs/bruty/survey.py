@@ -1,4 +1,4 @@
-from bruty.abstract import VABC, abstractmethod
+from nbs.bruty.abstract import VABC, abstractmethod
 
 class SurveyHistory(VABC):
     def __init__(self, survey_id):

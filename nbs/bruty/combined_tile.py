@@ -1,4 +1,4 @@
-from bruty.abstract import VABC, abstractmethod
+from nbs.bruty.abstract import VABC, abstractmethod
 
 class Tile(VABC):
     """ Class to encapulate a raster that has a history.

@@ -5,8 +5,8 @@ from collections.abc import Sequence
 
 from osgeo import gdal, osr
 
-from bruty.abstract import VABC, abstractmethod
-from bruty.utils import affine, affine_center, inv_affine
+from nbs.bruty.abstract import VABC, abstractmethod
+from nbs.bruty.utils import affine, affine_center, inv_affine
 
 # @todo - investigate the two choices: store full data arrays which should be faster and deltas could be created vs storing deltas which may be smaller but slower
 # @todo - also deltas need a mask (could use a mask or contributor value of -1) so we can tell the difference between no-change and was empty  (both are a nan right now that doesn't work)
