@@ -10,7 +10,8 @@ import rasterio.crs
 from osgeo import gdal, osr, ogr
 
 from HSTB.drivers import bag
-from nbs.bruty.utils import merge_arrays, merge_array, get_geotransformer, onerr, tqdm, make_gdal_dataset_area, calc_area_array_params, compute_delta_coord
+from nbs.bruty.utils import merge_arrays, merge_array, get_geotransformer, onerr, tqdm, make_gdal_dataset_size, make_gdal_dataset_area, \
+    calc_area_array_params, compute_delta_coord
 from nbs.bruty.raster_data import LayersEnum, RasterData, affine, inv_affine, affine_center, arrays_dont_match
 from nbs.bruty.history import RasterHistory, AccumulationHistory
 from nbs.bruty.abstract import VABC, abstractmethod
@@ -795,7 +796,13 @@ class WorldDatabase(VABC):
         max_cols, max_rows = score_band.XSize, score_band.YSize
 
         # 2) Get the master db tile indices that the area overlaps and iterate them
-        for txi, tyi, tile_history in self.db.iter_tiles(x1, y1, x2, y2):
+        if geotransform:
+            tile_x1, tile_y1 = geotransform.transform(x1, y1)
+            tile_x2, tile_y2 = geotransform.transform(x2, y2)
+        else:
+            tile_x1, tile_y1, tile_x2, tile_y2 = x1, y1, x2, y2
+
+        for txi, tyi, tile_history in self.db.iter_tiles(tile_x1, tile_y1, tile_x2, tile_y2):
             # if txi != 3504 or tyi != 4155:
             #     continue
             try:
@@ -843,11 +850,11 @@ class WorldDatabase(VABC):
         tile_r, tile_c = numpy.indices(tile_layers.shape[1:])
         # treating the cells as areas means we want to export based on the center not the corner
         tile_x, tile_y = raster_data.rc_to_xy_using_dims(tile_score.shape[0], tile_score.shape[1], tile_r, tile_c, center=True)
-        if geotransform:  # convert to target epsg
-            tile_x, tile_y = geotransform(tile_x, tile_y)
+        # if geotransform:  # convert to target epsg
+        #     tile_x, tile_y = geotransform.transform(tile_x, tile_y)
 
         merge_arrays(tile_x, tile_y, (tile_score, tile_depth), tile_layers,
-                     export_sub_area, sort_key_scores, affine_transform,
+                     export_sub_area, sort_key_scores, geotransform, affine_transform,
                      start_col, start_row, block_cols, block_rows,
                      reverse_sort=reverse_sort)
 
@@ -889,61 +896,6 @@ class WorldDatabase(VABC):
         pass
 
 
-def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg, driver="GTiff"):
-    """ Makes a north up gdal dataset with nodata = numpy.nan and LZW compression.
-    Specifying a positive res_y will be input as a negative value into the gdal file,
-    since tif/gdal likes max_y and a negative Y pixel size.
-    i.e. the geotransform in gdal will be stored as [min_x, res_x, 0, max_y, 0, -res_y]
-    Parameters
-    ----------
-    fname
-        filename to create
-    bands
-        list of names of bands in the file
-    min_x
-        minimum X coordinate
-    max_y
-        maximum Y coordinate (because tiff images like to specify max Y and a negative res_y)
-    res_x
-        pixel size in x direction
-    res_y
-        pixel size in y direction
-    shape_x
-        number of pixels in X direction (columns)
-    shape_y
-        number of pixels in Y directions (rows)
-    epsg
-        epsg of the target coordinate system
-    driver
-        gdal driver name of the output file (defaults to geotiff)
-
-    Returns
-    -------
-    gdal.dataset
-
-    """
-    driver = gdal.GetDriverByName(driver)
-    dataset = driver.Create(str(fname), xsize=shape_x, ysize=shape_y, bands=bands, eType=gdal.GDT_Float32,
-                            options=['COMPRESS=LZW'])
-
-    # Set location
-    gt = [min_x, res_x, 0, max_y, 0, -res_y]  # north up
-    dataset.SetGeoTransform(gt)
-
-    # Get raster projection
-    srs = osr.SpatialReference()
-    srs.ImportFromEPSG(epsg)
-    dest_wkt = srs.ExportToWkt()
-
-    # Set projection
-    dataset.SetProjection(dest_wkt)
-    band = dataset.GetRasterBand(1)
-    band.SetNoDataValue(numpy.nan)
-    del band
-    return dataset
-
-
-
 class SingleFile(WorldDatabase):
     def __init__(self, epsg, x1, y1, x2, y2, res_x, res_y, storage_directory):
         min_x, min_y, max_x, max_y, shape_x, shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
@@ -966,14 +918,18 @@ if __name__ == "__main__":
     # db.export_area_old(use_dir.joinpath("export_tile_old.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
     # db.export_area(use_dir.joinpath("export_tile_new.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
 
-    build_mississippi = True
-    export_mississippi = False
-    process_utm_15 = False
+    build_mississippi = False
+    export_mississippi = True
+    process_utm_15 = True
     output_res = (4, 4)  # desired output size in meters
-
+    data_dir = pathlib.Path(r'G:\Data\NBS\Mississipi')
     if process_utm_15:
         epsg = 26915
-        use_dir = pathlib.Path(r'G:\Data\NBS\Mississipi\vrbag_utm15_db')
+        max_lon = -90
+        min_lon = -96
+        max_lat = 35
+        min_lat = 0
+        use_dir = data_dir.joinpath('vrbag_utm15_db')
         vr_bags = [r"G:\Data\NBS\UTM15\NCEI\H13193_MB_VR_LWRP.bag",
                    # r"G:\Data\NBS\UTM15\NCEI\H13194_MB_VR_LWRP.bag",
                    r"G:\Data\NBS\UTM15\NCEI\H13330_MB_VR_LWRP.bag",
@@ -993,7 +949,11 @@ if __name__ == "__main__":
                    ]
     else:
         epsg = 26916
-        use_dir = pathlib.Path(r'G:\Data\NBS\Mississipi\vrbag_utm16_db')
+        max_lon = -84
+        min_lon = -90
+        max_lat = 35
+        min_lat = 0
+        use_dir = data_dir.joinpath('vrbag_utm16_db')
         vr_bags = [r"G:\Data\NBS\UTM16\NCEI\H13195_MB_VR_LWRP.bag",
                    r"G:\Data\NBS\UTM16\NCEI\H13196_MB_VR_LWRP.bag",
                    r"G:\Data\NBS\UTM16\NCEI\H13196_MB_VR_MLLW.bag",
@@ -1022,31 +982,38 @@ if __name__ == "__main__":
     if export_mississippi:
         area_shape_fname = r"G:\Data\NBS\Support_Files\MCD_Bands\Band5\Band5_V6.shp"
         ds = gdal.OpenEx(area_shape_fname)
-        export_epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
         # ds.GetLayerCount()
         lyr = ds.GetLayer(0)
+        srs = lyr.GetSpatialRef()
+        export_epsg = rasterio.crs.CRS.from_string(srs.ExportToWkt()).to_epsg()
         lyr.GetFeatureCount()
         lyrdef = lyr.GetLayerDefn()
         for i in range(lyrdef.GetFieldCount()):
-            flddef = lyrdef.GetFieldDefn(1)
+            flddef = lyrdef.GetFieldDefn(i)
             if flddef.name == "CellName":
                 cell_field = i
-        geotransform = get_geotransformer(db.db.tile_scheme.epsg, export_epsg)
-        inv_geotransform = get_geotransformer(export_epsg, db.db.tile_scheme.epsg)
+                break
+        geotransform = get_geotransformer(export_epsg, db.db.tile_scheme.epsg)
+        inv_geotransform = get_geotransformer(db.db.tile_scheme.epsg, export_epsg)
         for feat in lyr:
             geom = feat.GetGeometryRef()
             # geom.GetGeometryCount()
             minx, maxx, miny, maxy = geom.GetEnvelope()  # (-164.7, -164.39999999999998, 67.725, 67.8)
-            cell_name = feat.GetField(cell_field)
             # output in WGS84
-            # convert 4m size at center of cell for resolution purposes
             cx = (minx+maxx)/2.0
             cy = (miny+maxy)/2.0
-            dx, dy = compute_delta_coord(cx, cy, *output_res, geotransform, inv_geotransform)
-            db.export_area(use_dir.joinpath(cell_name), minx, miny, maxx, maxy, (dx, dy), target_epsg=export_epsg)
+            # crop to the area around Mississippi
+            if cx > min_lon and cx < max_lon and cy > min_lat and cy < max_lat:
+                cell_name = feat.GetField(cell_field)
+                # convert user res (4m in testing) size at center of cell for resolution purposes
+                dx, dy = compute_delta_coord(cx, cy, *output_res, geotransform, inv_geotransform)
+                db.export_area(data_dir.joinpath(cell_name+".tif"), minx, miny, maxx, maxy, (dx, dy), target_epsg=export_epsg)
 
-            # output in native UTM
-            db.export_area(use_dir.joinpath(cell_name), minx, miny, maxx, maxy, output_res, target_epsg=export_epsg)
+                # output in native UTM
+                utm_minx, utm_miny = geotransform.transform(minx, miny)
+                utm_maxx, utm_maxy = geotransform.transform(maxx, maxy)
+                db.export_area(data_dir.joinpath(cell_name+"_utm.tif"), utm_minx, utm_miny, utm_maxx, utm_maxy, output_res)
+                break
 
     test_soundings = False
     if test_soundings:

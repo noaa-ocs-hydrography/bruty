@@ -72,7 +72,7 @@ def merge_arrays(x, y, keys, data, *args, **kywrds):
 
 
 def merge_array(pts, output_data, output_sort_key_values,
-                affine_transform=None, start_col=0, start_row=0, block_cols=None, block_rows=None,
+                geotransform=None, affine_transform=None, start_col=0, start_row=0, block_cols=None, block_rows=None,
                 reverse_sort=None, key_bounds=None
                 ):
     """  Merge a new dataset (array) into an existing dataset (array).
@@ -98,6 +98,8 @@ def merge_array(pts, output_data, output_sort_key_values,
     output_sort_key_values
         array of length must match the number of sort keys passed in.
         Must match the row/column size of the output_data
+    geotransform
+        object with a .transform(x,y) method returning x2, y2
     affine_transform
         If supplied, converts from x,y to row,col
     start_col
@@ -151,10 +153,15 @@ def merge_array(pts, output_data, output_sort_key_values,
         sorted_pts = pts[:, sorted_ind]
 
         # 7) Use affine geotransform convert x,y into the i,j for the exported area
-        if affine_transform is not None:
-            export_rows, export_cols = inv_affine(sorted_pts[0], sorted_pts[1], *affine_transform)
+        if geotransform:
+            transformed_x, transformed_y = geotransform.transform(sorted_pts[0], sorted_pts[1])
         else:
-            export_rows, export_cols = sorted_pts[0].astype(numpy.int32), sorted_pts[1].astype(numpy.int32)
+            transformed_x, transformed_y = sorted_pts[0], sorted_pts[1]
+
+        if affine_transform is not None:
+            export_rows, export_cols = inv_affine(transformed_x, transformed_y, *affine_transform)
+        else:
+            export_rows, export_cols = transformed_x.astype(numpy.int32), transformed_y.astype(numpy.int32)
         export_rows -= start_row  # adjust to the sub area in memory
         export_cols -= start_col
 
@@ -399,6 +406,29 @@ def calc_area_array_params(x1, y1, x2, y2, res_x, res_y):
 
 
 def compute_delta_coord(x, y, dx, dy, geotransform, inv_geotransform):
+    """ Given a refernce point, desired delta and geotransform+inverse, compute what the desired delta in the target SRS is in the source SRS.
+    For example, 4 meters in Mississippi would be (epsg 4326 is WGS84 and 26915 is UTMzone 15N):
+    compute_delta_coord(-93, 20, 4, 4, get_geotransform(4326, 26915), get_geotransform(26915, 4326))
+    Parameters
+    ----------
+    x
+        X coordinate to work from in the source reference system
+    y
+        Y coordinate to work from in the source reference system
+    dx
+        The X distance desired in the target reference system
+    dy
+        The Y distance desired in the target reference system
+    geotransform
+        a geotransform (something with a .transform method) going from source to target
+    inv_geotransform
+        a geotransform (something with a .transform method) going from target to source
+
+    Returns
+    -------
+    dx, dy
+        The delta in x and y in the source reference system for the given delta in the target system
+    """
     target_x, target_y = geotransform.transform(x, y)
     x2, y2 = inv_geotransform.transform(target_x + dx, target_y + dy)
     sdx = numpy.abs(x2 - x)
@@ -410,6 +440,60 @@ def compute_delta_coord_epsg(x, y, dx, dy, source_epsg, target_epsg):
     geotransform = get_geotransformer(source_epsg, target_epsg)
     inv_geotransform = get_geotransformer(target_epsg, source_epsg)
     return compute_delta_coord(x, y, dx, dy, geotransform, inv_geotransform)
+
+
+def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg, driver="GTiff"):
+    """ Makes a north up gdal dataset with nodata = numpy.nan and LZW compression.
+    Specifying a positive res_y will be input as a negative value into the gdal file,
+    since tif/gdal likes max_y and a negative Y pixel size.
+    i.e. the geotransform in gdal will be stored as [min_x, res_x, 0, max_y, 0, -res_y]
+    Parameters
+    ----------
+    fname
+        filename to create
+    bands
+        list of names of bands in the file
+    min_x
+        minimum X coordinate
+    max_y
+        maximum Y coordinate (because tiff images like to specify max Y and a negative res_y)
+    res_x
+        pixel size in x direction
+    res_y
+        pixel size in y direction
+    shape_x
+        number of pixels in X direction (columns)
+    shape_y
+        number of pixels in Y directions (rows)
+    epsg
+        epsg of the target coordinate system
+    driver
+        gdal driver name of the output file (defaults to geotiff)
+
+    Returns
+    -------
+    gdal.dataset
+
+    """
+    driver = gdal.GetDriverByName(driver)
+    dataset = driver.Create(str(fname), xsize=shape_x, ysize=shape_y, bands=bands, eType=gdal.GDT_Float32,
+                            options=['COMPRESS=LZW'])
+
+    # Set location
+    gt = [min_x, res_x, 0, max_y, 0, -res_y]  # north up
+    dataset.SetGeoTransform(gt)
+
+    # Get raster projection
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(epsg)
+    dest_wkt = srs.ExportToWkt()
+
+    # Set projection
+    dataset.SetProjection(dest_wkt)
+    band = dataset.GetRasterBand(1)
+    band.SetNoDataValue(numpy.nan)
+    del band
+    return dataset
 
 
 def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg, driver="GTiff"):
