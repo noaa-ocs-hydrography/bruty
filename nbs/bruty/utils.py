@@ -203,7 +203,6 @@ def merge_array(pts, output_data, output_sort_key_values,
             key[ri, rj] = sorted_pts[2 + key_num, replace_cells]
 
 
-
 def soundings_from_image(fname, res):
     ds = gdal.Open(str(fname))
     srs = osr.SpatialReference(wkt=ds.GetProjection())
@@ -358,6 +357,7 @@ def save_soundings_from_image(inputname, outputname, res, flip_depth=True):
         feat.Destroy()
     ogr.GetDriverByName('GPKG').CopyDataSource(dst_ds, dst_ds.GetName())
 
+
 def calc_area_array_params(x1, y1, x2, y2, res_x, res_y):
     """ Compute a coherent min and max position and shape given a resolution.
     Basically we may know the desired corners but they won't fit perfectly based on the resolution.
@@ -396,6 +396,20 @@ def calc_area_array_params(x1, y1, x2, y2, res_x, res_y):
     max_x = shape_x * res_x + min_x
     max_y = shape_y * res_y + min_y
     return min_x, min_y, max_x, max_y, shape_x, shape_y
+
+
+def compute_delta_coord(x, y, dx, dy, geotransform, inv_geotransform):
+    target_x, target_y = geotransform.transform(x, y)
+    x2, y2 = inv_geotransform.transform(target_x + dx, target_y + dy)
+    sdx = numpy.abs(x2 - x)
+    sdy = numpy.abs(y2 - y)
+    return sdx, sdy
+
+
+def compute_delta_coord_epsg(x, y, dx, dy, source_epsg, target_epsg):
+    geotransform = get_geotransformer(source_epsg, target_epsg)
+    inv_geotransform = get_geotransformer(target_epsg, source_epsg)
+    return compute_delta_coord(x, y, dx, dy, geotransform, inv_geotransform)
 
 
 def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg, driver="GTiff"):
@@ -444,5 +458,3 @@ def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg, dri
     min_x, min_y, max_x, max_y, shape_x, shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
     dataset = make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg, driver)
     return dataset
-
-

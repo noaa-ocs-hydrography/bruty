@@ -386,14 +386,13 @@ def test_pbc19_tile_4():
         print('processsing grid', bag_file)
         db.insert_survey_gdal(bag_file)
 
-    georef_transformer = get_geotransformer(4326, 26919)
     for txt_file in [r"C:\Data\nbs\PBC19_Tile4_surveys\D00111.csar.du.txt",
                      r"C:\Data\nbs\PBC19_Tile4_surveys\H06443.csar.du.txt",
                      r"C:\Data\nbs\PBC19_Tile4_surveys\H08615.csar.du.txt",
                      r"C:\Data\nbs\PBC19_Tile4_surveys\F00363.csar.du.txt",
                      r"C:\Data\nbs\PBC19_Tile4_surveys\H06442.csar.du.txt", ]:
         print('processsing txt', txt_file)
-        db.insert_txt_survey(txt_file, transformer=georef_transformer)
+        db.insert_txt_survey(txt_file, override_epsg=4326)
 
 
 def test_pbc19_vr():

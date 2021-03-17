@@ -10,7 +10,7 @@ import rasterio.crs
 from osgeo import gdal, osr, ogr
 
 from HSTB.drivers import bag
-from nbs.bruty.utils import merge_arrays, merge_array, get_geotransformer, onerr, tqdm, make_gdal_dataset_area, calc_area_array_params
+from nbs.bruty.utils import merge_arrays, merge_array, get_geotransformer, onerr, tqdm, make_gdal_dataset_area, calc_area_array_params, compute_delta_coord
 from nbs.bruty.raster_data import LayersEnum, RasterData, affine, inv_affine, affine_center, arrays_dont_match
 from nbs.bruty.history import RasterHistory, AccumulationHistory
 from nbs.bruty.abstract import VABC, abstractmethod
@@ -326,7 +326,7 @@ class WorldDatabase(VABC):
         self.db = backend
         self.next_contributor = 0  # fixme: this is a temporary hack until we have a database of surveys with unique ids available
 
-    def insert_txt_survey(self, path_to_survey_data, survey_score=100, flags=0, format=None, transformer=None):
+    def insert_txt_survey(self, path_to_survey_data, survey_score=100, flags=0, format=None, override_epsg=None):
         """ Reads a text file and inserts into the tiled database.
         The format parameter is passed to numpy.loadtxt and needs to have names of x, y, depth, uncertainty.
 
@@ -348,6 +348,12 @@ class WorldDatabase(VABC):
         -------
         None
         """
+        if override_epsg is None:
+            epsg = rasterio.crs.CRS.from_string(vr.srs.ExportToWkt()).to_epsg()
+        else:
+            epsg = override_epsg
+        transformer = get_geotransformer(epsg, self.db.epsg)
+
         if not format:
             format = [('y', 'f8'), ('x', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')]
         data = numpy.loadtxt(path_to_survey_data, dtype=format)
@@ -460,7 +466,7 @@ class WorldDatabase(VABC):
         # return rows, cols
         return 512, 512
 
-    def insert_survey_vr(self, path_to_survey_data, survey_score=100, flag=0):
+    def insert_survey_vr(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=None):
         """
         Parameters
         ----------
@@ -475,7 +481,10 @@ class WorldDatabase(VABC):
         vr = bag.VRBag(path_to_survey_data)
         refinement_list = numpy.argwhere(vr.get_valid_refinements())
         print("@todo - do transforms correctly with proj/vdatum etc")
-        epsg = rasterio.crs.CRS.from_string(vr.srs.ExportToWkt()).to_epsg()
+        if override_epsg is None:
+            epsg = rasterio.crs.CRS.from_string(vr.srs.ExportToWkt()).to_epsg()
+        else:
+            epsg = override_epsg
         georef_transformer = get_geotransformer(epsg, self.db.epsg)
         temp_path = tempfile.mkdtemp(dir=self.db.data_path)
         storage_db = self.db.make_accumulation_db(temp_path)
@@ -957,40 +966,87 @@ if __name__ == "__main__":
     # db.export_area_old(use_dir.joinpath("export_tile_old.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
     # db.export_area(use_dir.joinpath("export_tile_new.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
 
-    test_mississippi = True
-    if test_mississippi:
-        use_dir = r'E:\Mississipi\tile4_metadata_utm_db'
+    build_mississippi = True
+    export_mississippi = False
+    process_utm_15 = False
+    output_res = (4, 4)  # desired output size in meters
+
+    if process_utm_15:
+        epsg = 26915
+        use_dir = pathlib.Path(r'G:\Data\NBS\Mississipi\vrbag_utm15_db')
+        vr_bags = [r"G:\Data\NBS\UTM15\NCEI\H13193_MB_VR_LWRP.bag",
+                   # r"G:\Data\NBS\UTM15\NCEI\H13194_MB_VR_LWRP.bag",
+                   r"G:\Data\NBS\UTM15\NCEI\H13330_MB_VR_LWRP.bag",
+                   r"G:\Data\NBS\UTM15\NCEI\H13188_MB_VR_LWRP.bag",
+                   r"G:\Data\NBS\UTM15\NCEI\H13189_MB_VR_LWRP.bag",
+                   r"G:\Data\NBS\UTM15\NCEI\H13190_MB_VR_LWRP.bag",
+                   r"G:\Data\NBS\UTM15\NCEI\H13191_MB_VR_LWRP.bag",
+                   r"G:\Data\NBS\UTM15\NCEI\H13192_MB_VR_LWRP.bag",
+                   ## r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13194",
+                   # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13330",
+                   # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13188",
+                   # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13189",
+                   # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13190",
+                   # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13191",
+                   # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13192",
+                   # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13193",
+                   ]
+    else:
+        epsg = 26916
+        use_dir = pathlib.Path(r'G:\Data\NBS\Mississipi\vrbag_utm16_db')
+        vr_bags = [r"G:\Data\NBS\UTM16\NCEI\H13195_MB_VR_LWRP.bag",
+                   r"G:\Data\NBS\UTM16\NCEI\H13196_MB_VR_LWRP.bag",
+                   r"G:\Data\NBS\UTM16\NCEI\H13196_MB_VR_MLLW.bag",
+                   r"G:\Data\NBS\UTM16\NCEI\H13193_MB_VR_LWRP.bag",
+                   r"G:\Data\NBS\UTM16\NCEI\H13194_MB_VR_LWRP.bag",
+                   ]
+
+    if build_mississippi:
         if os.path.exists(use_dir):
             shutil.rmtree(use_dir, onerror=onerr)
 
-        db = WorldDatabase(UTMTileBackend(26915, RasterHistory, DiskHistory, TiffStorage,
-                                          use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+    db = WorldDatabase(UTMTileBackend(epsg, RasterHistory, DiskHistory, TiffStorage,
+                                      use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+    if build_mississippi:
 
-        soundings_dirs = ["G:\Data\NBS\UTM15\NCEI\H13193_MB_VR_LWRP.bag",
-                          # "G:\Data\NBS\UTM15\NCEI\H13194_MB_VR_LWRP.bag",
-                          "G:\Data\NBS\UTM15\NCEI\H13330_MB_VR_LWRP.bag",
-                          "G:\Data\NBS\UTM15\NCEI\H13188_MB_VR_LWRP.bag",
-                          "G:\Data\NBS\UTM15\NCEI\H13189_MB_VR_LWRP.bag",
-                          "G:\Data\NBS\UTM15\NCEI\H13190_MB_VR_LWRP.bag",
-                          "G:\Data\NBS\UTM15\NCEI\H13191_MB_VR_LWRP.bag",
-                          "G:\Data\NBS\UTM15\NCEI\H13192_MB_VR_LWRP.bag",
-                          ## r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13194",
-                          # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13330",
-                          # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13188",
-                          # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13189",
-                          # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13190",
-                          # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13191",
-                          # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13192",
-                          # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13193",
-                          ]
-        for soundings_dir in soundings_dirs:
-            directory = pathlib.Path(soundings_dir)
-            bag_file = directory.joinpath(directory.name + "_MB_VR_LWRP.bag")
-            if directory == r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13194":
-                epsg = 26916
+        for bag_file in vr_bags:
+            # bag_file = directory.joinpath(directory.name + "_MB_VR_LWRP.bag")
+
+            if 'H13194' in bag_file:  # this file is encoded in UTM16 even in the UTM15 area
+                override_epsg = 26916
             else:
-                epsg = 26915
-            db.insert_survey_gdal(bag_file, override_epsg=epsg)
+                override_epsg = epsg
+            # db.insert_survey_gdal(bag_file, override_epsg=epsg)  # single res
+            db.insert_survey_vr(bag_file, override_epsg=override_epsg)
+
+    if export_mississippi:
+        area_shape_fname = r"G:\Data\NBS\Support_Files\MCD_Bands\Band5\Band5_V6.shp"
+        ds = gdal.OpenEx(area_shape_fname)
+        export_epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
+        # ds.GetLayerCount()
+        lyr = ds.GetLayer(0)
+        lyr.GetFeatureCount()
+        lyrdef = lyr.GetLayerDefn()
+        for i in range(lyrdef.GetFieldCount()):
+            flddef = lyrdef.GetFieldDefn(1)
+            if flddef.name == "CellName":
+                cell_field = i
+        geotransform = get_geotransformer(db.db.tile_scheme.epsg, export_epsg)
+        inv_geotransform = get_geotransformer(export_epsg, db.db.tile_scheme.epsg)
+        for feat in lyr:
+            geom = feat.GetGeometryRef()
+            # geom.GetGeometryCount()
+            minx, maxx, miny, maxy = geom.GetEnvelope()  # (-164.7, -164.39999999999998, 67.725, 67.8)
+            cell_name = feat.GetField(cell_field)
+            # output in WGS84
+            # convert 4m size at center of cell for resolution purposes
+            cx = (minx+maxx)/2.0
+            cy = (miny+maxy)/2.0
+            dx, dy = compute_delta_coord(cx, cy, *output_res, geotransform, inv_geotransform)
+            db.export_area(use_dir.joinpath(cell_name), minx, miny, maxx, maxy, (dx, dy), target_epsg=export_epsg)
+
+            # output in native UTM
+            db.export_area(use_dir.joinpath(cell_name), minx, miny, maxx, maxy, output_res, target_epsg=export_epsg)
 
     test_soundings = False
     if test_soundings:
