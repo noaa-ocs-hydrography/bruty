@@ -11,7 +11,7 @@ from osgeo import gdal, osr, ogr
 
 from HSTB.drivers import bag
 from nbs.bruty.utils import merge_arrays, merge_array, get_geotransformer, onerr, tqdm, make_gdal_dataset_size, make_gdal_dataset_area, \
-    calc_area_array_params, compute_delta_coord
+    calc_area_array_params, compute_delta_coord, iterate_gdal_image
 from nbs.bruty.raster_data import LayersEnum, RasterData, affine, inv_affine, affine_center, arrays_dont_match
 from nbs.bruty.history import RasterHistory, AccumulationHistory
 from nbs.bruty.abstract import VABC, abstractmethod
@@ -556,38 +556,40 @@ class WorldDatabase(VABC):
         print("@todo - do transforms correctly with proj/vdatum etc")
         georef_transformer = get_geotransformer(epsg, self.db.epsg)
 
-        d_val = ds.GetRasterBand(1)  # elevation or depth band
-        u_val = ds.GetRasterBand(2)  # uncertainty band
-        block_sizes = d_val.GetBlockSize()
-        row_block_size = min(max(block_sizes[1], 1024), 2048)
-        col_block_size = min(max(block_sizes[0], 1024), 2048)
-        col_size = d_val.XSize
-        row_size = d_val.YSize
-        nodata = d_val.GetNoDataValue()
+        # d_val = ds.GetRasterBand(1)  # elevation or depth band
+        # u_val = ds.GetRasterBand(2)  # uncertainty band
+        # block_sizes = d_val.GetBlockSize()
+        # row_block_size = min(max(block_sizes[1], 1024), 2048)
+        # col_block_size = min(max(block_sizes[0], 1024), 2048)
+        # col_size = d_val.XSize
+        # row_size = d_val.YSize
+        # nodata = d_val.GetNoDataValue()
         temp_path = tempfile.mkdtemp(dir=self.db.data_path)
         storage_db = self.db.make_accumulation_db(temp_path)
         # read the data array in blocks
-        if geo_debug and False:
-            col_block_size = col_size
-            row_block_size = row_size
-        for ic in tqdm(range(0, col_size, col_block_size), mininterval=.7):
-            if ic + col_block_size < col_size:
-                cols = col_block_size
-            else:
-                cols = col_size - ic
-            for ir in tqdm(range(0, row_size, row_block_size), mininterval=.7):
-                if ir + row_block_size < row_size:
-                    rows = row_block_size
-                else:
-                    rows = row_size - ir
-                # Get the depth data as an array
-                uncert = u_val.ReadAsArray(ic, ir, cols, rows)
-                data = d_val.ReadAsArray(ic, ir, cols, rows)  # depth or elevation data
-                if geo_debug and False:  # draw an X in each block
-                    diag = numpy.arange(min(data.shape), dtype=numpy.int32)
-                    rdiag = diag[::-1]
-                    data[diag, diag] = 55
-                    data[rdiag, diag] = 66
+        # if geo_debug and False:
+        #     col_block_size = col_size
+        #     row_block_size = row_size
+
+        for ic, ir, nodata, (data, uncert) in iterate_gdal_image(ds, (1, 2)):
+        # for ic in tqdm(range(0, col_size, col_block_size), mininterval=.7):
+        #     if ic + col_block_size < col_size:
+        #         cols = col_block_size
+        #     else:
+        #         cols = col_size - ic
+        #     for ir in tqdm(range(0, row_size, row_block_size), mininterval=.7):
+        #         if ir + row_block_size < row_size:
+        #             rows = row_block_size
+        #         else:
+        #             rows = row_size - ir
+        #         # Get the depth data as an array
+        #         uncert = u_val.ReadAsArray(ic, ir, cols, rows)
+        #         data = d_val.ReadAsArray(ic, ir, cols, rows)  # depth or elevation data
+        #         if geo_debug and False:  # draw an X in each block
+        #             diag = numpy.arange(min(data.shape), dtype=numpy.int32)
+        #             rdiag = diag[::-1]
+        #             data[diag, diag] = 55
+        #             data[rdiag, diag] = 66
                 # read the uncertainty as an array (if it exists)
                 r, c = numpy.indices(data.shape)  # make indices into array elements that can be converted to x,y coordinates
                 r += ir  # adjust the block r,c to the global raster r,c
@@ -779,6 +781,7 @@ class WorldDatabase(VABC):
         if not target_epsg:
             target_epsg = self.db.tile_scheme.epsg
         geotransform = get_geotransformer(self.db.tile_scheme.epsg, target_epsg)
+        inv_geotransform = get_geotransformer(target_epsg, self.db.tile_scheme.epsg)
 
         try:
             dx, dy = res
@@ -797,11 +800,11 @@ class WorldDatabase(VABC):
 
         # 2) Get the master db tile indices that the area overlaps and iterate them
         if geotransform:
-            tile_x1, tile_y1 = geotransform.transform(x1, y1)
-            tile_x2, tile_y2 = geotransform.transform(x2, y2)
+            tile_x1, tile_y1 = inv_geotransform.transform(x1, y1)
+            tile_x2, tile_y2 = inv_geotransform.transform(x2, y2)
         else:
             tile_x1, tile_y1, tile_x2, tile_y2 = x1, y1, x2, y2
-
+        tile_count = 0
         for txi, tyi, tile_history in self.db.iter_tiles(tile_x1, tile_y1, tile_x2, tile_y2):
             # if txi != 3504 or tyi != 4155:
             #     continue
@@ -811,7 +814,11 @@ class WorldDatabase(VABC):
                 continue
             # 3) Read the single tif sub-area as an array that covers this tile being processed
             tx1, ty1, tx2, ty2 = tile_history.get_corners()
-            r, c = inv_affine(numpy.array([tx1, tx2]), numpy.array([ty1, ty2]), *affine_transform)
+            if geotransform:
+                target_xs, target_ys = geotransform.transform(numpy.array([tx1, tx2]), numpy.array([ty1, ty2]))
+            else:
+                target_xs, target_ys = numpy.array([tx1, tx2]), numpy.array([ty1, ty2])
+            r, c = inv_affine(target_xs, target_ys, *affine_transform)
             start_col, start_row = max(0, int(min(c))), max(0, int(min(r)))
             # the local r, c inside of the sub area
             # figure out how big the block is that we are operating on and if it would extend outside the array bounds
@@ -831,9 +838,11 @@ class WorldDatabase(VABC):
                                geotransform, affine_transform, start_col, start_row, block_cols, block_rows,
                                dataset, dataset_score, dataset_score_key2, layers,
                                score_band, score_key2_band)
+            tile_count += 1
             # send the data to disk, I forget if this has any affect other than being able to look at the data in between steps to debug progress
             dataset.FlushCache()
             dataset_score.FlushCache()
+        return tile_count
 
     @staticmethod
     def merge_rasters(tile_layers, tile_score, raster_data, tile_depth,
@@ -905,7 +914,6 @@ class SingleFile(WorldDatabase):
         return self.shape_y, self.shape_x  # rows and columns
 
 
-
 if __name__ == "__main__":
     from nbs.bruty.history import DiskHistory, MemoryHistory, RasterHistory
     from nbs.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
@@ -918,102 +926,147 @@ if __name__ == "__main__":
     # db.export_area_old(use_dir.joinpath("export_tile_old.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
     # db.export_area(use_dir.joinpath("export_tile_new.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
 
+    interps = False
     build_mississippi = False
     export_mississippi = True
+    profiling = True
     process_utm_15 = True
     output_res = (4, 4)  # desired output size in meters
     data_dir = pathlib.Path(r'G:\Data\NBS\Mississipi')
-    if process_utm_15:
+
+    if interps:
         epsg = 26915
         max_lon = -90
         min_lon = -96
         max_lat = 35
         min_lat = 0
-        use_dir = data_dir.joinpath('vrbag_utm15_db')
-        vr_bags = [r"G:\Data\NBS\UTM15\NCEI\H13193_MB_VR_LWRP.bag",
-                   # r"G:\Data\NBS\UTM15\NCEI\H13194_MB_VR_LWRP.bag",
-                   r"G:\Data\NBS\UTM15\NCEI\H13330_MB_VR_LWRP.bag",
-                   r"G:\Data\NBS\UTM15\NCEI\H13188_MB_VR_LWRP.bag",
-                   r"G:\Data\NBS\UTM15\NCEI\H13189_MB_VR_LWRP.bag",
-                   r"G:\Data\NBS\UTM15\NCEI\H13190_MB_VR_LWRP.bag",
-                   r"G:\Data\NBS\UTM15\NCEI\H13191_MB_VR_LWRP.bag",
-                   r"G:\Data\NBS\UTM15\NCEI\H13192_MB_VR_LWRP.bag",
-                   ## r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13194",
-                   # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13330",
-                   # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13188",
-                   # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13189",
-                   # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13190",
-                   # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13191",
-                   # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13192",
-                   # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13193",
-                   ]
-    else:
-        epsg = 26916
-        max_lon = -84
-        min_lon = -90
-        max_lat = 35
-        min_lat = 0
-        use_dir = data_dir.joinpath('vrbag_utm16_db')
-        vr_bags = [r"G:\Data\NBS\UTM16\NCEI\H13195_MB_VR_LWRP.bag",
-                   r"G:\Data\NBS\UTM16\NCEI\H13196_MB_VR_LWRP.bag",
-                   r"G:\Data\NBS\UTM16\NCEI\H13196_MB_VR_MLLW.bag",
-                   r"G:\Data\NBS\UTM16\NCEI\H13193_MB_VR_LWRP.bag",
-                   r"G:\Data\NBS\UTM16\NCEI\H13194_MB_VR_LWRP.bag",
-                   ]
-
-    if build_mississippi:
-        if os.path.exists(use_dir):
-            shutil.rmtree(use_dir, onerror=onerr)
-
-    db = WorldDatabase(UTMTileBackend(epsg, RasterHistory, DiskHistory, TiffStorage,
-                                      use_dir))  # NAD823 zone 19.  WGS84 would be 32619
-    if build_mississippi:
-
-        for bag_file in vr_bags:
+        use_dir = data_dir.joinpath('vrbag_utm15_tifs2_db')
+        data_files = [r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13192_MB_VR_LWRP_resampled_added_uncert3.tif",
+                      r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_MB_VR_LWRP_resampled_added_uncert3.tif",
+                      ]
+        db = WorldDatabase(UTMTileBackend(epsg, RasterHistory, DiskHistory, TiffStorage,
+                                          use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+        for _file in data_files:
             # bag_file = directory.joinpath(directory.name + "_MB_VR_LWRP.bag")
-
-            if 'H13194' in bag_file:  # this file is encoded in UTM16 even in the UTM15 area
+            db.next_contributor = 1000
+            if 'H13194' in _file:  # this file is encoded in UTM16 even in the UTM15 area
                 override_epsg = 26916
             else:
                 override_epsg = epsg
-            # db.insert_survey_gdal(bag_file, override_epsg=epsg)  # single res
-            db.insert_survey_vr(bag_file, override_epsg=override_epsg)
+            db.insert_survey_gdal(_file, survey_score=99, override_epsg=epsg)  # single res interpolations should not overwrite the VR
+    else:
+        if profiling:
+            epsg = 26915
+            max_lon = -90
+            min_lon = -96
+            max_lat = 35
+            min_lat = 0
+            use_dir = data_dir.joinpath('vrbag_profiling_db')
+            data_files = [r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13330_MB_VR_LWRP.bag"]
 
-    if export_mississippi:
-        area_shape_fname = r"G:\Data\NBS\Support_Files\MCD_Bands\Band5\Band5_V6.shp"
-        ds = gdal.OpenEx(area_shape_fname)
-        # ds.GetLayerCount()
-        lyr = ds.GetLayer(0)
-        srs = lyr.GetSpatialRef()
-        export_epsg = rasterio.crs.CRS.from_string(srs.ExportToWkt()).to_epsg()
-        lyr.GetFeatureCount()
-        lyrdef = lyr.GetLayerDefn()
-        for i in range(lyrdef.GetFieldCount()):
-            flddef = lyrdef.GetFieldDefn(i)
-            if flddef.name == "CellName":
-                cell_field = i
-                break
-        geotransform = get_geotransformer(export_epsg, db.db.tile_scheme.epsg)
-        inv_geotransform = get_geotransformer(db.db.tile_scheme.epsg, export_epsg)
-        for feat in lyr:
-            geom = feat.GetGeometryRef()
-            # geom.GetGeometryCount()
-            minx, maxx, miny, maxy = geom.GetEnvelope()  # (-164.7, -164.39999999999998, 67.725, 67.8)
-            # output in WGS84
-            cx = (minx+maxx)/2.0
-            cy = (miny+maxy)/2.0
-            # crop to the area around Mississippi
-            if cx > min_lon and cx < max_lon and cy > min_lat and cy < max_lat:
-                cell_name = feat.GetField(cell_field)
-                # convert user res (4m in testing) size at center of cell for resolution purposes
-                dx, dy = compute_delta_coord(cx, cy, *output_res, geotransform, inv_geotransform)
-                db.export_area(data_dir.joinpath(cell_name+".tif"), minx, miny, maxx, maxy, (dx, dy), target_epsg=export_epsg)
+        elif process_utm_15:
+            epsg = 26915
+            max_lon = -90
+            min_lon = -96
+            max_lat = 35
+            min_lat = 0
+            use_dir = data_dir.joinpath('vrbag_utm15_2_db')
+            data_files = [r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13193_MB_VR_LWRP.bag",
+                       # r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13194_MB_VR_LWRP.bag",
+                       r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13330_MB_VR_LWRP.bag",
+                       r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13188_MB_VR_LWRP.bag",
+                       r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13189_MB_VR_LWRP.bag",
+                       r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_MB_VR_LWRP.bag",
+                       r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13191_MB_VR_LWRP.bag",
+                       r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13192_MB_VR_LWRP.bag",
+                       ## r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13194",
+                       # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13330",
+                       # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13188",
+                       # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13189",
+                       # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13190",
+                       # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13191",
+                       # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13192",
+                       # r"V:\NBS_Data\PBG_MissRvr_UTM15N_LWRP\NOAA_NCEI_OCS\BAGs\Original\H13193",
+                       ]
+        else:
+            epsg = 26916
+            max_lon = -84
+            min_lon = -90
+            max_lat = 35
+            min_lat = 0
+            use_dir = data_dir.joinpath('vrbag_utm16_2_db')
+            data_files = [r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13195_MB_VR_LWRP.bag",
+                       r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13196_MB_VR_LWRP.bag",
+                       r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13196_MB_VR_MLLW.bag",
+                       r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13193_MB_VR_LWRP.bag",
+                       r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13194_MB_VR_LWRP.bag",
+                       ]
 
-                # output in native UTM
-                utm_minx, utm_miny = geotransform.transform(minx, miny)
-                utm_maxx, utm_maxy = geotransform.transform(maxx, maxy)
-                db.export_area(data_dir.joinpath(cell_name+"_utm.tif"), utm_minx, utm_miny, utm_maxx, utm_maxy, output_res)
-                break
+        if build_mississippi:
+            if os.path.exists(use_dir):
+                shutil.rmtree(use_dir, onerror=onerr)
+
+        use_dir = data_dir.joinpath('vrbag_utm15_tifs2_db')
+
+        db = WorldDatabase(UTMTileBackend(epsg, RasterHistory, DiskHistory, TiffStorage,
+                                          use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+        if 0:  # find a specific point in the tiling database
+            y, x = 30.120484, -91.030685
+            px, py = geotransform.transform(x, y)
+            tile_index_x, tile_index_y = db.db.tile_scheme.xy_to_tile_index(px, py)
+
+        if build_mississippi:
+
+            for bag_file in data_files:
+                # bag_file = directory.joinpath(directory.name + "_MB_VR_LWRP.bag")
+
+                if 'H13194' in bag_file:  # this file is encoded in UTM16 even in the UTM15 area
+                    override_epsg = 26916
+                else:
+                    override_epsg = epsg
+                # db.insert_survey_gdal(bag_file, override_epsg=epsg)  # single res
+                db.insert_survey_vr(bag_file, override_epsg=override_epsg)
+
+        if export_mississippi:
+            area_shape_fname = r"G:\Data\NBS\Support_Files\MCD_Bands\Band5\Band5_V6.shp"
+            ds = gdal.OpenEx(area_shape_fname)
+            # ds.GetLayerCount()
+            lyr = ds.GetLayer(0)
+            srs = lyr.GetSpatialRef()
+            export_epsg = rasterio.crs.CRS.from_string(srs.ExportToWkt()).to_epsg()
+            lyr.GetFeatureCount()
+            lyrdef = lyr.GetLayerDefn()
+            for i in range(lyrdef.GetFieldCount()):
+                flddef = lyrdef.GetFieldDefn(i)
+                if flddef.name == "CellName":
+                    cell_field = i
+                    break
+            geotransform = get_geotransformer(export_epsg, db.db.tile_scheme.epsg)
+            inv_geotransform = get_geotransformer(db.db.tile_scheme.epsg, export_epsg)
+            for feat in lyr:
+                geom = feat.GetGeometryRef()
+                # geom.GetGeometryCount()
+                minx, maxx, miny, maxy = geom.GetEnvelope()  # (-164.7, -164.39999999999998, 67.725, 67.8)
+                # output in WGS84
+                cx = (minx + maxx) / 2.0
+                cy = (miny + maxy) / 2.0
+                # crop to the area around Mississippi
+                if cx > min_lon and cx < max_lon and cy > min_lat and cy < max_lat:
+                    cell_name = feat.GetField(cell_field)
+                    if cell_name not in ('US5BPGBD', 'US5BPGCD'):  # , 'US5MSYAD'
+                        continue
+                    print(cell_name)
+                    # convert user res (4m in testing) size at center of cell for resolution purposes
+                    dx, dy = compute_delta_coord(cx, cy, *output_res, geotransform, inv_geotransform)
+                    export_path = data_dir.joinpath(cell_name + ".tif")
+                    cnt = db.export_area(export_path, minx, miny, maxx, maxy, (dx, dy), target_epsg=export_epsg)
+                    if cnt > 0:
+                        # output in native UTM
+                        utm_minx, utm_miny = geotransform.transform(minx, miny)
+                        utm_maxx, utm_maxy = geotransform.transform(maxx, maxy)
+                        cnt = db.export_area(data_dir.joinpath(cell_name + "_utm.tif"), utm_minx, utm_miny, utm_maxx, utm_maxy, output_res)
+                    else:
+                        os.remove(export_path)
 
     test_soundings = False
     if test_soundings:

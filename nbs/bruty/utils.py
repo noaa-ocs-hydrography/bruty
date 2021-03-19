@@ -447,6 +447,7 @@ def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, sh
     Specifying a positive res_y will be input as a negative value into the gdal file,
     since tif/gdal likes max_y and a negative Y pixel size.
     i.e. the geotransform in gdal will be stored as [min_x, res_x, 0, max_y, 0, -res_y]
+
     Parameters
     ----------
     fname
@@ -542,3 +543,21 @@ def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg, dri
     min_x, min_y, max_x, max_y, shape_x, shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
     dataset = make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg, driver)
     return dataset
+
+def add_uncertainty_layer(infile, outfile, depth_mult=0.01, uncert_offset=0.5, depth_band=1, driver='GTIFF'):
+    ds = gdal.Open(infile)
+    tmp_ds = gdal.GetDriverByName('MEM').CreateCopy('', ds, 0)
+    band = ds.GetRasterBand(1)
+    tmp_ds.AddBand(band.DataType)
+    depth = band.ReadAsArray()
+    uncert = depth * depth_mult + uncert_offset
+    uncert[depth == band.GetNoDataValue()] = band.GetNoDataValue()
+    tmp_ds.GetRasterBand(ds.RasterCount + 1).WriteArray(uncert)
+
+    new_ds = gdal.GetDriverByName(driver).CreateCopy(outfile, tmp_ds, 0, options=['COMPRESS=LZW'])
+    new_ds.FlushCache()
+
+    # this is meaningless since it does out of scope -- maybe garbage collects sooner?
+    del new_ds
+    del tmp_ds
+    del ds
