@@ -7,11 +7,11 @@ import pytest
 import numpy
 from osgeo import gdal
 
-from bruty.history import DiskHistory, MemoryHistory, RasterHistory
-from bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
-from bruty.world_raster_database import LatLonBackend, GoogleLatLonTileBackend, UTMTileBackend, GoogleMercatorTileBackend, \
+from nbs.bruty.history import DiskHistory, MemoryHistory, RasterHistory
+from nbs.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
+from nbs.bruty.world_raster_database import LatLonBackend, GoogleLatLonTileBackend, UTMTileBackend, GoogleMercatorTileBackend, \
     TMSMercatorTileBackend, merge_arrays
-from bruty.world_raster_database import WorldDatabase, onerr, get_geotransformer
+from nbs.bruty.world_raster_database import WorldDatabase, onerr, get_geotransformer, UTMTileBackendExactRes
 
 from test_data import master_data, data_dir, SW_5x5, NW_5x5, SE_5x5, MID_5x5
 
@@ -410,3 +410,10 @@ def test_export_area_full_db():
     db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
     db.export_area_old(use_dir.joinpath("export_tile_old.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
     db.export_area(use_dir.joinpath("export_tile_new.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
+
+
+def test_exact_res_db():
+    use_dir = data_dir.joinpath('tile4_exact')
+    db = WorldDatabase(UTMTileBackendExactRes(4, 4, 26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+    x = y = depth = uncertainty score = flags = numpy.arange(10)
+    db.insert_survey_array((x, y*300, depth, uncertainty, score, flags), "test")

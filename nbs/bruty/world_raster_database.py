@@ -11,11 +11,12 @@ from osgeo import gdal, osr, ogr
 
 from HSTB.drivers import bag
 from nbs.bruty.utils import merge_arrays, merge_array, get_geotransformer, onerr, tqdm, make_gdal_dataset_size, make_gdal_dataset_area, \
-    calc_area_array_params, compute_delta_coord, iterate_gdal_image
+            calc_area_array_params, compute_delta_coord, iterate_gdal_image
 from nbs.bruty.raster_data import LayersEnum, RasterData, affine, inv_affine, affine_center, arrays_dont_match
 from nbs.bruty.history import RasterHistory, AccumulationHistory
 from nbs.bruty.abstract import VABC, abstractmethod
-from nbs.bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles, TilingScheme
+from nbs.bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles, TilingScheme, \
+            ExactUTMTiles, ExactTilingScheme
 
 geo_debug = False
 
@@ -232,6 +233,13 @@ class UTMTileBackend(WorldTilesBackend):
         tile_scheme = UTMTiles(zoom=zoom_level)
         tile_scheme.epsg = utm_epsg
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
+
+class UTMTileBackendExactRes(WorldTilesBackend):
+    def __init__(self, res_x, res_y, utm_epsg, history_class, storage_class, data_class, data_path, zoom_level=13):
+        tile_scheme = ExactUTMTiles(res_x, res_y, zoom=zoom_level)
+        tile_scheme.epsg = utm_epsg
+        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
+
 
 
 class GoogleMercatorTileBackend(WorldTilesBackend):
@@ -465,7 +473,11 @@ class WorldDatabase(VABC):
 
         # this should be ~2m when zoom 13 is the zoom level used (zoom 13 = 20m at 256 pix, so 8 times finer)
         # return rows, cols
-        return 512, 512
+        if isinstance(self.db.tile_scheme, ExactTilingScheme):
+            # rows and columns
+            return self.db.tile_scheme.height()/self.db.tile_scheme.res_y, self.db.tile_scheme.width()/self.db.tile_scheme.res_x
+        else:
+            return 512, 512
 
     def insert_survey_vr(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=None):
         """

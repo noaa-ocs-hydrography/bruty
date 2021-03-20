@@ -56,6 +56,8 @@ class ExactTilingScheme(TilingScheme):
         self.res_x = res_x
         self.res_y = res_y
         self.edges_x, self.edges_y = self._calc_edges()
+        self.max_x = self.edges_x[-1]
+        self.max_y = self.edges_y[-1]
 
     def xy_to_tile_index(self, x, y, zoom=None):
         # y index is bigger than x because there is a smaller range (-90 to 90) which makes smaller tiles in the y direction
@@ -74,6 +76,7 @@ class ExactTilingScheme(TilingScheme):
         num_tiles = self.num_tiles(zoom)
         rough_xs = super().tile_index_to_xy(numpy.arange(num_tiles+1), 0)
         rough_ys = super().tile_index_to_xy(0, numpy.arange(num_tiles+1))
+        # round off the edges to the closest lower cell
         xs = rough_xs - numpy.mod(rough_xs, self.res_x)
         ys = rough_ys - numpy.mod(rough_ys, self.res_y)
         xs[-1] += self.res_x  # round the last tile up to make sure the max value is included
@@ -155,7 +158,7 @@ class UTMTiles(TilingScheme):
         self.epsg = None
         super().__init__(min_x = -1000000, min_y=-1000000, max_x=2000000, max_y=10000000, zoom=zoom)
 
-class UTMTiles(ExactTilingScheme):
+class ExactUTMTiles(ExactTilingScheme):
     def __init__(self, res_x, res_y, zoom=13):
         self.epsg = None
         super().__init__(res_x, res_y, min_x = -1000000, min_y=-1000000, max_x=2000000, max_y=10000000, zoom=zoom)
