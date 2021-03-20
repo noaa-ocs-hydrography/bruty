@@ -415,6 +415,9 @@ class WorldDatabase(VABC):
         # itererate each tile that was found to have data
         # @todo figure out the contributor - should be the unique id from the database of surveys
         for i_tile, (tx, ty) in enumerate(tile_list):
+            # print("debug skipping tiles")
+            # if tx != 4614 or ty != 3227:
+            #    continue
             print(f'processing tile {i_tile} of {len(tile_list)}')
             tile_history = accumulation_db.get_tile_history_by_index(tx, ty)
             try:
@@ -475,7 +478,10 @@ class WorldDatabase(VABC):
         # return rows, cols
         if isinstance(self.db.tile_scheme, ExactTilingScheme):
             # rows and columns
-            return self.db.tile_scheme.height()/self.db.tile_scheme.res_y, self.db.tile_scheme.width()/self.db.tile_scheme.res_x
+            # get the x,y bounds and figure out how many pixels (cells) would fit
+            lx, ly, ux, uy = self.db.tile_scheme.tile_index_to_xy(tx, ty)
+            #  -- since it is supposed to be an exact fit round up any numerical errors and truncate to an int
+            return int(0.00001 + (uy-ly)/self.db.tile_scheme.res_y), int(0.00001+(ux-lx)/self.db.tile_scheme.res_x)
         else:
             return 512, 512
 

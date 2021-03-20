@@ -55,7 +55,7 @@ class ExactTilingScheme(TilingScheme):
         super().__init__(min_x, min_y, max_x, max_y, zoom)
         self.res_x = res_x
         self.res_y = res_y
-        self.edges_x, self.edges_y = self._calc_edges()
+        self.edges_x, self.edges_y = self.calc_edges()
         self.max_x = self.edges_x[-1]
         self.max_y = self.edges_y[-1]
 
@@ -70,12 +70,14 @@ class ExactTilingScheme(TilingScheme):
         ty[self.edges_y[ty+1] < y] += 1
         return tx, ty
 
+    def tile_index_to_xy(self, tx, ty):
+        return self.edges_x[tx], self.edges_y[ty], self.edges_x[tx+1], self.edges_y[ty+1]
+
     def calc_edges(self, zoom=None):
         if zoom is None:
             zoom = self.zoom
         num_tiles = self.num_tiles(zoom)
-        rough_xs = super().tile_index_to_xy(numpy.arange(num_tiles+1), 0)
-        rough_ys = super().tile_index_to_xy(0, numpy.arange(num_tiles+1))
+        rough_xs, rough_ys, _ux, _uy = super().tile_index_to_xy(numpy.arange(num_tiles+1), numpy.arange(num_tiles+1))
         # round off the edges to the closest lower cell
         xs = rough_xs - numpy.mod(rough_xs, self.res_x)
         ys = rough_ys - numpy.mod(rough_ys, self.res_y)

@@ -415,5 +415,5 @@ def test_export_area_full_db():
 def test_exact_res_db():
     use_dir = data_dir.joinpath('tile4_exact')
     db = WorldDatabase(UTMTileBackendExactRes(4, 4, 26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
-    x = y = depth = uncertainty score = flags = numpy.arange(10)
+    x = y = depth = uncertainty = score = flags = numpy.arange(10)
     db.insert_survey_array((x, y*300, depth, uncertainty, score, flags), "test")
