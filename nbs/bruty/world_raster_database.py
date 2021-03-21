@@ -17,6 +17,7 @@ from nbs.bruty.history import RasterHistory, AccumulationHistory
 from nbs.bruty.abstract import VABC, abstractmethod
 from nbs.bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles, TilingScheme, \
             ExactUTMTiles, ExactTilingScheme
+from nbs.bruty import morton
 
 geo_debug = False
 
@@ -499,6 +500,11 @@ class WorldDatabase(VABC):
         """
         vr = bag.VRBag(path_to_survey_data)
         refinement_list = numpy.argwhere(vr.get_valid_refinements())
+        # in order to speed up the vr processing, which would have narrow strips being processed
+        # use a morton ordering on the tile indices so they are more closely processed in geolocation
+        # and fewer loads/writes are requested of the db tiles (which are slow tiff read/writes)
+        mort = morton.interleave2d_64(refinement_list.T)
+        sorted_refinement_indices = refinement_list[numpy.lexsort([mort])]
         print("@todo - do transforms correctly with proj/vdatum etc")
         if override_epsg is None:
             epsg = rasterio.crs.CRS.from_string(vr.srs.ExportToWkt()).to_epsg()
@@ -507,42 +513,59 @@ class WorldDatabase(VABC):
         georef_transformer = get_geotransformer(epsg, self.db.epsg)
         temp_path = tempfile.mkdtemp(dir=self.db.data_path)
         storage_db = self.db.make_accumulation_db(temp_path)
-
-        for iref, (ti, tj) in enumerate(refinement_list):
+        x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum = [], [], [], [], [], []
+        for iref, (ti, tj) in enumerate(sorted_refinement_indices):
             refinement = vr.read_refinement(ti, tj)
             r, c = numpy.indices(refinement.depth.shape)  # make indices into array elements that can be converted to x,y coordinates
             pts = numpy.array([r, c, refinement.depth, refinement.uncertainty]).reshape(4, -1)
             pts = pts[:, pts[2] != vr.fill_value]  # remove nodata points
 
-            bag_supergrid_dx = vr.cell_size_x
-            bag_supergrid_nx = vr.numx
-            bag_supergrid_dy = vr.cell_size_y
-            bag_supergrid_ny = vr.numy
-            bag_llx = vr.minx - bag_supergrid_dx / 2.0  # @todo seems the llx is center of the supergridd cel?????
-            bag_lly = vr.miny - bag_supergrid_dy / 2.0
+            # bag_supergrid_dx = vr.cell_size_x
+            # bag_supergrid_nx = vr.numx
+            # bag_supergrid_dy = vr.cell_size_y
+            # bag_supergrid_ny = vr.numy
+            # bag_llx = vr.minx - bag_supergrid_dx / 2.0  # @todo seems the llx is center of the supergridd cel?????
+            # bag_lly = vr.miny - bag_supergrid_dy / 2.0
+            #
+            # # index_start = vr.varres_metadata[ti, tj, "index"]
+            # # dimensions_x = vr.varres_metadata[ti, tj, "dimensions_x"]
+            # # dimensions_y = vr.varres_metadata[ti, tj, "dimensions_y"]
+            # resolution_x = refinement.cell_size_x  # vr.varres_metadata[ti, tj, "resolution_x"]
+            # resolution_y = refinement.cell_size_y  # vr.varres_metadata[ti, tj, "resolution_y"]
+            # sw_corner_x = refinement.minx  # vr.varres_metadata[ti, tj, "sw_corner_x"]
+            # sw_corner_y = refinement.maxx  # vr.varres_metadata[ti, tj, "sw_corner_y"]
+            #
+            # supergrid_x = tj * bag_supergrid_dx
+            # supergrid_y = ti * bag_supergrid_dy
+            # refinement_llx = bag_llx + supergrid_x + sw_corner_x - resolution_x / 2.0  # @TODO implies swcorner is to the center and not the exterior
+            # refinement_lly = bag_lly + supergrid_y + sw_corner_y - resolution_y / 2.0
 
-            # index_start = vr.varres_metadata[ti, tj, "index"]
-            # dimensions_x = vr.varres_metadata[ti, tj, "dimensions_x"]
-            # dimensions_y = vr.varres_metadata[ti, tj, "dimensions_y"]
-            resolution_x = vr.varres_metadata[ti, tj, "resolution_x"]
-            resolution_y = vr.varres_metadata[ti, tj, "resolution_y"]
-            sw_corner_x = vr.varres_metadata[ti, tj, "sw_corner_x"]
-            sw_corner_y = vr.varres_metadata[ti, tj, "sw_corner_y"]
-
-            supergrid_x = tj * bag_supergrid_dx
-            supergrid_y = ti * bag_supergrid_dy
-            refinement_llx = bag_llx + supergrid_x + sw_corner_x - resolution_x / 2.0  # @TODO implies swcorner is to the center and not the exterior
-            refinement_lly = bag_lly + supergrid_y + sw_corner_y - resolution_y / 2.0
-
-            x, y = affine(pts[0], pts[1], refinement_llx, resolution_x, 0, refinement_lly, 0, resolution_y)
+            x, y = affine(pts[0], pts[1], *refinement.geotransform)  # refinement_llx, resolution_x, 0, refinement_lly, 0, resolution_y)
             if georef_transformer:
                 x, y = georef_transformer.transform(x, y)
             depth = pts[2]
             uncertainty = pts[3]
             scores = numpy.full(x.shape, survey_score)
             flags = numpy.full(x.shape, flag)
-            self.insert_survey_array(numpy.array((x, y, depth, uncertainty, scores, flags)), path_to_survey_data, accumulation_db=storage_db)
+            # it's really slow to add each refinement to the db, so store up points until it's bigger and write at once
+            if len(x_accum) == 0:
+                x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum = x, y, depth, uncertainty, scores, flags
+            else:
+                x_accum = numpy.concatenate((x_accum, x))
+                y_accum = numpy.concatenate((y_accum, y))
+                depth_accum = numpy.concatenate((depth_accum, depth))
+                uncertainty_accum = numpy.concatenate((uncertainty_accum, uncertainty))
+                scores_accum = numpy.concatenate((scores_accum, scores))
+                flags_accum = numpy.concatenate((flags_accum, flags))
+            # dump the accumulated arrays to the database
+            if len(x_accum) > 500000:
+                self.insert_survey_array(numpy.array((x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum)), path_to_survey_data, accumulation_db=storage_db)
+                self.next_contributor -= 1
+                x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum = [], [], [], [], [], []
+        if len(x_accum) > 0:
+            self.insert_survey_array(numpy.array((x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum)), path_to_survey_data, accumulation_db=storage_db)
             self.next_contributor -= 1
+
         self.next_contributor += 1
         self.db.append_accumulation_db(storage_db)
         shutil.rmtree(storage_db.data_path, onerror=onerr)
@@ -945,9 +968,9 @@ if __name__ == "__main__":
     # db.export_area(use_dir.joinpath("export_tile_new.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
 
     interps = False
-    build_mississippi = False
-    export_mississippi = True
-    profiling = True
+    build_mississippi = True
+    export_mississippi = False
+    profiling = False
     process_utm_15 = True
     output_res = (4, 4)  # desired output size in meters
     data_dir = pathlib.Path(r'G:\Data\NBS\Mississipi')
@@ -958,11 +981,11 @@ if __name__ == "__main__":
         min_lon = -96
         max_lat = 35
         min_lat = 0
-        use_dir = data_dir.joinpath('vrbag_utm15_tifs2_db')
+        use_dir = data_dir.joinpath('vrbag_utm15_tifs_4m_db')
         data_files = [r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13192_MB_VR_LWRP_resampled_added_uncert3.tif",
                       r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_MB_VR_LWRP_resampled_added_uncert3.tif",
                       ]
-        db = WorldDatabase(UTMTileBackend(epsg, RasterHistory, DiskHistory, TiffStorage,
+        db = WorldDatabase(UTMTileBackendExactRes(*output_res, epsg, RasterHistory, DiskHistory, TiffStorage,
                                           use_dir))  # NAD823 zone 19.  WGS84 would be 32619
         for _file in data_files:
             # bag_file = directory.joinpath(directory.name + "_MB_VR_LWRP.bag")
@@ -988,7 +1011,7 @@ if __name__ == "__main__":
             min_lon = -96
             max_lat = 35
             min_lat = 0
-            use_dir = data_dir.joinpath('vrbag_utm15_2_db')
+            use_dir = data_dir.joinpath('vrbag_utm15_4m_accum2_db')
             data_files = [r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13193_MB_VR_LWRP.bag",
                        # r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13194_MB_VR_LWRP.bag",
                        r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13330_MB_VR_LWRP.bag",
@@ -1012,7 +1035,7 @@ if __name__ == "__main__":
             min_lon = -90
             max_lat = 35
             min_lat = 0
-            use_dir = data_dir.joinpath('vrbag_utm16_2_db')
+            use_dir = data_dir.joinpath('vrbag_utm16_4m_accum2_db')
             data_files = [r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13195_MB_VR_LWRP.bag",
                        r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13196_MB_VR_LWRP.bag",
                        r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13196_MB_VR_MLLW.bag",
@@ -1024,9 +1047,7 @@ if __name__ == "__main__":
             if os.path.exists(use_dir):
                 shutil.rmtree(use_dir, onerror=onerr)
 
-        use_dir = data_dir.joinpath('vrbag_utm15_tifs2_db')
-
-        db = WorldDatabase(UTMTileBackend(epsg, RasterHistory, DiskHistory, TiffStorage,
+        db = WorldDatabase(UTMTileBackendExactRes(*output_res, epsg, RasterHistory, DiskHistory, TiffStorage,
                                           use_dir))  # NAD823 zone 19.  WGS84 would be 32619
         if 0:  # find a specific point in the tiling database
             y, x = 30.120484, -91.030685

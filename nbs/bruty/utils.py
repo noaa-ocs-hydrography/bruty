@@ -1,3 +1,4 @@
+import time
 import numpy
 import rasterio.crs
 from osgeo import gdal, osr, ogr
