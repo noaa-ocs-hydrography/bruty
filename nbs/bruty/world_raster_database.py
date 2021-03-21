@@ -513,32 +513,14 @@ class WorldDatabase(VABC):
         georef_transformer = get_geotransformer(epsg, self.db.epsg)
         temp_path = tempfile.mkdtemp(dir=self.db.data_path)
         storage_db = self.db.make_accumulation_db(temp_path)
-        x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum = [], [], [], [], [], []
+        x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum = None, None, None, None, None, None
+        max_len = 500000
         for iref, (ti, tj) in enumerate(sorted_refinement_indices):
+            # get an individual refinement and convert it to x,y from the row column system it was in.
             refinement = vr.read_refinement(ti, tj)
             r, c = numpy.indices(refinement.depth.shape)  # make indices into array elements that can be converted to x,y coordinates
             pts = numpy.array([r, c, refinement.depth, refinement.uncertainty]).reshape(4, -1)
             pts = pts[:, pts[2] != vr.fill_value]  # remove nodata points
-
-            # bag_supergrid_dx = vr.cell_size_x
-            # bag_supergrid_nx = vr.numx
-            # bag_supergrid_dy = vr.cell_size_y
-            # bag_supergrid_ny = vr.numy
-            # bag_llx = vr.minx - bag_supergrid_dx / 2.0  # @todo seems the llx is center of the supergridd cel?????
-            # bag_lly = vr.miny - bag_supergrid_dy / 2.0
-            #
-            # # index_start = vr.varres_metadata[ti, tj, "index"]
-            # # dimensions_x = vr.varres_metadata[ti, tj, "dimensions_x"]
-            # # dimensions_y = vr.varres_metadata[ti, tj, "dimensions_y"]
-            # resolution_x = refinement.cell_size_x  # vr.varres_metadata[ti, tj, "resolution_x"]
-            # resolution_y = refinement.cell_size_y  # vr.varres_metadata[ti, tj, "resolution_y"]
-            # sw_corner_x = refinement.minx  # vr.varres_metadata[ti, tj, "sw_corner_x"]
-            # sw_corner_y = refinement.maxx  # vr.varres_metadata[ti, tj, "sw_corner_y"]
-            #
-            # supergrid_x = tj * bag_supergrid_dx
-            # supergrid_y = ti * bag_supergrid_dy
-            # refinement_llx = bag_llx + supergrid_x + sw_corner_x - resolution_x / 2.0  # @TODO implies swcorner is to the center and not the exterior
-            # refinement_lly = bag_lly + supergrid_y + sw_corner_y - resolution_y / 2.0
 
             x, y = affine(pts[0], pts[1], *refinement.geotransform)  # refinement_llx, resolution_x, 0, refinement_lly, 0, resolution_y)
             if georef_transformer:
@@ -548,22 +530,33 @@ class WorldDatabase(VABC):
             scores = numpy.full(x.shape, survey_score)
             flags = numpy.full(x.shape, flag)
             # it's really slow to add each refinement to the db, so store up points until it's bigger and write at once
-            if len(x_accum) == 0:
-                x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum = x, y, depth, uncertainty, scores, flags
-            else:
-                x_accum = numpy.concatenate((x_accum, x))
-                y_accum = numpy.concatenate((y_accum, y))
-                depth_accum = numpy.concatenate((depth_accum, depth))
-                uncertainty_accum = numpy.concatenate((uncertainty_accum, uncertainty))
-                scores_accum = numpy.concatenate((scores_accum, scores))
-                flags_accum = numpy.concatenate((flags_accum, flags))
-            # dump the accumulated arrays to the database
-            if len(x_accum) > 500000:
-                self.insert_survey_array(numpy.array((x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum)), path_to_survey_data, accumulation_db=storage_db)
+            if x_accum is None:  #initialize arrays here to get the correct types
+                x_accum = numpy.zeros([max_len], dtype=x.dtype)
+                y_accum = numpy.zeros([max_len], dtype=y.dtype)
+                depth_accum = numpy.zeros([max_len], dtype=depth.dtype)
+                uncertainty_accum = numpy.zeros([max_len], dtype=uncertainty.dtype)
+                scores_accum = numpy.zeros([max_len], dtype=scores.dtype)
+                flags_accum = numpy.zeros([max_len], dtype=flags.dtype)
+                last_index = 0
+            # dump the accumulated arrays to the database if they are about to overflow the accumulation arrays
+            if last_index + len(x) > max_len:
+                self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
+                                                      uncertainty_accum[:last_index], scores_accum[:last_index], flags_accum[:last_index])), path_to_survey_data, accumulation_db=storage_db)
                 self.next_contributor -= 1
-                x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum = [], [], [], [], [], []
-        if len(x_accum) > 0:
-            self.insert_survey_array(numpy.array((x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum)), path_to_survey_data, accumulation_db=storage_db)
+                last_index = 0
+            # append the new data to the end of the accumulation arrays
+            prev_index = last_index
+            last_index += len(x)
+            x_accum[prev_index:last_index] = x
+            y_accum[prev_index:last_index] = y
+            depth_accum[prev_index:last_index] = depth
+            uncertainty_accum[prev_index:last_index] = uncertainty
+            scores_accum[prev_index:last_index] = scores
+            flags_accum[prev_index:last_index] = flags
+
+        if last_index > 0:
+            self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
+                                                  uncertainty_accum[:last_index], scores_accum[:last_index], flags_accum[:last_index])), path_to_survey_data, accumulation_db=storage_db)
             self.next_contributor -= 1
 
         self.next_contributor += 1
@@ -971,7 +964,7 @@ if __name__ == "__main__":
     build_mississippi = True
     export_mississippi = False
     profiling = False
-    process_utm_15 = True
+    process_utm_15 = False
     output_res = (4, 4)  # desired output size in meters
     data_dir = pathlib.Path(r'G:\Data\NBS\Mississipi')
 
@@ -1011,7 +1004,7 @@ if __name__ == "__main__":
             min_lon = -96
             max_lat = 35
             min_lat = 0
-            use_dir = data_dir.joinpath('vrbag_utm15_4m_accum2_db')
+            use_dir = data_dir.joinpath('vrbag_utm15_4m_accum3_db')
             data_files = [r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13193_MB_VR_LWRP.bag",
                        # r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13194_MB_VR_LWRP.bag",
                        r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13330_MB_VR_LWRP.bag",
@@ -1035,7 +1028,7 @@ if __name__ == "__main__":
             min_lon = -90
             max_lat = 35
             min_lat = 0
-            use_dir = data_dir.joinpath('vrbag_utm16_4m_accum2_db')
+            use_dir = data_dir.joinpath('vrbag_utm16_4m_accum3_db')
             data_files = [r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13195_MB_VR_LWRP.bag",
                        r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13196_MB_VR_LWRP.bag",
                        r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13196_MB_VR_MLLW.bag",
