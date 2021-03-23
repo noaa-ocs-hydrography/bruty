@@ -11,7 +11,7 @@ from osgeo import gdal, osr, ogr
 
 from HSTB.drivers import bag
 from nbs.bruty.utils import merge_arrays, merge_array, get_geotransformer, onerr, tqdm, make_gdal_dataset_size, make_gdal_dataset_area, \
-            calc_area_array_params, compute_delta_coord, iterate_gdal_image, add_uncertainty_layer
+            calc_area_array_params, compute_delta_coord, iterate_gdal_image, add_uncertainty_layer, transform_rect
 from nbs.bruty.raster_data import LayersEnum, RasterData, affine, inv_affine, affine_center, arrays_dont_match
 from nbs.bruty.history import RasterHistory, AccumulationHistory
 from nbs.bruty.abstract import VABC, abstractmethod
@@ -796,24 +796,25 @@ class WorldDatabase(VABC):
         except TypeError:
             dx = dy = res
 
+        fname = pathlib.Path(fname)
+        score_name = fname.with_suffix(".score" + fname.suffix)
         dataset = make_gdal_dataset_area(fname, len(layers), x1, y1, x2, y2, dx, dy, target_epsg, driver)
         # probably won't export the score layer but we need it when combining data into the export area
-        dataset_score = make_gdal_dataset_area(fname, 1, x1, y1, x2, y2, dx, dy, target_epsg, driver)
-        dataset_score_key2 = make_gdal_dataset_area(fname, 1, x1, y1, x2, y2, dx, dy, target_epsg, driver)
+
+        dataset_score = make_gdal_dataset_area(score_name, 2, x1, y1, x2, y2, dx, dy, target_epsg, driver)
 
         affine_transform = dataset.GetGeoTransform()  # x0, dxx, dyx, y0, dxy, dyy
         score_band = dataset_score.GetRasterBand(1)
-        score_key2_band = dataset_score_key2.GetRasterBand(1)
+        score_key2_band = dataset_score.GetRasterBand(2)
         max_cols, max_rows = score_band.XSize, score_band.YSize
 
         # 2) Get the master db tile indices that the area overlaps and iterate them
         if geotransform:
-            tile_x1, tile_y1 = inv_geotransform.transform(x1, y1)
-            tile_x2, tile_y2 = inv_geotransform.transform(x2, y2)
+            overview_x1, overview_y1, overview_x2, overview_y2 = transform_rect(x1, y1, x2, y2, inv_geotransform.transform)
         else:
-            tile_x1, tile_y1, tile_x2, tile_y2 = x1, y1, x2, y2
+            overview_x1, overview_y1, overview_x2, overview_y2 = x1, y1, x2, y2
         tile_count = 0
-        for txi, tyi, tile_history in self.db.iter_tiles(tile_x1, tile_y1, tile_x2, tile_y2):
+        for txi, tyi, tile_history in self.db.iter_tiles(overview_x1, overview_y1, overview_x2, overview_y2):
             # if txi != 3504 or tyi != 4155:
             #     continue
             try:
@@ -823,7 +824,8 @@ class WorldDatabase(VABC):
             # 3) Read the single tif sub-area as an array that covers this tile being processed
             tx1, ty1, tx2, ty2 = tile_history.get_corners()
             if geotransform:
-                target_xs, target_ys = geotransform.transform(numpy.array([tx1, tx2]), numpy.array([ty1, ty2]))
+                target_x1, target_y1, target_x2, target_y2 = transform_rect(tx1, ty1, tx2, ty2, geotransform.transform)
+                target_xs, target_ys = numpy.array([target_x1, target_x2]), numpy.array([target_y1, target_y2])
             else:
                 target_xs, target_ys = numpy.array([tx1, tx2]), numpy.array([ty1, ty2])
             r, c = inv_affine(target_xs, target_ys, *affine_transform)
@@ -846,8 +848,7 @@ class WorldDatabase(VABC):
             # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
             self.merge_rasters(tile_layers, tile_score, raster_data, tile_depth,
                                geotransform, affine_transform, start_col, start_row, block_cols, block_rows,
-                               dataset, dataset_score, dataset_score_key2, layers,
-                               score_band, score_key2_band)
+                               dataset, layers, score_band, score_key2_band)
             tile_count += 1
             # send the data to disk, I forget if this has any affect other than being able to look at the data in between steps to debug progress
             dataset.FlushCache()
@@ -857,10 +858,9 @@ class WorldDatabase(VABC):
     @staticmethod
     def merge_rasters(tile_layers, tile_score, raster_data, tile_depth,
                       geotransform, affine_transform, start_col, start_row, block_cols, block_rows,
-                      dataset, dataset_score, dataset_scorekey2, layers,
-                      score_band, key2_band, reverse_sort=(False, False)):
-        export_sub_area_scores = dataset_score.ReadAsArray(start_col, start_row, block_cols, block_rows)
-        export_sub_area_key2 = dataset_scorekey2.ReadAsArray(start_col, start_row, block_cols, block_rows)
+                      dataset, layers, score_band, key2_band, reverse_sort=(False, False)):
+        export_sub_area_scores = score_band.ReadAsArray(start_col, start_row, block_cols, block_rows)
+        export_sub_area_key2 = key2_band.ReadAsArray(start_col, start_row, block_cols, block_rows)
         sort_key_scores = numpy.array((export_sub_area_scores, export_sub_area_key2))
         export_sub_area = dataset.ReadAsArray(start_col, start_row, block_cols, block_rows)
 
@@ -938,7 +938,7 @@ if __name__ == "__main__":
 
     build_mississippi = False
     export_mississippi = True
-    process_utm_15 = True
+    process_utm_15 = False
     output_res = (4, 4)  # desired output size in meters
     data_dir = pathlib.Path(r'G:\Data\NBS\Mississipi')
     if process_utm_15:
@@ -1040,10 +1040,10 @@ if __name__ == "__main__":
                 cell_name = feat.GetField(cell_field)
 
                 ##
-                ##
-                ## between cells "US5PLQOB", "US5MSYAE"
-                # if cell_name not in ("US5MSYAF",):  # , 'US5MSYAD'
-                #     continue
+                ## vertical stripes in lat/lon
+                ## "US5MSYAF" for example
+                if cell_name not in ("US5MSYAF",):  # , 'US5MSYAD'
+                    continue
 
                 ## @fixme  There is a resolution issue at ,
                 ## where the raw VR is at 4.2m which leaves stripes at 4m export so need to add
@@ -1061,13 +1061,8 @@ if __name__ == "__main__":
                 if cnt > 0:
                     # output in native UTM -- Since the coordinates "twist" we need to check all four corners,
                     # not just lower left and upper right
-                    x1, y1 = geotransform.transform(minx, miny)
-                    x2, y2 = geotransform.transform(maxx, maxy)
-                    x3, y3 = geotransform.transform(minx, maxy)
-                    x4, y4 = geotransform.transform(maxx, miny)
-                    xs = (x1, x2, x3, x4)
-                    ys = (y1, y2, y3, y4)
-                    cnt = db.export_area(export_dir.joinpath(cell_name + "_utm.tif"), min(xs), min(ys), max(xs), max(ys), output_res)
+                    x1, y1, x2, y2 = transform_rect(minx, miny, maxx, maxy, geotransform.transform)
+                    cnt = db.export_area(export_dir.joinpath(cell_name + "_utm.tif"),x1, y1, x2, y2, output_res)
                 else:
                     os.remove(export_path)
 

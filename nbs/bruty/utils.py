@@ -545,6 +545,7 @@ def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg, dri
     dataset = make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg, driver)
     return dataset
 
+
 def add_uncertainty_layer(infile, outfile, depth_mult=0.01, uncert_offset=0.5, depth_band=1, driver='GTIFF'):
     ds = gdal.Open(infile)
     tmp_ds = gdal.GetDriverByName('MEM').CreateCopy('', ds, 0)
@@ -562,3 +563,14 @@ def add_uncertainty_layer(infile, outfile, depth_mult=0.01, uncert_offset=0.5, d
     del new_ds
     del tmp_ds
     del ds
+
+def transform_rect(x1, y1, x2, y2, transform):
+    # convert a rectangle to the minimum fully enclosing rectangle in transformed coordinates
+    # @todo if a transform is curved, then bisect to find the maximum which may not be the corners
+    tx1, ty1 = transform(x1, y1)
+    tx2, ty2 = transform(x2, y2)
+    tx3, ty3 = transform(x1, y2)
+    tx4, ty4 = transform(x2, y1)
+    xs = (tx1, tx2, tx3, tx4)
+    ys = (ty1, ty2, ty3, ty4)
+    return min(xs), min(ys), max(xs), max(ys)
