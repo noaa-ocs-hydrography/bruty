@@ -3,6 +3,7 @@ import pathlib
 import shutil
 import tempfile
 import time
+from datetime import datetime
 
 import numpy
 
@@ -417,8 +418,11 @@ class WorldDatabase(VABC):
         # @todo figure out the contributor - should be the unique id from the database of surveys
         for i_tile, (tx, ty) in enumerate(tile_list):
             # print("debug skipping tiles")
-            # if tx != 4614 or ty != 3227:
-            #    continue
+            # if tx != 3325 or ty != 3207:  # utm 16, US5PLQII_utm, H13196 -- gaps in DB and exported enc cells
+            # if tx != 3325 or ty != 3207:  # utm 16, US5MSYAF_utm, H13193 (raw bag is in utm15 though) -- gaps in DB and exported enc cells  217849.73 (m), 3307249.86 (m)
+            # if tx != 4614 or ty != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
+            # if tx != 4615 or ty != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
+            #     continue
             print(f'processing tile {i_tile} of {len(tile_list)}')
             tile_history = accumulation_db.get_tile_history_by_index(tx, ty)
             try:
@@ -522,7 +526,23 @@ class WorldDatabase(VABC):
             pts = numpy.array([r, c, refinement.depth, refinement.uncertainty]).reshape(4, -1)
             pts = pts[:, pts[2] != vr.fill_value]  # remove nodata points
 
-            x, y = affine(pts[0], pts[1], *refinement.geotransform)  # refinement_llx, resolution_x, 0, refinement_lly, 0, resolution_y)
+            x, y = affine_center(pts[0], pts[1], *refinement.geotransform)  # refinement_llx, resolution_x, 0, refinement_lly, 0, resolution_y)
+            # inspect_x, inspect_y = 690134.03, 3333177.81
+            # if min(x) <  inspect_x and max(x) >inspect_x and min(y)< inspect_y and max(y) > inspect_y:
+            #     mdata = vr.varres_metadata[ti, tj]
+            #     resolution_x = mdata["resolution_x"]
+            #     resolution_y = mdata["resolution_y"]
+            #     sw_corner_x = mdata["sw_corner_x"]
+            #     sw_corner_y = mdata["sw_corner_y"]
+            #     bag_supergrid_dy = vr.cell_size_y
+            #     bag_llx = vr.minx - bag_supergrid_dx / 2.0  # @todo seems the llx is center of the supergridd cel?????
+            #     bag_lly = vr.miny - bag_supergrid_dy / 2.0
+            #     supergrid_x = tj * bag_supergrid_dx
+            #     supergrid_y = ti * bag_supergrid_dy
+            #     refinement_llx = bag_llx + supergrid_x + sw_corner_x - resolution_x / 2.0  # @TODO implies swcorner is to the center and not the exterior
+            #     refinement_lly = bag_lly + supergrid_y + sw_corner_y - resolution_y / 2.0
+            # else:
+            #     continue
             if georef_transformer:
                 x, y = georef_transformer.transform(x, y)
             depth = pts[2]
@@ -629,123 +649,9 @@ class WorldDatabase(VABC):
         self.db.append_accumulation_db(storage_db)
         shutil.rmtree(storage_db.data_path)
 
-    def export_area_old(self, fname, x1, y1, x2, y2, res, target_epsg=None, driver="GTiff",
-                        layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR)):
-        """ Retrieves an area from the database at the requested resolution.
-
-        Parameters
-        ----------
-        fname
-            path to export to
-        x1
-            a corner x coordinate
-        y1
-            a corner y coordinate
-        x2
-            a corner x coordinate
-        y2
-            a corner y coordinate
-        res
-            Resolution to export with.  If a tuple is supplied it is read as (res_x, res_y) while a single number will be used for x and y resolutions
-        target_epsg
-            epsg of the coordinate system to export into
-        driver
-            gdal driver name to use
-        layers
-            Layers to extract from the database into the output file.  Defaults to Elevation, Uncertainty and Contributor
-
-        Returns
-        -------
-        None
-
-        """
-        # 1) Create a single tif tile that covers the area desired
-        if not target_epsg:
-            target_epsg = self.db.tile_scheme.epsg
-        geotransform = get_geotransformer(self.db.tile_scheme.epsg, target_epsg)
-
-        try:
-            dx, dy = res
-        except TypeError:
-            dx = dy = res
-
-        dataset = make_gdal_dataset_area(fname, len(layers), x1, y1, x2, y2, dx, dy, target_epsg, driver)
-        # probably won't export the score layer but we need it when combining data into the export area
-        dataset_score = make_gdal_dataset_area(fname, 1, x1, y1, x2, y2, dx, dy, target_epsg, driver)
-
-        x0, dxx, dyx, y0, dxy, dyy = dataset.GetGeoTransform()
-        score_band = dataset_score.GetRasterBand(1)
-        max_cols, max_rows = score_band.XSize, score_band.YSize
-
-        # 2) Get the master db tile indices that the area overlaps and iterate them
-        for txi, tyi, tile_history in self.db.iter_tiles(x1, y1, x2, y2):
-            # if txi != 3504 or tyi != 4155:
-            #     continue
-            try:
-                raster_data = tile_history[-1]
-            except IndexError:  # empty tile, skip to the next
-                continue
-            # 3) Read the single tif sub-area as an array that covers this tile being processed
-            tx1, ty1, tx2, ty2 = tile_history.get_corners()
-            r, c = inv_affine(numpy.array([tx1, tx2]), numpy.array([ty1, ty2]), x0, dxx, dyx, y0, dxy, dyy)
-            start_col, start_row = max(0, int(min(c))), max(0, int(min(r)))
-            block_cols, block_rows = int(numpy.abs(numpy.diff(c))) + 1, int(numpy.abs(numpy.diff(r))) + 1
-            if block_cols + start_col > max_cols:
-                block_cols = max_cols - start_col
-            if block_rows + start_row > max_rows:
-                block_rows = max_rows - start_row
-
-            export_sub_area_scores = dataset_score.ReadAsArray(start_col, start_row, block_cols, block_rows)
-            export_sub_area = dataset.ReadAsArray(start_col, start_row, block_cols, block_rows)
-            # 4) Use the db.tile_scheme function to convert points from the tiles to x,y
-            # fixme - score and depth have same value, read bug?
-            tile_score = raster_data.get_arrays(LayersEnum.SCORE)[0]
-            tile_depth = raster_data.get_arrays(LayersEnum.ELEVATION)[0]
-            tile_layers = raster_data.get_arrays(layers)
-            tile_r, tile_c = numpy.indices(tile_layers.shape[1:])
-            tile_x, tile_y = raster_data.rc_to_xy_using_dims(tile_score.shape[0], tile_score.shape[1], tile_r, tile_c)
-            if geotransform:  # convert to target epsg
-                tile_x, tile_y = geotransform(tile_x, tile_y)
-
-            # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
-            # 6) Sort on score in case multiple points go into a position that the right value is retained
-            # sort based on score then on depth so the shoalest top score is kept
-            pts = numpy.array((tile_x, tile_y, tile_score, tile_depth, *tile_layers)).reshape(4 + len(layers), -1)
-            pts = pts[:, ~numpy.isnan(pts[2])]  # remove empty cells (no score = empty)
-            sorted_ind = numpy.lexsort((-pts[3], pts[2]))
-            sorted_pts = pts[:, sorted_ind]
-            # 7) Use affine geotransform convert x,y into the i,j for the exported area
-            export_row, export_col = inv_affine(sorted_pts[0], sorted_pts[1], x0, dxx, dyx, y0, dxy, dyy)
-            export_row -= start_row  # adjust to the sub area in memory
-            export_col -= start_col
-            # clip to the edges of the export area since our db tiles can cover the earth [0:block_rows-1, 0:block_cols]
-            row_out_of_bounds = numpy.logical_or(export_row < 0, export_row >= block_rows)
-            col_out_of_bounds = numpy.logical_or(export_col < 0, export_col >= block_cols)
-            out_of_bounds = numpy.logical_or(row_out_of_bounds, col_out_of_bounds)
-            if out_of_bounds.any():
-                sorted_pts = sorted_pts[:, ~out_of_bounds]
-                export_row = export_row[~out_of_bounds]
-                export_col = export_col[~out_of_bounds]
-            # 8) Write the data into the export (single) tif.
-            # replace x,y with row, col for the points
-            # @todo write unit test to confirm that the sort is working in case numpy changes behavior.
-            #   currently assumes the last value is stored in the array if more than one have the same ri, rj indices.
-            replace_cells = numpy.logical_or(sorted_pts[2] >= export_sub_area_scores[export_row, export_col],
-                                             numpy.isnan(export_sub_area_scores[export_row, export_col]))
-            replacements = sorted_pts[4:, replace_cells]
-            ri = export_row[replace_cells]
-            rj = export_col[replace_cells]
-            export_sub_area[:, ri, rj] = replacements
-            export_sub_area_scores[ri, rj] = sorted_pts[2, replace_cells]
-            for band_num in range(len(layers)):
-                band = dataset.GetRasterBand(band_num + 1)
-                band.WriteArray(export_sub_area[band_num], start_col, start_row)
-            score_band.WriteArray(export_sub_area_scores, start_col, start_row)
-            dataset.FlushCache()
-            dataset_score.FlushCache()
-
     def export_area(self, fname, x1, y1, x2, y2, res, target_epsg=None, driver="GTiff",
-                    layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR)):
+                    layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
+                    gdal_options=()):
         """ Retrieves an area from the database at the requested resolution.
 
         # 1) Create a single tif tile that covers the area desired
@@ -782,7 +688,8 @@ class WorldDatabase(VABC):
 
         Returns
         -------
-        None
+        int
+            number of database tiles that supplied data into the export area
 
         """
         # 1) Create a single tif tile that covers the area desired
@@ -798,7 +705,8 @@ class WorldDatabase(VABC):
 
         fname = pathlib.Path(fname)
         score_name = fname.with_suffix(".score" + fname.suffix)
-        dataset = make_gdal_dataset_area(fname, len(layers), x1, y1, x2, y2, dx, dy, target_epsg, driver)
+
+        dataset = make_gdal_dataset_area(fname, len(layers), x1, y1, x2, y2, dx, dy, target_epsg, driver, gdal_options)
         # probably won't export the score layer but we need it when combining data into the export area
 
         dataset_score = make_gdal_dataset_area(score_name, 2, x1, y1, x2, y2, dx, dy, target_epsg, driver)
@@ -815,7 +723,8 @@ class WorldDatabase(VABC):
             overview_x1, overview_y1, overview_x2, overview_y2 = x1, y1, x2, y2
         tile_count = 0
         for txi, tyi, tile_history in self.db.iter_tiles(overview_x1, overview_y1, overview_x2, overview_y2):
-            # if txi != 3504 or tyi != 4155:
+            # if txi != 3325 or tyi != 3207:  # utm 16, US5MSYAF_utm, H13193 -- gaps in DB and exported enc cells  217849.73 (m), 3307249.86 (m)
+            # if txi != 4614 or tyi != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
             #     continue
             try:
                 raster_data = tile_history[-1]
@@ -936,9 +845,9 @@ if __name__ == "__main__":
     # db.export_area_old(use_dir.joinpath("export_tile_old.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
     # db.export_area(use_dir.joinpath("export_tile_new.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
 
-    build_mississippi = False
+    build_mississippi = True
     export_mississippi = True
-    process_utm_15 = False
+    process_utm_15 = True
     output_res = (4, 4)  # desired output size in meters
     data_dir = pathlib.Path(r'G:\Data\NBS\Mississipi')
     if process_utm_15:
@@ -948,7 +857,7 @@ if __name__ == "__main__":
         min_lon = -96
         max_lat = 35
         min_lat = 0
-        use_dir = data_dir.joinpath('vrbag_utm15_full_db')
+        use_dir = data_dir.joinpath('vrbag_utm15_no_upsamples_db')
 
         data_files = [(r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13194_MB_VR_LWRP.bag", 92),
                       (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13193_MB_VR_LWRP.bag", 100),
@@ -958,8 +867,8 @@ if __name__ == "__main__":
                       (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_MB_VR_LWRP.bag", 97),
                       (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13191_MB_VR_LWRP.bag", 98),
                       (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13192_MB_VR_LWRP.bag", 99),
-                      (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_MB_VR_LWRP.bag.resampled_4m.uncert.tif", 77),
-                      (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13192_MB_VR_LWRP.bag.resampled_4m.uncert.tif", 79),
+                      # (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_MB_VR_LWRP.bag.resampled_4m.uncert.tif", 77),
+                      # (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13192_MB_VR_LWRP.bag.resampled_4m.uncert.tif", 79),
                    ]
         resamples = []
         # [r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_MB_VR_LWRP.bag",
@@ -977,7 +886,7 @@ if __name__ == "__main__":
         min_lon = -90
         max_lat = 35
         min_lat = 0
-        use_dir = data_dir.joinpath('vrbag_utm16_full_db')
+        use_dir = data_dir.joinpath('vrbag_utm16_no_upsamples_db')
         data_files = [(r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13195_MB_VR_LWRP.bag", 93),
                       (r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13196_MB_VR_LWRP.bag", 91),
                       (r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13193_MB_VR_LWRP.bag", 100),
@@ -999,7 +908,9 @@ if __name__ == "__main__":
 
         for data_file, score in data_files:
             # bag_file = directory.joinpath(directory.name + "_MB_VR_LWRP.bag")
-
+            if 'H13190' not in data_file:
+                print("Skipped for debugging", data_file)
+                continue
             if 'H13194' in data_file:  # this file is encoded in UTM16 even in the UTM15 area
                 override_epsg = 26916
             elif 'H13193' in data_file:  # this file is encoded in UTM15 even in the UTM16 area
@@ -1042,22 +953,48 @@ if __name__ == "__main__":
                 ##
                 ## vertical stripes in lat/lon
                 ## "US5MSYAF" for example
-                if cell_name not in ("US5MSYAF",):  # , 'US5MSYAD'
-                    continue
+                # if cell_name not in ("US5MSYAF",):  # , 'US5MSYAD'
+                #     continue
 
                 ## @fixme  There is a resolution issue at ,
                 ## where the raw VR is at 4.2m which leaves stripes at 4m export so need to add
                 ## an upsampled dataset to fill the area (with lower score so it doesn't overwrite the VR itself)
-                # if cell_name not in ('US5BPGBD', 'US5BPGCD'):
-                #     continue
+                if cell_name not in ('US5BPGBD',):  # 'US5BPGCD'):
+                    continue
 
                 # @fixme  missing some data in US5PLQII, US5PLQMB  US5MSYAE -- more upsampling needed?
 
                 print(cell_name)
                 # convert user res (4m in testing) size at center of cell for resolution purposes
                 dx, dy = compute_delta_coord(cx, cy, *output_res, geotransform, inv_geotransform)
+
+                bag_options_dict = {'VAR_INDIVIDUAL_NAME': 'Chief, Hydrographic Surveys Division',
+                                     'VAR_ORGANISATION_NAME': 'NOAA, NOS, Office of Coast Survey',
+                                     'VAR_POSITION_NAME': 'Chief, Hydrographic Surveys Division',
+                                     'VAR_DATE': datetime.now().strftime('%Y-%m-%d'),
+                                     'VAR_VERT_WKT': 'VERT_CS["unknown", VERT_DATUM["unknown", 2000]]',
+                                     'VAR_ABSTRACT': "This multi-layered file is part of NOAA Office of Coast Survey’s National Bathymetry. The National Bathymetric Source is created to serve chart production and support navigation. The bathymetry is compiled from multiple sources with varying quality and includes forms of interpolation. Soundings should not be extracted from this file as source data is not explicitly identified. The bathymetric vertical uncertainty is communicated through the associated layer. More generic quality and source metrics will be added with 2.0 version of the BAG format.",
+                                     'VAR_PROCESS_STEP_DESCRIPTION': f'Generated By GDAL {gdal.__version__} and NBS',
+                                     'VAR_DATETIME': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
+                                     'VAR_VERTICAL_UNCERT_CODE': 'productUncert',
+                                     # 'VAR_RESTRICTION_CODE=' + restriction_code,
+                                     # 'VAR_OTHER_CONSTRAINTS=' + other_constraints,
+                                     # 'VAR_CLASSIFICATION=' + classification,
+                                     #'VAR_SECURITY_USER_NOTE=' + security_user_note
+                                     }
+                tif_tags = {'EMAIL_ADDRESS': 'OCS.NBS@noaa.gov',
+                            'ONLINE_RESOURCE': 'https://www.ngdc.noaa.gov',
+                            'LICENSE': 'License cc0-1.0',
+                            }
+
                 export_path = export_dir.joinpath(cell_name + ".tif")
-                cnt = db.export_area(export_path, minx, miny, maxx, maxy, (dx, dy), target_epsg=export_epsg)
+                cnt = db.export_area(export_path, minx, miny, maxx, maxy, (dx+dx*.1, dy+dy*.1), target_epsg=export_epsg)
+
+                # export_path = export_dir.joinpath(cell_name + ".bag")
+                # bag_options = [key + "=" + val for key, val in bag_options_dict.items()]
+                # cnt2 = db.export_area(export_path, minx, miny, maxx, maxy, (dx+dx*.1, dy+dy*.1), target_epsg=export_epsg,
+                #                       driver='BAG', gdal_options=bag_options)
+
                 if cnt > 0:
                     # output in native UTM -- Since the coordinates "twist" we need to check all four corners,
                     # not just lower left and upper right
@@ -1105,3 +1042,18 @@ if __name__ == "__main__":
             # db.insert_survey_gdal(str(soundings_file))
             # db.export_area_new(str(soundings_file.parent.joinpath("output_soundings_debug5.tiff")), x1, y1, x2, y2, (res_x, res_y), )
             save_soundings_from_image(soundings_file, str(soundings_file) + "_3.gpkg", 50)
+
+
+# test positions -- H13190, US5GPGBD, Mississipi\vrbag_utm15_full_db\4615\3227\_000001_.tif, Mississipi\UTM15\NCEI\H13190_MB_VR_LWRP_resampled.tif
+# same approx position
+# 690134.03 (m), 3333177.81 (m)  is 41.7 in the H13190
+# 690134.03 (m), 3333177.81 (m)  is 42.4 in the resampled
+# 690133.98 (m), 3333178.01 (m)  is 42.3 in the \4615\3227\000001.tif
+# 690133.60 (m), 3333177.74 (m)  is 42.3 in the US5GPGBD
+
+# seems to be the same Z value of 41.7
+# 690134.03 (m), 3333177.81 (m)  H13190
+# 690138.14 (m), 3333177.79 (m)  resample  (right (east) one column)
+# 690129.99 (m), 3333173.99 (m)  \4615\3227\000001.tif  (down+left (south west) one row+col)
+# 690129.62 (m), 3333173.76 (m)  US5GPGBD  (down+left (south west) one row+col)
+

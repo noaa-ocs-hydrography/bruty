@@ -167,7 +167,6 @@ def test_export_area():
 
     # NOTE: when using this coordinate tile the 0,0 x,y position ends up in a database cell that spans from -0.66 < x < 0.34 and -.72 < y < 0.27
     # so the exported 0,0 will end up in the -1,-1 cell on the export
-    db.export_area_old(use_dir.joinpath("old.tif"), -1, -1, 11, 11, (.5, .5))
     db.export_area(use_dir.joinpath("new0.5.tif"), -1, -1, 11, 11, (.5, .5))
     db.export_area(use_dir.joinpath("new1.tif"), -1, -1, 11, 11, (1, 1))
     ds = gdal.Open(str(use_dir.joinpath("new1.tif")))
@@ -408,7 +407,6 @@ def test_pbc19_vr():
 def test_export_area_full_db():
     use_dir = data_dir.joinpath('tile4_vr_utm_db')
     db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
-    db.export_area_old(use_dir.joinpath("export_tile_old.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
     db.export_area(use_dir.joinpath("export_tile_new.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
 
 

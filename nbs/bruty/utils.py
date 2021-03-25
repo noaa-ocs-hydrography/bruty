@@ -443,7 +443,8 @@ def compute_delta_coord_epsg(x, y, dx, dy, source_epsg, target_epsg):
     return compute_delta_coord(x, y, dx, dy, geotransform, inv_geotransform)
 
 
-def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg, driver="GTiff"):
+def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg,
+                           driver="GTiff", options=(), nodata=numpy.nan):
     """ Makes a north up gdal dataset with nodata = numpy.nan and LZW compression.
     Specifying a positive res_y will be input as a negative value into the gdal file,
     since tif/gdal likes max_y and a negative Y pixel size.
@@ -471,15 +472,28 @@ def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, sh
         epsg of the target coordinate system
     driver
         gdal driver name of the output file (defaults to geotiff)
+    options
+        gdal driver options.  Generally bag metadata or tiff compression settings etc
+    nodata
+        no_data value - defaults to nan but for bag will be set to 1000000
 
     Returns
     -------
     gdal.dataset
 
     """
-    driver = gdal.GetDriverByName(driver)
-    dataset = driver.Create(str(fname), xsize=shape_x, ysize=shape_y, bands=bands, eType=gdal.GDT_Float32,
-                            options=['COMPRESS=LZW'])
+    gdal_driver = gdal.GetDriverByName(driver)
+    if driver.lower() == 'bag':  # this is required in the spec
+        nodata = 1000000.0
+    if not options:
+        if driver.lower() == "gtiff":
+            options=['COMPRESS=LZW']
+        if driver.lower() == 'bag':
+            options = list(options)
+            options.insert(0, 'TEMPLATE=G:\\Pydro_new_svn_1\\Pydro21\\NOAA\\site-packages\\Python38\\git_repos\\hstb_resources\\HSTB\\resources\\gdal_bag_template.xml')
+
+    dataset = gdal_driver.Create(str(fname), xsize=shape_x, ysize=shape_y, bands=bands, eType=gdal.GDT_Float32,
+                            options=options)
 
     # Set location
     gt = [min_x, res_x, 0, max_y, 0, -res_y]  # north up
@@ -492,13 +506,17 @@ def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, sh
 
     # Set projection
     dataset.SetProjection(dest_wkt)
-    band = dataset.GetRasterBand(1)
-    band.SetNoDataValue(numpy.nan)
+    for b in range(dataset.RasterCount):
+        band = dataset.GetRasterBand(b+1)
+        band.SetNoDataValue(nodata)
+        if driver == 'GTiff':
+            break
     del band
     return dataset
 
 
-def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg, driver="GTiff"):
+def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg,
+                           driver="GTiff", options=(), nodata=numpy.nan):
     """ Makes a north up gdal dataset with nodata = numpy.nan and LZW compression.
     Specifying a positive res_y will be input as a negative value into the gdal file,
     since tif/gdal likes max_y and a negative Y pixel size.
@@ -535,14 +553,17 @@ def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg, dri
         epsg of the target coordinate system
     driver
         gdal driver name of the output file (defaults to geotiff)
-
+    options
+        gdal driver options.  Generally bag metadata or tiff compression settings etc
+    nodata
+        no_data value - defaults to nan but for bag will be set to 1000000
     Returns
     -------
     gdal.dataset
 
     """
     min_x, min_y, max_x, max_y, shape_x, shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
-    dataset = make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg, driver)
+    dataset = make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg, driver, options, nodata)
     return dataset
 
 
@@ -564,13 +585,13 @@ def add_uncertainty_layer(infile, outfile, depth_mult=0.01, uncert_offset=0.5, d
     del tmp_ds
     del ds
 
-def transform_rect(x1, y1, x2, y2, transform):
+def transform_rect(x1, y1, x2, y2, transform_func):
     # convert a rectangle to the minimum fully enclosing rectangle in transformed coordinates
     # @todo if a transform is curved, then bisect to find the maximum which may not be the corners
-    tx1, ty1 = transform(x1, y1)
-    tx2, ty2 = transform(x2, y2)
-    tx3, ty3 = transform(x1, y2)
-    tx4, ty4 = transform(x2, y1)
+    tx1, ty1 = transform_func(x1, y1)
+    tx2, ty2 = transform_func(x2, y2)
+    tx3, ty3 = transform_func(x1, y2)
+    tx4, ty4 = transform_func(x2, y1)
     xs = (tx1, tx2, tx3, tx4)
     ys = (ty1, ty2, ty3, ty4)
     return min(xs), min(ys), max(xs), max(ys)
