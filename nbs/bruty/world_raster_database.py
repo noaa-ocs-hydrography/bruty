@@ -261,6 +261,7 @@ class WMTileBackend(WorldTilesBackend):
         super().__init__(storage)
 
 
+# @todo - get rid of the tile directories and raise IndexErrors if tile index is not 0,0
 class SingleFileBackend(WorldTilesBackend):
     def __init__(self, epsg, x1, y1, x2, y2, history_class, storage_class, data_class, data_path):
         tile_scheme = TilingScheme(x1, y1, x2, y2, zoom=0)
@@ -826,7 +827,7 @@ class WorldDatabase(VABC):
 
 class SingleFile(WorldDatabase):
     def __init__(self, epsg, x1, y1, x2, y2, res_x, res_y, storage_directory):
-        min_x, min_y, max_x, max_y, shape_x, shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
+        min_x, min_y, max_x, max_y, self.shape_x, self.shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
         super().__init__(SingleFileBackend(epsg, min_x, min_y, max_x, max_y, AccumulationHistory, DiskHistory, TiffStorage, storage_directory))
 
     def init_tile(self, tx, ty, tile_history):
@@ -956,11 +957,11 @@ if __name__ == "__main__":
                 # if cell_name not in ("US5MSYAF",):  # , 'US5MSYAD'
                 #     continue
 
-                ## @fixme  There is a resolution issue at ,
-                ## where the raw VR is at 4.2m which leaves stripes at 4m export so need to add
-                ## an upsampled dataset to fill the area (with lower score so it doesn't overwrite the VR itself)
-                if cell_name not in ('US5BPGBD',):  # 'US5BPGCD'):
-                    continue
+                    ## @fixme  There is a resolution issue at ,
+                    ## where the raw VR is at 4.2m which leaves stripes at 4m export so need to add
+                    ## an upsampled dataset to fill the area (with lower score so it doesn't overwrite the VR itself)
+                    if cell_name not in ('US5BPGBD',):  # 'US5BPGCD'):
+                        continue
 
                 # @fixme  missing some data in US5PLQII, US5PLQMB  US5MSYAE -- more upsampling needed?
 
@@ -1002,6 +1003,7 @@ if __name__ == "__main__":
                     cnt = db.export_area(export_dir.joinpath(cell_name + "_utm.tif"),x1, y1, x2, y2, output_res)
                 else:
                     os.remove(export_path)
+                os.remove(export_path.with_suffix(".score.tif"))
 
     test_soundings = False
     if test_soundings:
