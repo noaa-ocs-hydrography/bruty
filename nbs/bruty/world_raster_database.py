@@ -21,7 +21,7 @@ from nbs.bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator, G
 from nbs.bruty import morton
 
 geo_debug = False
-
+_debug = False
 
 class WorldTilesBackend(VABC):
     """ Class to control Tile addressing.
@@ -418,12 +418,13 @@ class WorldDatabase(VABC):
         # itererate each tile that was found to have data
         # @todo figure out the contributor - should be the unique id from the database of surveys
         for i_tile, (tx, ty) in enumerate(tile_list):
-            # print("debug skipping tiles")
-            # if tx != 3325 or ty != 3207:  # utm 16, US5PLQII_utm, H13196 -- gaps in DB and exported enc cells
-            # if tx != 3325 or ty != 3207:  # utm 16, US5MSYAF_utm, H13193 (raw bag is in utm15 though) -- gaps in DB and exported enc cells  217849.73 (m), 3307249.86 (m)
-            # if tx != 4614 or ty != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
-            # if tx != 4615 or ty != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
-            #     continue
+            if _debug:
+                print("debug skipping tiles")
+                # if tx != 3325 or ty != 3207:  # utm 16, US5PLQII_utm, H13196 -- gaps in DB and exported enc cells
+                # if tx != 3325 or ty != 3207:  # utm 16, US5MSYAF_utm, H13193 (raw bag is in utm15 though) -- gaps in DB and exported enc cells  217849.73 (m), 3307249.86 (m)
+                # if tx != 4614 or ty != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
+                if tx != 4615 or ty != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
+                    continue
             print(f'processing tile {i_tile} of {len(tile_list)}')
             tile_history = accumulation_db.get_tile_history_by_index(tx, ty)
             try:
@@ -528,22 +529,23 @@ class WorldDatabase(VABC):
             pts = pts[:, pts[2] != vr.fill_value]  # remove nodata points
 
             x, y = affine_center(pts[0], pts[1], *refinement.geotransform)  # refinement_llx, resolution_x, 0, refinement_lly, 0, resolution_y)
-            # inspect_x, inspect_y = 690134.03, 3333177.81
-            # if min(x) <  inspect_x and max(x) >inspect_x and min(y)< inspect_y and max(y) > inspect_y:
-            #     mdata = vr.varres_metadata[ti, tj]
-            #     resolution_x = mdata["resolution_x"]
-            #     resolution_y = mdata["resolution_y"]
-            #     sw_corner_x = mdata["sw_corner_x"]
-            #     sw_corner_y = mdata["sw_corner_y"]
-            #     bag_supergrid_dy = vr.cell_size_y
-            #     bag_llx = vr.minx - bag_supergrid_dx / 2.0  # @todo seems the llx is center of the supergridd cel?????
-            #     bag_lly = vr.miny - bag_supergrid_dy / 2.0
-            #     supergrid_x = tj * bag_supergrid_dx
-            #     supergrid_y = ti * bag_supergrid_dy
-            #     refinement_llx = bag_llx + supergrid_x + sw_corner_x - resolution_x / 2.0  # @TODO implies swcorner is to the center and not the exterior
-            #     refinement_lly = bag_lly + supergrid_y + sw_corner_y - resolution_y / 2.0
-            # else:
-            #     continue
+            if _debug:
+                inspect_x, inspect_y = 690134.03, 3333177.81  # ti, tj = (655, 265) in H13190
+                if min(x) <  inspect_x and max(x) >inspect_x and min(y)< inspect_y and max(y) > inspect_y:
+                    mdata = vr.varres_metadata[ti, tj]
+                    resolution_x = mdata["resolution_x"]
+                    resolution_y = mdata["resolution_y"]
+                    sw_corner_x = mdata["sw_corner_x"]
+                    sw_corner_y = mdata["sw_corner_y"]
+                    bag_supergrid_dy = vr.cell_size_y
+                    bag_llx = vr.minx - bag_supergrid_dx / 2.0  # @todo seems the llx is center of the supergridd cel?????
+                    bag_lly = vr.miny - bag_supergrid_dy / 2.0
+                    supergrid_x = tj * bag_supergrid_dx
+                    supergrid_y = ti * bag_supergrid_dy
+                    refinement_llx = bag_llx + supergrid_x + sw_corner_x - resolution_x / 2.0  # @TODO implies swcorner is to the center and not the exterior
+                    refinement_lly = bag_lly + supergrid_y + sw_corner_y - resolution_y / 2.0
+                else:
+                    continue
             if georef_transformer:
                 x, y = georef_transformer.transform(x, y)
             depth = pts[2]
@@ -828,10 +830,22 @@ class WorldDatabase(VABC):
 class SingleFile(WorldDatabase):
     def __init__(self, epsg, x1, y1, x2, y2, res_x, res_y, storage_directory):
         min_x, min_y, max_x, max_y, self.shape_x, self.shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
+        self.res_x = res_x
+        self.res_y = res_y
         super().__init__(SingleFileBackend(epsg, min_x, min_y, max_x, max_y, AccumulationHistory, DiskHistory, TiffStorage, storage_directory))
 
     def init_tile(self, tx, ty, tile_history):
         return self.shape_y, self.shape_x  # rows and columns
+
+    def export(self, fname, driver="GTiff", layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
+                    gdal_options=()):
+        """Export the full area of the 'single file database' in the epsg the data is stored in"""
+        y1 = self.tile_scheme.min_y
+        y2 = self.tile_scheme.max_y
+        x1 = self.tile_scheme.min_x
+        x2 = self.tile_scheme.max_x
+        super().export_area(fname, x1, y1, x2, y2, (self.res_x, self.res_y), driver=driver,
+                    layers=layers, gdal_options=gdal_options)
 
 
 if __name__ == "__main__":
@@ -909,9 +923,10 @@ if __name__ == "__main__":
 
         for data_file, score in data_files:
             # bag_file = directory.joinpath(directory.name + "_MB_VR_LWRP.bag")
-            if 'H13190' not in data_file:
-                print("Skipped for debugging", data_file)
-                continue
+            if _debug:
+                if 'H13190' not in data_file:
+                    print("Skipped for debugging", data_file)
+                    continue
             if 'H13194' in data_file:  # this file is encoded in UTM16 even in the UTM15 area
                 override_epsg = 26916
             elif 'H13193' in data_file:  # this file is encoded in UTM15 even in the UTM16 area
@@ -950,12 +965,13 @@ if __name__ == "__main__":
             # crop to the area around Mississippi
             if cx > min_lon and cx < max_lon and cy > min_lat and cy < max_lat:
                 cell_name = feat.GetField(cell_field)
+                if _debug:
 
-                ##
-                ## vertical stripes in lat/lon
-                ## "US5MSYAF" for example
-                # if cell_name not in ("US5MSYAF",):  # , 'US5MSYAD'
-                #     continue
+                    ##
+                    ## vertical stripes in lat/lon
+                    ## "US5MSYAF" for example
+                    # if cell_name not in ("US5MSYAF",):  # , 'US5MSYAD'
+                    #     continue
 
                     ## @fixme  There is a resolution issue at ,
                     ## where the raw VR is at 4.2m which leaves stripes at 4m export so need to add
@@ -963,7 +979,7 @@ if __name__ == "__main__":
                     if cell_name not in ('US5BPGBD',):  # 'US5BPGCD'):
                         continue
 
-                # @fixme  missing some data in US5PLQII, US5PLQMB  US5MSYAE -- more upsampling needed?
+                    # @fixme  missing some data in US5PLQII, US5PLQMB  US5MSYAE -- more upsampling needed?
 
                 print(cell_name)
                 # convert user res (4m in testing) size at center of cell for resolution purposes
@@ -1059,3 +1075,26 @@ if __name__ == "__main__":
 # 690129.99 (m), 3333173.99 (m)  \4615\3227\000001.tif  (down+left (south west) one row+col)
 # 690129.62 (m), 3333173.76 (m)  US5GPGBD  (down+left (south west) one row+col)
 
+# from importlib import reload
+# import HSTB.shared.gridded_coords
+# bag.VRBag_to_TIF(r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_MB_VR_LWRP.bag", r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_resample.tif", 4.105774879455566, bag.MEAN, nodata=1000000.)
+
+# index2d = numpy.array([(655, 265)], dtype=numpy.int32)
+
+# >>> print('x', refinement_llx + 9 * resolution_x + resolution_x / 2.0, 'y',refinement_lly + 8 * resolution_y + resolution_y / 2.0)
+# x 690134.0489868548 y 3333177.797961975
+# >>> print("x (cols)",xstarts[9],":", xends[9], "y (rows)",ystarts[8],":", yends[8])
+# x (cols) 690131.9960994151 : 690136.1018732946 y (rows) 3333175.7450745353 : 3333179.850848415
+# >>> print("rows",row_start_indices[8],":",row_end_indices[8], "cols",col_start_indices[9],":", col_end_indices[9])
+# rows 4052 : 4053 cols 2926 : 2927
+# >>> print('starts',HSTB.shared.gridded_coords.affine(row_start_indices[8], col_start_indices[9], *ds_val.GetGeoTransform()), ',  ends',HSTB.shared.gridded_coords.affine(row_end_indices[8], col_end_indices[9], *ds_val.GetGeoTransform()))
+# starts (690131.995748028, 3333183.9557557716) ,  ends (690136.1015229075, 3333179.849980892)
+# >>> ds_val.GetGeoTransform(), sr_grid.geotransform
+# ((678118.498450741,  4.105774879455566,  0.0,  3349820.5555673256,  0.0,  -4.105774879455566),
+#  (678118.498450741,  4.105774879455566,  0,  3303552.578450741,  0,  4.105774879455566))
+
+# ds = gdal.Open(r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_resample4.tif")
+# b = ds.GetRasterBand(1)
+# dep = b.ReadAsArray()
+# b.GetNoDataValue()
+# (dep!=0.0).any()
