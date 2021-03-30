@@ -79,8 +79,8 @@ class ExactTilingScheme(TilingScheme):
         num_tiles = self.num_tiles(zoom)
         rough_xs, rough_ys, _ux, _uy = super().tile_index_to_xy(numpy.arange(num_tiles+1), numpy.arange(num_tiles+1))
         # round off the edges to the closest lower cell
-        xs = rough_xs - numpy.mod(rough_xs, self.res_x)
-        ys = rough_ys - numpy.mod(rough_ys, self.res_y)
+        xs = rough_xs - numpy.mod(rough_xs - self.min_x, self.res_x)
+        ys = rough_ys - numpy.mod(rough_ys - self.min_y, self.res_y)
         xs[-1] += self.res_x  # round the last tile up to make sure the max value is included
         ys[-1] += self.res_y
         return xs, ys
@@ -158,12 +158,12 @@ class GoogleTilesMercator(GoogleTilesLatLon):
 class UTMTiles(TilingScheme):
     def __init__(self, zoom=13):
         self.epsg = None
-        super().__init__(min_x = -1000000, min_y=-1000000, max_x=2000000, max_y=10000000, zoom=zoom)
+        super().__init__(min_x=-1000000, min_y=-1000000, max_x=2000000, max_y=10000000, zoom=zoom)
 
 class ExactUTMTiles(ExactTilingScheme):
     def __init__(self, res_x, res_y, zoom=13):
         self.epsg = None
-        super().__init__(res_x, res_y, min_x = -1000000, min_y=-1000000, max_x=2000000, max_y=10000000, zoom=zoom)
+        super().__init__(res_x, res_y, min_x=-1000000, min_y=-1000000, max_x=2000000, max_y=10000000, zoom=zoom)
 
 
 def test():

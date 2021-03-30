@@ -236,12 +236,12 @@ class UTMTileBackend(WorldTilesBackend):
         tile_scheme.epsg = utm_epsg
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
 
+
 class UTMTileBackendExactRes(WorldTilesBackend):
     def __init__(self, res_x, res_y, utm_epsg, history_class, storage_class, data_class, data_path, zoom_level=13):
         tile_scheme = ExactUTMTiles(res_x, res_y, zoom=zoom_level)
         tile_scheme.epsg = utm_epsg
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
-
 
 
 class GoogleMercatorTileBackend(WorldTilesBackend):
@@ -423,9 +423,9 @@ class WorldDatabase(VABC):
                 # if tx != 3325 or ty != 3207:  # utm 16, US5PLQII_utm, H13196 -- gaps in DB and exported enc cells
                 # if tx != 3325 or ty != 3207:  # utm 16, US5MSYAF_utm, H13193 (raw bag is in utm15 though) -- gaps in DB and exported enc cells  217849.73 (m), 3307249.86 (m)
                 # if tx != 4614 or ty != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
-                if tx != 4615 or ty != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
-                    continue
-            print(f'processing tile {i_tile} of {len(tile_list)}')
+                # if tx != 4615 or ty != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
+                #    continue
+            print(f'processing tile {i_tile + 1} of {len(tile_list)}')
             tile_history = accumulation_db.get_tile_history_by_index(tx, ty)
             try:
                 raster_data = tile_history[-1]
@@ -530,22 +530,23 @@ class WorldDatabase(VABC):
 
             x, y = affine_center(pts[0], pts[1], *refinement.geotransform)  # refinement_llx, resolution_x, 0, refinement_lly, 0, resolution_y)
             if _debug:
-                inspect_x, inspect_y = 690134.03, 3333177.81  # ti, tj = (655, 265) in H13190
-                if min(x) <  inspect_x and max(x) >inspect_x and min(y)< inspect_y and max(y) > inspect_y:
-                    mdata = vr.varres_metadata[ti, tj]
-                    resolution_x = mdata["resolution_x"]
-                    resolution_y = mdata["resolution_y"]
-                    sw_corner_x = mdata["sw_corner_x"]
-                    sw_corner_y = mdata["sw_corner_y"]
-                    bag_supergrid_dy = vr.cell_size_y
-                    bag_llx = vr.minx - bag_supergrid_dx / 2.0  # @todo seems the llx is center of the supergridd cel?????
-                    bag_lly = vr.miny - bag_supergrid_dy / 2.0
-                    supergrid_x = tj * bag_supergrid_dx
-                    supergrid_y = ti * bag_supergrid_dy
-                    refinement_llx = bag_llx + supergrid_x + sw_corner_x - resolution_x / 2.0  # @TODO implies swcorner is to the center and not the exterior
-                    refinement_lly = bag_lly + supergrid_y + sw_corner_y - resolution_y / 2.0
-                else:
-                    continue
+                print("debugging")
+                # inspect_x, inspect_y = 690134.03, 3333177.81  # ti, tj = (655, 265) in H13190
+                # if min(x) <  inspect_x and max(x) >inspect_x and min(y)< inspect_y and max(y) > inspect_y:
+                #     mdata = vr.varres_metadata[ti, tj]
+                #     resolution_x = mdata["resolution_x"]
+                #     resolution_y = mdata["resolution_y"]
+                #     sw_corner_x = mdata["sw_corner_x"]
+                #     sw_corner_y = mdata["sw_corner_y"]
+                #     bag_supergrid_dy = vr.cell_size_y
+                #     bag_llx = vr.minx - bag_supergrid_dx / 2.0  # @todo seems the llx is center of the supergridd cel?????
+                #     bag_lly = vr.miny - bag_supergrid_dy / 2.0
+                #     supergrid_x = tj * bag_supergrid_dx
+                #     supergrid_y = ti * bag_supergrid_dy
+                #     refinement_llx = bag_llx + supergrid_x + sw_corner_x - resolution_x / 2.0  # @TODO implies swcorner is to the center and not the exterior
+                #     refinement_lly = bag_lly + supergrid_y + sw_corner_y - resolution_y / 2.0
+                # else:
+                #     continue
             if georef_transformer:
                 x, y = georef_transformer.transform(x, y)
             depth = pts[2]
@@ -771,6 +772,8 @@ class WorldDatabase(VABC):
             # send the data to disk, I forget if this has any affect other than being able to look at the data in between steps to debug progress
             dataset.FlushCache()
             dataset_score.FlushCache()
+        del score_key2_band, score_band, dataset_score
+        os.remove(score_name)
         return tile_count
 
     @staticmethod
@@ -853,9 +856,73 @@ class SingleFile(WorldDatabase):
         super().export_area(fname, x1, y1, x2, y2, (self.res_x, self.res_y), driver=driver,
                     layers=layers, gdal_options=gdal_options)
 
+class SingleFile(WorldDatabase):
+    def __init__(self, epsg, x1, y1, x2, y2, res_x, res_y, storage_directory):
+        min_x, min_y, max_x, max_y, self.shape_x, self.shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
+        self.res_x = res_x
+        self.res_y = res_y
+        super().__init__(SingleFileBackend(epsg, min_x, min_y, max_x, max_y, AccumulationHistory, DiskHistory, TiffStorage, storage_directory))
+
+    def init_tile(self, tx, ty, tile_history):
+        return self.shape_y, self.shape_x  # rows and columns
+
+    def export(self, fname, driver="GTiff", layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
+                    gdal_options=()):
+        """Export the full area of the 'single file database' in the epsg the data is stored in"""
+        y1 = self.db.tile_scheme.min_y
+        y2 = self.db.tile_scheme.max_y - self.res_y
+        x1 = self.db.tile_scheme.min_x
+        x2 = self.db.tile_scheme.max_x - self.res_x
+        super().export_area(fname, x1, y1, x2, y2, (self.res_x, self.res_y), driver=driver,
+                    layers=layers, gdal_options=gdal_options)
+
+
+class CustomBackend(WorldTilesBackend):
+    def __init__(self, utm_epsg, res_x, res_y,  x1, y1, x2, y2, history_class, storage_class, data_class, data_path, zoom_level=13):
+        tile_scheme = ExactTilingScheme(res_x, res_y, min_x=x1, min_y=y1, max_x=x2, max_y=y2, zoom=zoom_level)
+        tile_scheme.epsg = utm_epsg
+        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
+
+
+class CustomArea(WorldDatabase):
+    def __init__(self, epsg, x1, y1, x2, y2, res_x, res_y, storage_directory):
+        min_x, min_y, max_x, max_y, shape_x, shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
+        shape = max(shape_x, shape_y)
+        tiles = shape/512
+        zoom = int(numpy.power(tiles, 0.5))
+        self.res_x = res_x
+        self.res_y = res_y
+        super().__init__(CustomBackend(epsg, res_x, res_y, min_x, min_y, max_x, max_y, AccumulationHistory, DiskHistory, TiffStorage, storage_directory, zoom_level=zoom))
+
+    def export(self, fname, driver="GTiff", layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
+                    gdal_options=()):
+        """Export the full area of the 'single file database' in the epsg the data is stored in"""
+        y1 = self.db.tile_scheme.min_y
+        y2 = self.db.tile_scheme.max_y - self.res_y
+        x1 = self.db.tile_scheme.min_x
+        x2 = self.db.tile_scheme.max_x - self.res_x
+        super().export_area(fname, x1, y1, x2, y2, (self.res_x, self.res_y), driver=driver,
+                    layers=layers, gdal_options=gdal_options)
+
 
 if __name__ == "__main__":
-    from nbs.bruty.history import MemoryHistory, RasterHistory
+    fname = r"G:\Data\NBS\Speed_test\H11045_VB_4m_MLLW_2of2.bag"
+    ds = gdal.Open(fname)
+    x1, resx, dxy, y1, dyx, resy = ds.GetGeoTransform()
+    numx = ds.RasterXSize
+    numy = ds.RasterYSize
+    epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
+    epsg = 26918
+    ds = None
+    # db = SingleFile(epsg, x1, y1, x1+(numx+1)*resx, y1+(numy+1)*resy, 4, 4, r"G:\Data\NBS\Speed_test\test_db")
+    # db = WorldDatabase(UTMTileBackendExactRes(4, 4, epsg, RasterHistory, DiskHistory, TiffStorage,
+    #                                     r"G:\Data\NBS\Speed_test\test_db_world"))
+    db = CustomArea(epsg, x1, y1, x1+(numx+1)*resx, y1+(numy+1)*resy, 4, 4, r"G:\Data\NBS\Speed_test\test_cust4")
+    db.insert_survey_gdal(fname, override_epsg=epsg)
+    db.export(r"G:\Data\NBS\Speed_test\test_cust4\export.tif")
+    raise Exception("Done")
+
+    from nbs.bruty.history import MemoryHistory
     from nbs.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, LayersEnum, arrays_match
     from nbs.bruty.utils import save_soundings_from_image
 
