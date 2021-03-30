@@ -13,8 +13,8 @@ from osgeo import gdal, osr, ogr
 from HSTB.drivers import bag
 from nbs.bruty.utils import merge_arrays, merge_array, get_geotransformer, onerr, tqdm, make_gdal_dataset_size, make_gdal_dataset_area, \
             calc_area_array_params, compute_delta_coord, iterate_gdal_image, add_uncertainty_layer, transform_rect
-from nbs.bruty.raster_data import LayersEnum, RasterData, affine, inv_affine, affine_center, arrays_dont_match
-from nbs.bruty.history import RasterHistory, AccumulationHistory
+from nbs.bruty.raster_data import TiffStorage, LayersEnum, RasterData, affine, inv_affine, affine_center, arrays_dont_match
+from nbs.bruty.history import DiskHistory, RasterHistory, AccumulationHistory
 from nbs.bruty.abstract import VABC, abstractmethod
 from nbs.bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles, TilingScheme, \
             ExactUTMTiles, ExactTilingScheme
@@ -504,7 +504,7 @@ class WorldDatabase(VABC):
         -------
 
         """
-        vr = bag.VRBag(path_to_survey_data)
+        vr = bag.VRBag(path_to_survey_data, mode='r')
         refinement_list = numpy.argwhere(vr.get_valid_refinements())
         # in order to speed up the vr processing, which would have narrow strips being processed
         # use a morton ordering on the tile indices so they are more closely processed in geolocation
@@ -840,17 +840,17 @@ class SingleFile(WorldDatabase):
     def export(self, fname, driver="GTiff", layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
                     gdal_options=()):
         """Export the full area of the 'single file database' in the epsg the data is stored in"""
-        y1 = self.tile_scheme.min_y
-        y2 = self.tile_scheme.max_y
-        x1 = self.tile_scheme.min_x
-        x2 = self.tile_scheme.max_x
+        y1 = self.db.tile_scheme.min_y
+        y2 = self.db.tile_scheme.max_y
+        x1 = self.db.tile_scheme.min_x
+        x2 = self.db.tile_scheme.max_x
         super().export_area(fname, x1, y1, x2, y2, (self.res_x, self.res_y), driver=driver,
                     layers=layers, gdal_options=gdal_options)
 
 
 if __name__ == "__main__":
-    from nbs.bruty.history import DiskHistory, MemoryHistory, RasterHistory
-    from nbs.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
+    from nbs.bruty.history import MemoryHistory, RasterHistory
+    from nbs.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, LayersEnum, arrays_match
     from nbs.bruty.utils import save_soundings_from_image
 
     # from tests.test_data import master_data, data_dir
