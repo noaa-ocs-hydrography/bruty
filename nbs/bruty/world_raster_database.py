@@ -604,6 +604,8 @@ class WorldDatabase(VABC):
 
         """
         ds = gdal.Open(str(path_to_survey_data))
+        drv = ds.GetDriver()
+        driver_name = drv.ShortName
         x0, dxx, dyx, y0, dxy, dyy = ds.GetGeoTransform()
         if override_epsg is None:
             epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
@@ -620,6 +622,7 @@ class WorldDatabase(VABC):
         #     col_block_size = col_size
         #     row_block_size = row_size
 
+        # @fixme -- bands 1,2 means bag works but single band will fail
         for ic, ir, nodata, (data, uncert) in iterate_gdal_image(ds, (1, 2)):
                 # read the uncertainty as an array (if it exists)
                 r, c = numpy.indices(data.shape)  # make indices into array elements that can be converted to x,y coordinates
@@ -630,7 +633,10 @@ class WorldDatabase(VABC):
                 pts = pts[:, pts[2] != nodata]  # remove nodata points
                 # pts = pts[:, pts[2] > -18.2]  # reduce points to debug
                 if pts.size > 0:
-                    x, y = affine(pts[0], pts[1], x0, dxx, dyx, y0, dxy, dyy)
+                    if driver_name == 'BAG':
+                        x, y = affine_center(pts[0], pts[1], x0, dxx, dyx, y0, dxy, dyy)
+                    else:
+                        x, y = affine(pts[0], pts[1], x0, dxx, dyx, y0, dxy, dyy)
                     # x = x0 + pts[1] * dxx + pts[0] * dyx
                     # y = y0 + pts[1] * dxy + pts[0] * dyy
                     if geo_debug and False:
