@@ -1,5 +1,7 @@
+import os
 import pathlib
 import timeit
+import functools
 
 import numpy
 from scipy.ndimage import binary_closing, binary_dilation
@@ -12,9 +14,28 @@ from HSTB.drivers import bag
 from nbs.bruty import morton, world_raster_database
 from nbs.bruty.raster_data import affine, inv_affine, affine_center
 
-# @jit(nopython=True)
+_debug = False
+if _debug:  # turn off jit --
+    """ Disabling JIT compilation
+        In order to debug code, it is possible to disable JIT compilation, 
+        which makes the jit decorator (and the njit decorator) act as if they perform no operation, 
+        and the invocation of decorated functions calls the original Python function instead of a compiled version. 
+        This can be toggled by setting the NUMBA_DISABLE_JIT environment variable to 1."""
+    # this doesn't seem to take effect, perhaps needs to be before numba is loaded,
+    # but can we guarantee that if another module imports it first?
+    # os.environ['NUMBA_DISABLE_JIT'] = '1'
 
-_debug = True
+    # so override the decorator to just disable this file -- this should be effectively be a no-op
+    def jit(*args, **kwargs):
+        def decorator_repeat(func):
+            @functools.wraps(func)
+            def wrapper_repeat(*args, **kwargs):
+                return func(*args, **kwargs)
+
+            return wrapper_repeat
+
+        return decorator_repeat
+
 
 def ellipse_mask(r, c):
     center = numpy.array(((r-1) / 2, (c-1) / 2))
@@ -254,7 +275,7 @@ def test_grid(out_res, ref_res, hole=True):
 
 
 
-# @jit (nopython=True)
+@jit (nopython=True)
 def triangle_closing(upsampled, mapping):
     for r in range(mapping.shape[1]-1):
         for c in range(mapping.shape[2]-1):
@@ -266,34 +287,34 @@ def triangle_closing(upsampled, mapping):
                 upsampled[i:i3+1, j:j3+1] = 1
             elif d and d1 and d2:  # top left
                 for r_i in range(i, i1+1):
-                    if i1 != i:
+                    if i1 != i:  # avoid divide by zero - range is only one scan line
                         end_j = numpy.trunc(j2 - (j2 - j) * (r_i - i)/(i1-i))
                     else:
                         end_j = j2
                     upsampled[r_i, j:int(end_j)+1] = 1
             elif d and d1 and d3:  # bottom left
                 for r_i in range(i, i1+1):
-                    if i1 != i:
+                    if i1 != i:  # avoid divide by zero - range is only one scan line
                         end_j = numpy.trunc(j + (j3 - j) * (r_i - i)/(i1-i))
                     else:
                         end_j = j3
                     upsampled[r_i, j:int(end_j)+1] = 1
             elif d and d2 and d3:  # top right
                 for r_i in range(i, i3+1):
-                    if i3 != i:
+                    if i3 != i:  # avoid divide by zero - range is only one scan line
                         start_j = numpy.ceil(j + (j2 - j) * (r_i - i)/(i3-i))
                     else:
                         start_j = j
                     upsampled[r_i, int(start_j):j2+1] = 1
             elif d1 and d2 and d3:  # bottom right
                 for r_i in range(i2, i3+1):
-                    if i3 != i2:
+                    if i3 != i2:  # avoid divide by zero - range is only one scan line
                         start_j = numpy.ceil(j2 - (j2 - j) * (r_i - i2)/(i3-i2))
                     else:
                         start_j = j
                     upsampled[r_i, int(start_j):j2+1] = 1
 
-# @jit (nopython=True)
+@jit (nopython=True)
 def draw_triangle(matrix, pts):
     # pts = numpy.array(((ai, aj), (bi, bj), (ci, cj)))
     top, middle, bottom = numpy.argsort(pts[:,0])
@@ -322,8 +343,11 @@ def draw_triangle(matrix, pts):
         j2 = max(pts[bottom][1], pts[middle][1])
         matrix[pts[bottom][0], j1:j2+1] = 6
 
-# @jit (nopython=True)
+@jit (nopython=True)
 def close_quad(matrix, ul, ur, ll, lr):
+    # numba doesn't like indices that are tuples like -- draw_triangle(matrix, pts[(0,1,3)])
+    # also doesn't like making arrays from arrays it looks like -- numpy.array([ul, ll, ur], dtype=numpy.int32)
+    # but it will make an array from lists of numbers like -- numpy.array([[li1, lj1], [li2, lj2], [ri1, rj1]], dtype=numpy.int32))
     li1, lj1, ld1 = ul
     li2, lj2, ld2 = ll
     ri1, rj1, rd1 = ur
@@ -341,15 +365,19 @@ def close_quad(matrix, ul, ur, ll, lr):
     elif rd1 and rd2 and ld2:
         draw_lr = True
     if draw_ul:
-        draw_triangle(matrix, numpy.array((ul, ll, ur)))
+        tri = numpy.array([[li1, lj1], [li2, lj2], [ri1, rj1]], dtype=numpy.int32)  # [uld, lld, urd]
+        draw_triangle(matrix, tri)
     if draw_ll:
-        draw_triangle(matrix, numpy.array((ul, lr, ll)))
+        tri = numpy.array([[li1, lj1], [li2, lj2], [ri2, rj2]], dtype=numpy.int32)  # [uld, lld, lrd]
+        draw_triangle(matrix, tri)
     if draw_lr:
-        draw_triangle(matrix, numpy.array((ll, lr, ur)))
-    if draw_ul:
-        draw_triangle(matrix, numpy.array((ul, lr, ur)))
+        tri = numpy.array([[li2, lj2], [ri2, rj2], [ri1, rj1]], dtype=numpy.int32)  # [lld, lrd, urd]
+        draw_triangle(matrix, tri)
+    if draw_ur:
+        tri = numpy.array([[li1, lj1],[ri2, rj2], [ri1, rj1]], dtype=numpy.int32)  # [uld, lrd, urd]
+        draw_triangle(matrix, tri)
 
-# @jit (nopython=True)
+@jit (nopython=True)
 def close_refinements(upsampled, left_or_top, right_or_bottom, max_dist, horz=True):
     # closes the gap between two refinements - have to specify if they are horizontal or vertical
     rb_index = 0
@@ -371,25 +399,25 @@ def close_refinements(upsampled, left_or_top, right_or_bottom, max_dist, horz=Tr
             more_data = False
         while more_data:
             if horz:
-                ri1, rj1, rd1 = right_or_bottom[(0,1,-1), rb_index, rb_last]
-                ri2, rj2, rd2 = right_or_bottom[(0,1,-1), rb_index+1, rb_last]
-                li1, lj1, ld1 = left_or_top[(0,1,-1), lt_index, lt_last]
-                li2, lj2, ld2 = left_or_top[(0,1,-1), lt_index+1, lt_last]
+                ri1, rj1, _x, _y, rd1 = right_or_bottom[:, rb_index, rb_last]
+                ri2, rj2, _x, _y, rd2 = right_or_bottom[:, rb_index+1, rb_last]
+                li1, lj1, _x, _y, ld1 = left_or_top[:, lt_index, lt_last]
+                li2, lj2, _x, _y, ld2 = left_or_top[:, lt_index+1, lt_last]
                 lt1 = li1
                 lt2 = li2
                 rb1 = ri1
                 rb2 = ri2
             else:
-                li1, lj1, ld1 = right_or_bottom[(0,1,-1), rb_last, rb_index]
-                ri1, rj1, rd1 = right_or_bottom[(0,1,-1), rb_last, rb_index+1]
-                li2, lj2, ld2 = left_or_top[(0,1,-1), lt_last, lt_index]
-                ri2, rj2, rd2 = left_or_top[(0,1,-1), lt_last, lt_index+1]
+                li1, lj1, _x, _y, ld1 = right_or_bottom[:, rb_last, rb_index]
+                ri1, rj1, _x, _y, rd1 = right_or_bottom[:, rb_last, rb_index+1]
+                li2, lj2, _x, _y, ld2 = left_or_top[:, lt_last, lt_index]
+                ri2, rj2, _x, _y, rd2 = left_or_top[:, lt_last, lt_index+1]
                 lt1 = lj2
                 lt2 = rj2
                 rb1 = lj1
                 rb2 = rj1
 
-
+            # @todo check the x/y distance so we don't close over a long diagonal?  Think of a 32 ro 64m res in  a 64m supergrid agains a 1m grid
             close_quad(upsampled, (ri1, rj1, rd1), (ri2, rj2, rd2), (li1, lj1, ld1), (li2, lj2, ld2))
             # @fixme -- I think we can move the indices twice,
             #   moving once duplicates a triangle
@@ -416,7 +444,11 @@ def close_refinements(upsampled, left_or_top, right_or_bottom, max_dist, horz=Tr
 
 # @jit (nopython=True)
 def numb(upsampled, refinements):
+    # @todo reduce this to only doing the upper and right boundaries.
+    #    the other edges will be covered when processing the neighbors.
+    #    corners need to be done since an empty refinement would not need to fill edges but the corner still needs to be processed.
     if 1:
+        # fill the boundaries between all refinements in the 3x3 set.
         close_refinements(upsampled, refinements[0][0].astype(int), refinements[0][1].astype(int), 100)
         close_refinements(upsampled, refinements[0][1].astype(int), refinements[0][2].astype(int), 100)
         close_refinements(upsampled, refinements[1][0].astype(int), refinements[1][1].astype(int), 100)
