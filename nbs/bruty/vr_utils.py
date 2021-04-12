@@ -1,3 +1,4 @@
+from collections import OrderedDict  # this is the default starting around python 3.7
 import os
 import pathlib
 import timeit
@@ -539,6 +540,214 @@ def test_close_refinement():
         rr, cc = polygon(ii, jj)
         upsampled[rr,cc] = 1
     print(upsampled)
+
+def interpolate_raster(input_file_full_path, dst_filename, sr_cell_size=None, method='linear', use_blocks=True, nodata=numpy.nan):
+    """ Interpolation scheme
+    Create the POINT version of the TIFF with only data at precise points of VR BAG
+    Load in blocks with enough buffer around the outside (nominally 3x3 supergrids with 1 supergrid buffer)
+        run scipy.interpolate.griddata on the block (use linear as cubic causes odd peaks and valleys)
+        copy the interior (3x3 supergrids without the buffer area) into the output TIFF
+
+    Create the MIN (or MAX) version of the TIFF
+    Load blocks of data and copy any NaNs from the MIN (cell based coverage) into the INTERP grid to remove erroneous interpolations,
+    this essentially limits coverage to VR cells that were filled
+    """
+    fobj, point_filename = tempfile.mkstemp(".point.tif")
+    os.close(fobj)
+    fobj, min_filename = tempfile.mkstemp(".min.tif")
+    os.close(fobj)
+    if not DEBUGGING:
+        dx, dy, cell_sz = VRBag_to_TIF(input_file_full_path, point_filename, sr_cell_size=sr_cell_size, mode=POINT, use_blocks=use_blocks,
+                                       nodata=nodata)
+        VRBag_to_TIF(input_file_full_path, min_filename, sr_cell_size=sr_cell_size, mode=MIN, use_blocks=use_blocks, nodata=nodata)
+    else:
+        dx, dy, cell_sz = 128, 128, 1.07
+        point_filename = r"C:\Data\BAG\GDAL_VR\H-10771\ExampleForEven\H-10771_python.1m_point.tif"
+        min_filename = r"C:\Data\BAG\GDAL_VR\H-10771\ExampleForEven\H-10771_python.1m_min.tif"
+
+    points_ds = gdal.Open(point_filename)
+    points_band = points_ds.GetRasterBand(1)
+    points_no_data = points_band.GetNoDataValue()
+    coverage_ds = gdal.Open(min_filename)
+    coverage_band = coverage_ds.GetRasterBand(1)
+    coverage_no_data = coverage_band.GetNoDataValue()
+    interp_ds = points_ds.GetDriver().Create(dst_filename, points_ds.RasterXSize, points_ds.RasterYSize, bands=1, eType=points_band.DataType,
+                                             options=["BLOCKXSIZE=256", "BLOCKYSIZE=256", "TILED=YES", "COMPRESS=LZW", "BIGTIFF=YES"])
+    interp_ds.SetProjection(points_ds.GetProjection())
+    interp_ds.SetGeoTransform(points_ds.GetGeoTransform())
+    interp_band = interp_ds.GetRasterBand(1)
+    interp_band.SetNoDataValue(nodata)
+
+    if use_blocks:
+        pixels_per_supergrid = int(max(dx / cell_sz, dy / cell_sz)) + 1
+        row_block_size = col_block_size = 3 * pixels_per_supergrid
+        row_buffer_size = col_buffer_size = 1 * pixels_per_supergrid
+        row_size = interp_band.XSize
+        col_size = interp_band.YSize
+        for ic in tqdm(range(0, col_size, col_block_size), mininterval=.7):
+            cols = col_block_size
+            if ic + col_block_size > col_size:  # read a full set of data by offsetting the column index back a bit
+                ic = col_size - cols
+            col_buffer_lower = col_buffer_size if ic >= col_buffer_size else ic
+            col_buffer_upper = col_buffer_size if col_size - (ic + col_block_size) >= col_buffer_size else col_size - (ic + col_block_size)
+            read_cols = col_buffer_lower + cols + col_buffer_upper
+            for ir in tqdm(range(0, row_size, row_block_size), mininterval=.7):
+                rows = row_block_size
+                if ir + row_block_size > row_size:
+                    ir = row_size - rows
+                row_buffer_lower = row_buffer_size if ir >= row_buffer_size else ir
+                row_buffer_upper = row_buffer_size if row_size - (ir + row_block_size) >= row_buffer_size else row_size - (ir + row_block_size)
+                read_rows = row_buffer_lower + rows + row_buffer_upper
+                points_array = points_band.ReadAsArray(ir - row_buffer_lower, ic - col_buffer_lower, read_rows, read_cols)
+
+                # Find the points that actually have data as N,2 array shape that can index the data arrays
+                if numpy.isnan(points_no_data):
+                    point_indices = numpy.nonzero(~numpy.isnan(points_array))
+                else:
+                    point_indices = numpy.nonzero(points_array != points_no_data)
+                # if there were any data points then do interpolation -- could be all empty space too which raises Exception in griddata
+                if len(point_indices[0]):
+                    # get the associated data values
+                    point_values = points_array[point_indices]
+                    # interpolate all the other points in the array
+                    # (actually it's interpolating everywhere which is a waste of time where there is already data)
+                    xi, yi = numpy.mgrid[row_buffer_lower:row_buffer_lower + row_block_size,
+                             col_buffer_lower:col_buffer_lower + col_block_size]
+                    interp_data = scipy.interpolate.griddata(numpy.transpose(point_indices), point_values,
+                                                             (xi, yi), method=method)
+                    # mask based on the cell coverage found using the MIN mode
+                    coverage_data = coverage_band.ReadAsArray(ir, ic, row_block_size, col_block_size)
+                    interp_data[coverage_data == coverage_no_data] = nodata
+                    # Write the data into the TIF on disk
+                    interp_band.WriteArray(interp_data, ir, ic)
+        if DEBUGGING:
+            points_array = points_band.ReadAsArray()
+            interp_array = interp_band.ReadAsArray()
+            _plot(points_array)
+            _plot(interp_array)
+    else:
+        points_array = points_band.ReadAsArray()
+        coverage_data = coverage_band.ReadAsArray()
+
+        # Find the points that actually have data
+        if numpy.isnan(points_no_data):
+            point_indices = numpy.nonzero(~numpy.isnan(points_array))
+        else:
+            point_indices = numpy.nonzero(points_array != points_no_data)
+        # get the associated data values
+        point_values = points_array[point_indices]
+        # interpolate all the other points in the array (actually interpolating everywhere which is a waste of time where there is already data)
+        xi, yi = numpy.mgrid[0:points_array.shape[0], 0:points_array.shape[1]]
+        interp_data = scipy.interpolate.griddata(numpy.transpose(point_indices), point_values,
+                                                 (xi, yi), method=method)
+        _plot(interp_data)
+        # mask based on the cell coverage found using the MIN mode
+        interp_data[coverage_data == coverage_no_data] = nodata
+        _plot(interp_data)
+        # Write the data into the TIF on disk
+        interp_band.WriteArray(interp_data)
+
+    # release the temporary tif files and delete them
+    point_band = None
+    point_ds = None
+    coverage_band = None
+    coverage_ds = None
+    if not DEBUGGING:
+        os.remove(min_filename)
+        os.remove(point_filename)
+
+def vr_to_sr_points(vr_path, output_path, output_res):
+    """ Create a single res raster from vr, only fills points that where vr existed (no interpolation etc).
+
+    Returns
+    -------
+    dataset
+
+    """
+    try:
+        resx, resy = output_res
+    except TypeError:
+        resx = resy = output_res
+    vr = bag.VRBag(vr_path)
+    raise Need EPSG from WKT
+    epsg = vr.horizontal_crs_wkt
+    area_db = world_raster_database.CustomArea(vr, vr.minx, vr.miny, vr.maxx, vr.maxy, resx, resy)
+    area_db.insert_survey_vr(vr_path)
+
+def vr_raster_mask(vr, points_ds, output_path):
+    """ Given a VR and it's computed SR point raster, compute the coverage mask that describes where upsample-interpolation would be valid
+
+    Parameters
+    ----------
+    vr
+    sr_ds
+    output_path
+    output_res
+
+    Returns
+    -------
+    dataset
+
+    """
+    points_band = points_ds.GetRasterBand(1)
+    points_no_data = points_band.GetNoDataValue()
+    interp_ds = points_ds.GetDriver().CreateCopy(output_path, points_ds)
+    # iterate VR refinements filling in the mask cells
+    # create a cache of refinements so we aren't constantly reading from disk
+    cached_refinements = OrderedDict()
+    cached_refinements.popitem(last=False)  # get rid of the oldest cached item, False makes it FIFO
+
+def vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res):
+    """ Given an input VR file path, create two output rasters.
+    One contains points and one contains a mask of where upsample-interpolation would be appropriate.
+
+    Parameters
+    ----------
+    path_to_vr
+    points_path
+    mask_path
+    output_res
+
+    Returns
+    -------
+    tuple(dataset, dataset)
+        points gdal dataset and mask gdal dataset which are stored on disk at the supplied paths.
+
+    """
+    vr = bag.VRBag(path_to_vr)
+    points_ds = vr_to_sr_points(path_to_vr, points_path, output_res)
+    points_ds.GetDriver()
+    mask_ds = vr_raster_mask(vr, points_ds, mask_path)
+    return points_ds, mask_ds
+
+
+def upsample_vr(path_to_vr, output_path, output_res):
+    """ Use the world_raster_database to create an output 'points' tif of the correct resolution that covers the VR extents.
+    Make a copy of the tif which will hold a mask of which cells should be filled using the VR closing functions from vr_utils.
+    Then run scipy.interpolate.griddata using linear (cublic makes weird peaks) on the original output 'points' tif.
+    Finally use the mask tif to crop the interpolated 'points' tif back to the appropriate areas.
+
+    Parameters
+    ----------
+    path_to_vr
+        vr bag to resample to single res
+    output_path
+        output location for a resampled + filled raster dataset
+    output_res
+        output resolution in the projection the vr is in
+
+    Returns
+    -------
+
+    """
+    # output_path = pathlib.Path(output_path)
+    mask_path = pathlib.Path(output_path).with_suffix("mask.tif")
+    points_ds, mask_ds = vr_to_points_and_mask(path_to_vr, output_path, mask_path, output_res)
+    interpolate_raster(points_ds, mask_ds)
+    if not _debug:
+        del mask_ds
+        os.remove(mask_path)
+    return points_ds
 
 if __name__ == "__main__":
     # print(ellipse_mask(5,5))
