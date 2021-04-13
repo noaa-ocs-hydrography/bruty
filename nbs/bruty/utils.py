@@ -487,7 +487,7 @@ def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, sh
         nodata = 1000000.0
     if not options:
         if driver.lower() == "gtiff":
-            options=['COMPRESS=LZW']
+            options=['COMPRESS=LZW', "BIGTIFF=YES"]
         if driver.lower() == 'bag':
             options = list(options)
             options.insert(0, 'TEMPLATE=G:\\Pydro_new_svn_1\\Pydro21\\NOAA\\site-packages\\Python38\\git_repos\\hstb_resources\\HSTB\\resources\\gdal_bag_template.xml')

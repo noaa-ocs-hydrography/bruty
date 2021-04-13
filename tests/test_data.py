@@ -1,9 +1,19 @@
 import pathlib
 import os
+import shutil
 
 import numpy
 
+from nbs.bruty.utils import onerr
+
 data_dir = pathlib.Path(__file__).parent.joinpath("test_data_output")
+
+def make_clean_dir(name):
+    use_dir = data_dir.joinpath(name)
+    if os.path.exists(use_dir):
+        shutil.rmtree(use_dir, onerror=onerr)
+    return use_dir
+
 os.makedirs(data_dir, exist_ok=True)
 arr = numpy.zeros((5, 2, 1))
 nan = numpy.nan

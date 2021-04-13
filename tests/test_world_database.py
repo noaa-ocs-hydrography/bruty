@@ -11,9 +11,9 @@ from nbs.bruty.history import DiskHistory, MemoryHistory, RasterHistory
 from nbs.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
 from nbs.bruty.world_raster_database import LatLonBackend, GoogleLatLonTileBackend, UTMTileBackend, GoogleMercatorTileBackend, \
     TMSMercatorTileBackend, merge_arrays
-from nbs.bruty.world_raster_database import WorldDatabase, onerr, get_geotransformer, UTMTileBackendExactRes
+from nbs.bruty.world_raster_database import WorldDatabase, onerr, get_geotransformer, UTMTileBackendExactRes, CustomArea
 
-from test_data import master_data, data_dir, SW_5x5, NW_5x5, SE_5x5, MID_5x5
+from test_data import master_data, make_clean_dir, data_dir, SW_5x5, NW_5x5, SE_5x5, MID_5x5
 
 nan = numpy.nan
 os.makedirs(data_dir, exist_ok=True)
@@ -357,9 +357,7 @@ def test_add_data(history_db):
 
 
 def test_pbc19_tile_4():
-    use_dir = data_dir.joinpath('tile4_metadata_utm_db')
-    if os.path.exists(use_dir):
-        shutil.rmtree(use_dir, onerror=onerr)
+    use_dir = make_clean_dir('tile4_metadata_utm_db')
 
     db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
 
@@ -395,23 +393,43 @@ def test_pbc19_tile_4():
 
 
 def test_pbc19_vr():
-    use_dir = data_dir.joinpath('tile4_VR_utm_db')
-    if os.path.exists(use_dir):
-        shutil.rmtree(use_dir, onerror=onerr)
-
+    use_dir = make_clean_dir('tile4_VR_utm_db')
     db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
     db.insert_survey_vr(r"C:\Data\nbs\PBC19_Tile4_surveys\H12010_MB_VR_MLLW.bag")
     print("processed_vr")
 
 
 def test_export_area_full_db():
-    use_dir = data_dir.joinpath('tile4_vr_utm_db')
+    use_dir = make_clean_dir('tile4_vr_utm_db')
     db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
     db.export_area(use_dir.joinpath("export_tile_new.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
 
 
 def test_exact_res_db():
-    use_dir = data_dir.joinpath('tile4_exact')
+    use_dir = make_clean_dir('tile4_exact')
+    if os.path.exists(use_dir):
+        shutil.rmtree(use_dir, onerror=onerr)
     db = WorldDatabase(UTMTileBackendExactRes(4, 4, 26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
     x = y = depth = uncertainty = score = flags = numpy.arange(10)
     db.insert_survey_array((x, y*300, depth, uncertainty, score, flags), "test")
+
+def test_custom_area():
+    use_dir = make_clean_dir('custom_area_0.5_c')
+    x1, y1, x2, y2 = extents = (641430.0, 4542174.0, 646498.0, 4547326.0)
+    resolution = 0.5
+    epsg = 26918
+    cust_db = CustomArea(epsg, *extents, resolution, resolution, use_dir)
+    # make an edge
+    x = numpy.arange(x1, x2, resolution)
+    y = numpy.arange(y1, y2, resolution)
+    # only the lower left corner
+    # x = numpy.arange(x1, x1+50, resolution)
+    # y = numpy.arange(y1, y1+50, resolution)
+    valy = numpy.full(y.shape, 1.0)
+    left_edge = (numpy.full(y.shape, x1), y, valy, valy, valy, valy)
+    valx = numpy.full(x.shape, 2.0)
+    bottom_edge = (x, numpy.full(x.shape, y1), valx, valx, valx, valx)
+    cust_db.insert_survey_array(left_edge, "left")
+    cust_db.insert_survey_array(bottom_edge, "bottom")
+    cust_db.export(use_dir.joinpath("export_all.tif"))
+    cust_db.export(use_dir.joinpath("export_elev.tif"), layers=[LayersEnum.ELEVATION])

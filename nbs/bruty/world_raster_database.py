@@ -760,7 +760,7 @@ class WorldDatabase(VABC):
             if block_rows < 1 or block_cols < 1:
                 continue
             # 4) Use the db.tile_scheme function to convert points from the tiles to x,y
-            # fixme - score and depth have same value, read bug?
+            # @fixme - score and depth have same value, read bug?
             tile_score = raster_data.get_arrays(LayersEnum.SCORE)[0]
             tile_depth = raster_data.get_arrays(LayersEnum.ELEVATION)[0]
             tile_layers = raster_data.get_arrays(layers)
@@ -782,9 +782,14 @@ class WorldDatabase(VABC):
                       dataset, layers, score_band, key2_band, reverse_sort=(False, False)):
         export_sub_area_scores = score_band.ReadAsArray(start_col, start_row, block_cols, block_rows)
         export_sub_area_key2 = key2_band.ReadAsArray(start_col, start_row, block_cols, block_rows)
+        # @todo - check the scoring, do we need arbitrary scoring like the insert_surveys can do?
         sort_key_scores = numpy.array((export_sub_area_scores, export_sub_area_key2))
         export_sub_area = dataset.ReadAsArray(start_col, start_row, block_cols, block_rows)
-
+        # when only one output layer is made the ReadAsArray returns a shape like (x,y)
+        # while a three layer output would return something like (3, x, y)
+        # so we will reshape the (x,y) to (1, x, y) so the indexing works the same
+        if len(export_sub_area.shape) < 3:
+            export_sub_area = export_sub_area.reshape((1, *export_sub_area.shape))
         # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
 
         tile_r, tile_c = numpy.indices(tile_layers.shape[1:])
@@ -888,8 +893,8 @@ class CustomArea(WorldDatabase):
     def __init__(self, epsg, x1, y1, x2, y2, res_x, res_y, storage_directory):
         min_x, min_y, max_x, max_y, shape_x, shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
         shape = max(shape_x, shape_y)
-        tiles = shape/512
-        zoom = int(numpy.power(tiles, 0.5))
+        tiles = shape/512  # this should result in tiles max sizes between 512 and 1024 pixels
+        zoom = int(numpy.log2(tiles))
         self.res_x = res_x
         self.res_y = res_y
         super().__init__(CustomBackend(epsg, res_x, res_y, min_x, min_y, max_x, max_y, AccumulationHistory, DiskHistory, TiffStorage, storage_directory, zoom_level=zoom))

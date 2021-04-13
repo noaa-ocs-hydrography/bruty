@@ -66,8 +66,8 @@ class ExactTilingScheme(TilingScheme):
         # get the tiling scheme value - if we were to ignore the strict resolution edges
         tx, ty = super().xy_to_tile_index(x, y, zoom)
         # since we round each tile DOWN to the cell edge that would be lower, check if we should use the next greater tile instead
-        tx[self.edges_x[tx+1] < x] += 1  # tx+1 is the uppder edge of the current tile == lower edge of the next tile
-        ty[self.edges_y[ty+1] < y] += 1
+        tx[self.edges_x[tx+1] <= x] += 1  # tx+1 is the uppder edge of the current tile == lower edge of the next tile
+        ty[self.edges_y[ty+1] <= y] += 1
         return tx, ty
 
     def tile_index_to_xy(self, tx, ty):
