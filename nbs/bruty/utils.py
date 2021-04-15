@@ -499,13 +499,14 @@ def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, sh
     gt = [min_x, res_x, 0, max_y, 0, -res_y]  # north up
     dataset.SetGeoTransform(gt)
 
-    # Get raster projection
-    srs = osr.SpatialReference()
-    srs.ImportFromEPSG(epsg)
-    dest_wkt = srs.ExportToWkt()
+    if epsg is not None:
+        # Get raster projection
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(epsg)
+        dest_wkt = srs.ExportToWkt()
 
-    # Set projection
-    dataset.SetProjection(dest_wkt)
+        # Set projection
+        dataset.SetProjection(dest_wkt)
     for b in range(dataset.RasterCount):
         band = dataset.GetRasterBand(b+1)
         band.SetNoDataValue(nodata)

@@ -100,14 +100,14 @@ class TiffStorage(Storage):
 
                 # Set location
                 dataset.SetGeoTransform(gt)
+                if epsg is not None:
+                    # Get raster projection
+                    srs = osr.SpatialReference()
+                    srs.ImportFromEPSG(epsg)
+                    dest_wkt = srs.ExportToWkt()
 
-                # Get raster projection
-                srs = osr.SpatialReference()
-                srs.ImportFromEPSG(epsg)
-                dest_wkt = srs.ExportToWkt()
-
-                # Set projection
-                dataset.SetProjection(dest_wkt)
+                    # Set projection
+                    dataset.SetProjection(dest_wkt)
             except KeyError:
                 pass  # doesn't have full georeferencing
 

@@ -23,6 +23,8 @@ from nbs.bruty import morton
 geo_debug = False
 _debug = False
 
+NO_OVERRIDE = -1
+
 class WorldTilesBackend(VABC):
     """ Class to control Tile addressing.
     It should know what the projection of the tiles is and how they are split.
@@ -338,7 +340,7 @@ class WorldDatabase(VABC):
         self.db = backend
         self.next_contributor = 0  # fixme: this is a temporary hack until we have a database of surveys with unique ids available
 
-    def insert_txt_survey(self, path_to_survey_data, survey_score=100, flags=0, format=None, override_epsg=None):
+    def insert_txt_survey(self, path_to_survey_data, survey_score=100, flags=0, format=None, override_epsg=NO_OVERRIDE):
         """ Reads a text file and inserts into the tiled database.
         The format parameter is passed to numpy.loadtxt and needs to have names of x, y, depth, uncertainty.
 
@@ -360,7 +362,7 @@ class WorldDatabase(VABC):
         -------
         None
         """
-        if override_epsg is None:
+        if override_epsg == NO_OVERRIDE:
             epsg = rasterio.crs.CRS.from_string(vr.srs.ExportToWkt()).to_epsg()
         else:
             epsg = override_epsg
@@ -404,7 +406,6 @@ class WorldDatabase(VABC):
             contrib_name = str(contrib_name)
         if not accumulation_db:
             accumulation_db = self.db
-        # Compute the tile indices for each point
         contributor = numpy.full(input_survey_data[0].shape, self.next_contributor)
         survey_data = numpy.array((input_survey_data[0], input_survey_data[1], input_survey_data[2],
                                    input_survey_data[3], contributor, input_survey_data[4], input_survey_data[5]))
@@ -413,6 +414,7 @@ class WorldDatabase(VABC):
         #   so 6 x 4 x 5 -- becomes a 6 x 20 array instead
         if len(survey_data.shape) > 2:
             survey_data = survey_data.reshape(survey_data.shape[0], -1)
+        # Compute the tile indices for each point
         txs, tys = accumulation_db.tile_scheme.xy_to_tile_index(survey_data[0], survey_data[1])
         tile_list = numpy.unique(numpy.array((txs, tys)).T, axis=0)
         # itererate each tile that was found to have data
@@ -448,15 +450,18 @@ class WorldDatabase(VABC):
                         raster_data.set_arrays(make_outlines)
 
             new_arrays = raster_data.get_arrays()
+            # just operate on data that falls in this tile
             pts = survey_data[:, numpy.logical_and(txs == tx, tys == ty)]
 
             # replace x,y with row, col for the points
             i, j = raster_data.xy_to_rc_using_dims(new_arrays.shape[1], new_arrays.shape[2], pts[0], pts[1])
             new_sort_values = numpy.array((new_arrays[LayersEnum.SCORE], new_arrays[LayersEnum.ELEVATION]))
+            # combine the existing data ('new_arrays') with newly supplied data (pts derived from survey_data)
             # negative depths, so don't reverse the sort of the second key (depth)
             merge_arrays(i, j, (pts[LayersEnum.SCORE + 2], pts[LayersEnum.ELEVATION + 2]), pts[2:], new_arrays, new_sort_values,
                          reverse_sort=(False, False))
-
+            # create a new raster data set to either replace the old one in the database or add a new history item
+            # depending on if there is an accumulation buffer (i.e. don't save history) or regular database (save history of additions)
             rd = RasterData.from_arrays(new_arrays)
             rd.set_metadata(raster_data.get_metadata())  # copy the metadata to the new raster
             rd.contributor = contrib_name
@@ -492,7 +497,7 @@ class WorldDatabase(VABC):
         else:
             return 512, 512
 
-    def insert_survey_vr(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=None):
+    def insert_survey_vr(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE):
         """
         Parameters
         ----------
@@ -512,7 +517,7 @@ class WorldDatabase(VABC):
         mort = morton.interleave2d_64(refinement_list.T)
         sorted_refinement_indices = refinement_list[numpy.lexsort([mort])]
         print("@todo - do transforms correctly with proj/vdatum etc")
-        if override_epsg is None:
+        if override_epsg == NO_OVERRIDE:
             epsg = rasterio.crs.CRS.from_string(vr.srs.ExportToWkt()).to_epsg()
         else:
             epsg = override_epsg
@@ -587,7 +592,7 @@ class WorldDatabase(VABC):
         self.db.append_accumulation_db(storage_db)
         shutil.rmtree(storage_db.data_path, onerror=onerr)
 
-    def insert_survey_gdal(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=None):
+    def insert_survey_gdal(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, data_band=1, uncert_band=2):
         """ Insert a gdal readable dataset into the database.
         Currently works for BAG and probably geotiff.
         Parameters
@@ -604,11 +609,15 @@ class WorldDatabase(VABC):
         None
 
         """
+        # # @todo FIXME - handle tifs that claim to be area and use cell center?
+        # metadata = {**dataset.GetMetadata()}
+        # pixel_is_area = True if 'AREA_OR_POINT' in metadata and metadata['AREA_OR_POINT'][:-2] == 'Area' else False
+
         ds = gdal.Open(str(path_to_survey_data))
         drv = ds.GetDriver()
         driver_name = drv.ShortName
         x0, dxx, dyx, y0, dxy, dyy = ds.GetGeoTransform()
-        if override_epsg is None:
+        if override_epsg == NO_OVERRIDE:
             epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
         else:
             epsg = override_epsg
@@ -624,7 +633,11 @@ class WorldDatabase(VABC):
         #     row_block_size = row_size
 
         # @fixme -- bands 1,2 means bag works but single band will fail
-        for ic, ir, nodata, (data, uncert) in iterate_gdal_image(ds, (1, 2)):
+        for ic, ir, nodata, (data, uncert) in iterate_gdal_image(ds, (data_band, uncert_band)):
+                # if _debug:
+                #     if ic > 1:
+                #         break
+
                 # read the uncertainty as an array (if it exists)
                 r, c = numpy.indices(data.shape)  # make indices into array elements that can be converted to x,y coordinates
                 r += ir  # adjust the block r,c to the global raster r,c
@@ -698,8 +711,8 @@ class WorldDatabase(VABC):
 
         Returns
         -------
-        int
-            number of database tiles that supplied data into the export area
+        int, dataset
+            number of database tiles that supplied data into the export area, open gdal dataset for the file location specified
 
         """
         # 1) Create a single tif tile that covers the area desired
@@ -774,7 +787,7 @@ class WorldDatabase(VABC):
             dataset_score.FlushCache()
         del score_key2_band, score_band, dataset_score
         os.remove(score_name)
-        return tile_count
+        return tile_count, dataset
 
     @staticmethod
     def merge_rasters(tile_layers, tile_score, raster_data, tile_depth,
@@ -786,8 +799,8 @@ class WorldDatabase(VABC):
         sort_key_scores = numpy.array((export_sub_area_scores, export_sub_area_key2))
         export_sub_area = dataset.ReadAsArray(start_col, start_row, block_cols, block_rows)
         # when only one output layer is made the ReadAsArray returns a shape like (x,y)
-        # while a three layer output would return something like (3, x, y)
-        # so we will reshape the (x,y) to (1, x, y) so the indexing works the same
+        # while a three layer output would return something like (3, nx, ny)
+        # so we will reshape the (nx, ny) to (1, nx, ny) so the indexing works the same
         if len(export_sub_area.shape) < 3:
             export_sub_area = export_sub_area.reshape((1, *export_sub_area.shape))
         # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
@@ -855,30 +868,10 @@ class SingleFile(WorldDatabase):
                     gdal_options=()):
         """Export the full area of the 'single file database' in the epsg the data is stored in"""
         y1 = self.db.tile_scheme.min_y
-        y2 = self.db.tile_scheme.max_y
-        x1 = self.db.tile_scheme.min_x
-        x2 = self.db.tile_scheme.max_x
-        super().export_area(fname, x1, y1, x2, y2, (self.res_x, self.res_y), driver=driver,
-                    layers=layers, gdal_options=gdal_options)
-
-class SingleFile(WorldDatabase):
-    def __init__(self, epsg, x1, y1, x2, y2, res_x, res_y, storage_directory):
-        min_x, min_y, max_x, max_y, self.shape_x, self.shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
-        self.res_x = res_x
-        self.res_y = res_y
-        super().__init__(SingleFileBackend(epsg, min_x, min_y, max_x, max_y, AccumulationHistory, DiskHistory, TiffStorage, storage_directory))
-
-    def init_tile(self, tx, ty, tile_history):
-        return self.shape_y, self.shape_x  # rows and columns
-
-    def export(self, fname, driver="GTiff", layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
-                    gdal_options=()):
-        """Export the full area of the 'single file database' in the epsg the data is stored in"""
-        y1 = self.db.tile_scheme.min_y
         y2 = self.db.tile_scheme.max_y - self.res_y
         x1 = self.db.tile_scheme.min_x
         x2 = self.db.tile_scheme.max_x - self.res_x
-        super().export_area(fname, x1, y1, x2, y2, (self.res_x, self.res_y), driver=driver,
+        return super().export_area(fname, x1, y1, x2, y2, (self.res_x, self.res_y), driver=driver,
                     layers=layers, gdal_options=gdal_options)
 
 
@@ -906,7 +899,7 @@ class CustomArea(WorldDatabase):
         y2 = self.db.tile_scheme.max_y - self.res_y
         x1 = self.db.tile_scheme.min_x
         x2 = self.db.tile_scheme.max_x - self.res_x
-        super().export_area(fname, x1, y1, x2, y2, (self.res_x, self.res_y), driver=driver,
+        return super().export_area(fname, x1, y1, x2, y2, (self.res_x, self.res_y), driver=driver,
                     layers=layers, gdal_options=gdal_options)
 
 
