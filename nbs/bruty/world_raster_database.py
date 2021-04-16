@@ -647,12 +647,10 @@ class WorldDatabase(VABC):
                 pts = pts[:, pts[2] != nodata]  # remove nodata points
                 # pts = pts[:, pts[2] > -18.2]  # reduce points to debug
                 if pts.size > 0:
-                    if driver_name == 'BAG':
-                        x, y = affine_center(pts[0], pts[1], x0, dxx, dyx, y0, dxy, dyy)
-                    else:
-                        x, y = affine(pts[0], pts[1], x0, dxx, dyx, y0, dxy, dyy)
-                    # x = x0 + pts[1] * dxx + pts[0] * dyx
-                    # y = y0 + pts[1] * dxy + pts[0] * dyy
+                    # if driver_name == 'BAG':
+                    x, y = affine_center(pts[0], pts[1], x0, dxx, dyx, y0, dxy, dyy)
+                    # else:
+                    #     x, y = affine(pts[0], pts[1], x0, dxx, dyx, y0, dxy, dyy)
                     if geo_debug and False:
                         s_pts = numpy.array((x, y, pts[0], pts[1], pts[2]))
                         txs, tys = storage_db.tile_scheme.xy_to_tile_index(x, y)
