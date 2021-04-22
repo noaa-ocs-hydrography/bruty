@@ -3,6 +3,7 @@ import os
 import pathlib
 import timeit
 import functools
+import tempfile
 
 import numpy
 from scipy.ndimage import binary_closing, binary_dilation
@@ -731,7 +732,7 @@ def vr_close_refinements(upsampled, left_or_top_rcb, left_or_top_xyz, right_or_b
                 break
 
 # @jit (nopython=True)
-def vr_close_quad(matrix, ul, ur, ll, lr):
+def vr_close_quad(matrix, ul, ur, lr, ll):  # pass in points in connection order
     # fixme -- allow for lines to fill?  if two points are there then make line between since triangle doesn't work
     # numba doesn't like indices that are tuples like -- draw_triangle(matrix, pts[(0,1,3)])
     # also doesn't like making arrays from arrays it looks like -- numpy.array([ul, ll, ur], dtype=numpy.int32)
@@ -767,12 +768,38 @@ def vr_close_quad(matrix, ul, ur, ll, lr):
 
 # @jit (nopython=True)
 def vr_triangle_closing(upsampled, mapping):
+    pos_rows = numpy.sign(mapping[0, -1, -1] - mapping[0, 0, 0])
+    pos_cols = numpy.sign(mapping[1, -1, -1] - mapping[1, 0, 0])
+    if pos_rows == 0:  # this implies the whole bag fits in one cell, so either a low res output or a refinement with only one point
+        pos_rows = -1  # this is the default read order used below
+    if pos_cols == 0:
+        pos_cols = 1
+    # fixme -- this won't work on refinements of size 1
     for r in range(mapping.shape[1]-1):
         for c in range(mapping.shape[2]-1):
-            i, j, d = mapping[:, r, c]
-            i1, j1, d1 = mapping[:, r+1, c]
-            i2, j2, d2 = mapping[:, r, c+1]
-            i3, j3, d3 = mapping[:, r+1, c+1]
+            # since tiffs are normally negative DY and bags are positive DY, we'll read assuming that and adjust if the tiff is +DY or -DX
+            i1, j1, d1 = mapping[:, r, c]
+            i, j, d = mapping[:, r+1, c]
+            i3, j3, d3 = mapping[:, r, c+1]
+            i2, j2, d2 = mapping[:, r+1, c+1]
+            # does numba support swap commands?
+            if pos_rows == 1:  # upsampled is in same Y order as bag, so flip top/bottom rows in same col since we assumed opposite
+                # switch i and i1
+                ti, tj, td = i, j, d
+                i, j, d = i1, j1, d1
+                i1, j1, d1 = ti, tj, td
+                ti, tj, td = i2, j2, d2
+                i2, j2, d2 = i3, j3, d3
+                i3, j3, d3 = ti, tj, td
+            if pos_cols == -1:  # upsample opposite col ored, flip left right in same row
+                # switch i and i2, i1 with i3
+                ti, tj, td = i, j, d
+                i, j, d = i2, j2, d2
+                i2, j2, d2 = ti, tj, td
+                ti, tj, td = i1, j1, d1
+                i1, j1, d1 = i3, j3, d3
+                i3, j3, d3 = ti, tj, td
+
             if d and d1 and d2 and d3:
                 upsampled[i:i3+1, j:j3+1] = 1
             elif d and d1 and d2:  # top left
@@ -841,7 +868,8 @@ def vr_close_neighbors(upsampled, refinements, refinements_xyz):
         ur = refinements[2][2][:, 0, 0]
     except TypeError:
         ur = no_data
-    vr_close_quad(upsampled, lr, ul, ur, ll)
+    # rows=[c[0] for c in (ll, lr, ur, ul)]; cols = [c[1] for c in (ll, lr, ur, ul)]; print(refinements_xyz[1][1][:, -1, -1][0]), print(refinements_xyz[1][1][:, -1, -1][1]); print(rows, cols); print(upsampled[min(rows): max(rows)+1, min(cols):max(cols)+1])
+    vr_close_quad(upsampled, ul, ur, lr, ll)  # hole_at = 370867.325,4759142.356   numpy.abs(refinements_xyz[1][1][:, -1, -1][0]-370867.325)<32 and numpy.abs(refinements_xyz[1][1][:, -1, -1][1]-4759142.356)<32
     # upper left of center refinement
     try:
         lr = center_refinement[:, -1, 0]
@@ -859,10 +887,10 @@ def vr_close_neighbors(upsampled, refinements, refinements_xyz):
         ll = refinements[1][0][:, -1, -1]
     except TypeError:
         ll = no_data
-    vr_close_quad(upsampled, lr, ul, ur, ll)
+    vr_close_quad(upsampled, ul, ur, lr, ll)
 
     # fill in the interior of a refinement
-    vr_triangle_closing(upsampled, refinements[1][1])  # try closing middle right
+    vr_triangle_closing(upsampled, refinements[1][1])
 
 def vr_to_sr_points(vr_path, output_path, output_res, driver='GTiff'):
     """ Create a single res raster from vr, only fills points that where vr existed (no interpolation etc).
@@ -905,7 +933,8 @@ def vr_raster_mask(vr, points_ds, output_path):
     interp_ds = points_ds.GetDriver().CreateCopy(str(output_path), points_ds)
     output_geotransform = interp_ds.GetGeoTransform()
     # @todo make read work on blocks not just whole file
-    output_matrix = interp_ds.ReadAsArray()
+    band = interp_ds.GetRasterBand(1)
+    output_matrix = band.ReadAsArray()
 
     good_refinements = numpy.argwhere(vr.get_valid_refinements())  # bool matrix of which refinements have data
     mort = morton.interleave2d_64(good_refinements.T)
@@ -948,7 +977,9 @@ def vr_raster_mask(vr, points_ds, output_path):
         vr_close_neighbors(output_matrix, neighbors_rcb, neighbors_xyz)
         while len(cached_refinements) > max_cache:
             cached_refinements.popitem(last=False)  # get rid of the oldest cached item, False makes it FIFO
-
+    band.WriteArray(output_matrix)
+    band = None
+    return interp_ds
 
 
 def vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res):
@@ -1110,7 +1141,7 @@ def upsample_vr(path_to_vr, output_path, output_res):
 
     """
     # output_path = pathlib.Path(output_path)
-    mask_path = pathlib.Path(output_path).with_suffix("mask.tif")
+    mask_path = pathlib.Path(output_path).with_suffix(".mask.tif")
     points_ds, mask_ds = vr_to_points_and_mask(path_to_vr, output_path, mask_path, output_res)
     interpolate_raster(points_ds, mask_ds)
     if not _debug:
