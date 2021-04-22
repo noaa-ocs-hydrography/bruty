@@ -662,6 +662,16 @@ def vr_close_refinements(upsampled, left_or_top_rcb, left_or_top_xyz, right_or_b
     rx, ry, rz =  right_or_bottom_xyz[:, rb_index, rb_last]
     li, lj, ld = left_or_top_rcb[:, lt_index, lt_last]
     lx, ly, lz = left_or_top_xyz[:, lt_index, lt_last]
+
+    # get the x, y at the ends of the matrices, then difference them.
+    # If the difference is less than zero then the upsampled is going in the opposite convention than the bag
+    # so we need to flip the compare logic for walking along the gap between the two
+    pos_rows = numpy.sign(right_or_bottom_rcb[0, -1, -1] - right_or_bottom_rcb[0, 0, 0])
+    pos_cols = numpy.sign(right_or_bottom_rcb[1, -1, -1] - right_or_bottom_rcb[1, 0, 0])
+    if pos_rows == 0:  # this implies the whole bag fits in one cell, so either a low res output or a refinement with only one point
+        pos_rows = 1
+    if pos_cols == 0:
+        pos_cols = 1
     if rj - lj < max_dist:  # make sure the gap between supercells is less than max_dist for upsampling
         more_data = True
         if horz:
@@ -678,25 +688,28 @@ def vr_close_refinements(upsampled, left_or_top_rcb, left_or_top_xyz, right_or_b
                 ri2, rj2, rd2 = right_or_bottom_rcb[:, rb_index+1, rb_last]
                 li1, lj1, ld1 = left_or_top_rcb[:, lt_index, lt_last]
                 li2, lj2, ld2 = left_or_top_rcb[:, lt_index+1, lt_last]
-                lt1 = li1
-                lt2 = li2
-                rb1 = ri1
-                rb2 = ri2
+                # compare the rows as we are walking up the vertical gap between two horizonatally aligned refinements
+                lt1 = li1 * pos_rows
+                lt2 = li2 * pos_rows
+                rb1 = ri1 * pos_rows
+                rb2 = ri2 * pos_rows
             else:
                 li1, lj1, ld1 = right_or_bottom_rcb[:, rb_last, rb_index]
                 ri1, rj1, rd1 = right_or_bottom_rcb[:, rb_last, rb_index+1]
                 li2, lj2, ld2 = left_or_top_rcb[:, lt_last, lt_index]
                 ri2, rj2, rd2 = left_or_top_rcb[:, lt_last, lt_index+1]
-                lt1 = lj2
-                lt2 = rj2
-                rb1 = lj1
-                rb2 = rj1
+                # compare the columns as we are walking along the horizontal gap between two vertically aligned refinements
+                lt1 = lj2 * pos_cols
+                lt2 = rj2 * pos_cols
+                rb1 = lj1 * pos_cols
+                rb2 = rj1 * pos_cols
 
             # @todo check the x/y distance so we don't close over a long diagonal?  Think of a 32 ro 64m res in  a 64m supergrid agains a 1m grid
             vr_close_quad(upsampled, (ri1, rj1, rd1), (ri2, rj2, rd2), (li1, lj1, ld1), (li2, lj2, ld2))
             # @fixme -- I think we can move the indices twice,
             #   moving once duplicates a triangle
             #   -- can only break on the first loop in case there is one triangle left
+            # compare the row (for horizontal) or col (for vertical neighbors) and see which index needs to increment
             if lt1 >= rb2 and rb_index < max_rb:  # left points both above right
                 rb_index += 1
             elif rb1 >= lt2 and lt_index < max_lt: # right points both above left
