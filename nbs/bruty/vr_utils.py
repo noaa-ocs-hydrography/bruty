@@ -6,6 +6,7 @@ import functools
 import tempfile
 
 import numpy
+import scipy.interpolate
 from scipy.ndimage import binary_closing, binary_dilation
 from skimage.draw import polygon
 from numba import jit
@@ -540,25 +541,25 @@ def numb(upsampled, refinements):
         ll = refinements[0][0].astype(int)[(0,1,-1), -1, -1]
         lr = refinements[0][1].astype(int)[(0,1,-1), -1, 0]
         ul = refinements[1][0].astype(int)[(0,1,-1), 0, -1]
-        close_quad(upsampled, lr, ul, ur, ll)
+        close_quad(upsampled, ul, ur, ll, lr)
         # upper right of center refinement
         ll = refinements[1][1].astype(int)[(0,1,-1), -1, -1]
         ul = refinements[2][1].astype(int)[(0,1,-1), 0, -1]
         lr = refinements[1][2].astype(int)[(0,1,-1), -1, 0]
         ur = refinements[2][2].astype(int)[(0,1,-1), 0, 0]
-        close_quad(upsampled, lr, ul, ur, ll)
+        close_quad(upsampled, ul, ur, ll, lr)
         # lower right of center refinement
         ul = refinements[1][1].astype(int)[(0,1,-1), 0, -1]
         lr = refinements[0][2].astype(int)[(0,1,-1), -1, 0]
         ll = refinements[0][1].astype(int)[(0,1,-1), -1, -1]
         ur = refinements[1][2].astype(int)[(0,1,-1), 0, 0]
-        close_quad(upsampled, lr, ul, ur, ll)
+        close_quad(upsampled, ul, ur, ll, lr)
         # upper left of center refinement
         lr = refinements[1][1].astype(int)[(0,1,-1), -1, 0]
         ul = refinements[2][0].astype(int)[(0,1,-1), 0, -1]
         ur = refinements[2][1].astype(int)[(0,1,-1), 0, 0]
         ll = refinements[1][0].astype(int)[(0,1,-1), -1, -1]
-        close_quad(upsampled, lr, ul, ur, ll)
+        close_quad(upsampled, ul, ur, ll, lr)
     if 1:
         # fill in the interior of a refinement
         triangle_closing(upsampled, refinements[0][0].astype(int))  # try closing middle right
@@ -602,13 +603,13 @@ def test_vr_close_neighbors(upsampled, refinements):
     ul = refinements[2][1].astype(int)[(0,1,-1), 0, -1]
     lr = refinements[1][2].astype(int)[(0,1,-1), -1, 0]
     ur = refinements[2][2].astype(int)[(0,1,-1), 0, 0]
-    close_quad(upsampled, lr, ul, ur, ll)
+    close_quad(upsampled, ul, ur, ll, lr)
     # upper left of center refinement
     lr = refinements[1][1].astype(int)[(0,1,-1), -1, 0]
     ul = refinements[2][0].astype(int)[(0,1,-1), 0, -1]
     ur = refinements[2][1].astype(int)[(0,1,-1), 0, 0]
     ll = refinements[1][0].astype(int)[(0,1,-1), -1, -1]
-    close_quad(upsampled, lr, ul, ur, ll)
+    close_quad(upsampled, ul, ur, ll, lr)
 
     # fill in the interior of a refinement
     triangle_closing(upsampled, refinements[1][1].astype(int))  # try closing middle right
@@ -642,16 +643,12 @@ def test_close_refinement():
     print(upsampled)
 
 
-# @jit (nopython=True)
+@jit (nopython=True)
 def vr_close_refinements(upsampled, left_or_top_rcb, left_or_top_xyz, right_or_bottom_rcb, right_or_bottom_xyz, max_dist, horz=True):
     # FIXME  if the upsampled tif has an opposite DY (written bottom up instead of top down) then the logic
     #   below breaks -- would need a flag or check the matrix geotransform or read the r,c data
     #   currently we are assuming that moving up the BAG rows moves down the tif rows.
     #   Really there is a similar concern for X where we assume increasing column in BAG increases in TIF (upsampled array)
-    print("put back the JIT")
-    print("put back the JIT")
-    print("put back the JIT")
-    print("put back the JIT")
     # closes the gap between two refinements - have to specify if they are horizontal or vertical
     rb_index = 0
     lt_last = -1
@@ -731,7 +728,7 @@ def vr_close_refinements(upsampled, left_or_top_rcb, left_or_top_xyz, right_or_b
                 more_data = False
                 break
 
-# @jit (nopython=True)
+@jit (nopython=True)
 def vr_close_quad(matrix, ul, ur, lr, ll):  # pass in points in connection order
     # fixme -- allow for lines to fill?  if two points are there then make line between since triangle doesn't work
     # numba doesn't like indices that are tuples like -- draw_triangle(matrix, pts[(0,1,3)])
@@ -766,7 +763,7 @@ def vr_close_quad(matrix, ul, ur, lr, ll):  # pass in points in connection order
         tri = numpy.array([[li1, lj1],[ri2, rj2], [ri1, rj1]], dtype=numpy.int32)  # [uld, lrd, urd]
         draw_triangle(matrix, tri)
 
-# @jit (nopython=True)
+@jit (nopython=True)
 def vr_triangle_closing(upsampled, mapping):
     pos_rows = numpy.sign(mapping[0, -1, -1] - mapping[0, 0, 0])
     pos_cols = numpy.sign(mapping[1, -1, -1] - mapping[1, 0, 0])
@@ -1002,49 +999,43 @@ def vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res):
     vr = bag.VRBag(path_to_vr, mode='r')
     points_ds, area_db, cnt = vr_to_sr_points(path_to_vr, points_path, output_res)
     mask_ds = vr_raster_mask(vr, points_ds, mask_path)
-    return points_ds, mask_ds
+    return vr, points_ds, mask_ds
 
 
-def interpolate_raster(input_file_full_path, dst_filename, sr_cell_size=None, method='linear', use_blocks=True, nodata=numpy.nan):
+def interpolate_raster(vr, points_ds, mask_ds, output_path, use_blocks=True, nodata=numpy.nan, method='linear'):
     """ Interpolation scheme
-    Create the POINT version of the TIFF with only data at precise points of VR BAG
+    Given the POINT version of the TIFF with only data at precise points of VR BAG (old version of function would create POINT tiff)
     Load in blocks with enough buffer around the outside (nominally 3x3 supergrids with 1 supergrid buffer)
         run scipy.interpolate.griddata on the block (use linear as cubic causes odd peaks and valleys)
         copy the interior (3x3 supergrids without the buffer area) into the output TIFF
 
-    Create the MIN (or MAX) version of the TIFF
+    Given the mask version of the TIFF  (old function used to Create a 'min')
     Load blocks of data and copy any NaNs from the MIN (cell based coverage) into the INTERP grid to remove erroneous interpolations,
     this essentially limits coverage to VR cells that were filled
     """
-    fobj, point_filename = tempfile.mkstemp(".point.tif")
-    os.close(fobj)
-    fobj, min_filename = tempfile.mkstemp(".min.tif")
-    os.close(fobj)
-    if not DEBUGGING:
-        dx, dy, cell_sz = VRBag_to_TIF(input_file_full_path, point_filename, sr_cell_size=sr_cell_size, mode=POINT, use_blocks=use_blocks,
-                                       nodata=nodata)
-        VRBag_to_TIF(input_file_full_path, min_filename, sr_cell_size=sr_cell_size, mode=MIN, use_blocks=use_blocks, nodata=nodata)
-    else:
-        dx, dy, cell_sz = 128, 128, 1.07
-        point_filename = r"C:\Data\BAG\GDAL_VR\H-10771\ExampleForEven\H-10771_python.1m_point.tif"
-        min_filename = r"C:\Data\BAG\GDAL_VR\H-10771\ExampleForEven\H-10771_python.1m_min.tif"
+    dx = vr.cell_size_x
+    dy = vr.cell_size_y
+    cell_szx = numpy.abs(points_ds.GetGeoTransform()[1])
+    cell_szy = numpy.abs(points_ds.GetGeoTransform()[5])
 
-    points_ds = gdal.Open(point_filename)
     points_band = points_ds.GetRasterBand(1)
     points_no_data = points_band.GetNoDataValue()
-    coverage_ds = gdal.Open(min_filename)
-    coverage_band = coverage_ds.GetRasterBand(1)
-    coverage_no_data = coverage_band.GetNoDataValue()
-    interp_ds = points_ds.GetDriver().Create(dst_filename, points_ds.RasterXSize, points_ds.RasterYSize, bands=1, eType=points_band.DataType,
-                                             options=["BLOCKXSIZE=256", "BLOCKYSIZE=256", "TILED=YES", "COMPRESS=LZW", "BIGTIFF=YES"])
-    interp_ds.SetProjection(points_ds.GetProjection())
-    interp_ds.SetGeoTransform(points_ds.GetGeoTransform())
+    mask_band = mask_ds.GetRasterBand(1)
+    mask_no_data = mask_band.GetNoDataValue()
+    interp_ds = points_ds.GetDriver().CreateCopy(str(output_path), points_ds)
+    # interp_ds = points_ds.GetDriver().Create(dst_filename, points_ds.RasterXSize, points_ds.RasterYSize, bands=1, eType=points_band.DataType,
+    #                                          options=["BLOCKXSIZE=256", "BLOCKYSIZE=256", "TILED=YES", "COMPRESS=LZW", "BIGTIFF=YES"])
+    # interp_ds.SetProjection(points_ds.GetProjection())
+    # interp_ds.SetGeoTransform(points_ds.GetGeoTransform())
     interp_band = interp_ds.GetRasterBand(1)
     interp_band.SetNoDataValue(nodata)
 
     if use_blocks:
-        pixels_per_supergrid = int(max(dx / cell_sz, dy / cell_sz)) + 1
+        # @todo move to using iterate gdal generator from bruty.utils -- would need to add buffer option to iterate_gdal
+        pixels_per_supergrid = int(max(dx / cell_szx, dy / cell_szy)) + 1
         row_block_size = col_block_size = 3 * pixels_per_supergrid
+        if row_block_size < 512:
+            row_block_size = col_block_size = 512
         row_buffer_size = col_buffer_size = 1 * pixels_per_supergrid
         row_size = interp_band.XSize
         col_size = interp_band.YSize
@@ -1062,7 +1053,7 @@ def interpolate_raster(input_file_full_path, dst_filename, sr_cell_size=None, me
                 row_buffer_lower = row_buffer_size if ir >= row_buffer_size else ir
                 row_buffer_upper = row_buffer_size if row_size - (ir + row_block_size) >= row_buffer_size else row_size - (ir + row_block_size)
                 read_rows = row_buffer_lower + rows + row_buffer_upper
-                points_array = points_band.ReadAsArray(ir - row_buffer_lower, ic - col_buffer_lower, read_rows, read_cols)
+                points_array = points_band.ReadAsArray(ic - col_buffer_lower, ir - row_buffer_lower, read_cols, read_rows)
 
                 # Find the points that actually have data as N,2 array shape that can index the data arrays
                 if numpy.isnan(points_no_data):
@@ -1075,23 +1066,38 @@ def interpolate_raster(input_file_full_path, dst_filename, sr_cell_size=None, me
                     point_values = points_array[point_indices]
                     # interpolate all the other points in the array
                     # (actually it's interpolating everywhere which is a waste of time where there is already data)
-                    xi, yi = numpy.mgrid[row_buffer_lower:row_buffer_lower + row_block_size,
+                    row_i, col_i = numpy.mgrid[row_buffer_lower:row_buffer_lower + row_block_size,
                              col_buffer_lower:col_buffer_lower + col_block_size]
-                    interp_data = scipy.interpolate.griddata(numpy.transpose(point_indices), point_values,
-                                                             (xi, yi), method=method)
-                    # mask based on the cell coverage found using the MIN mode
-                    coverage_data = coverage_band.ReadAsArray(ir, ic, row_block_size, col_block_size)
-                    interp_data[coverage_data == coverage_no_data] = nodata
+                    try:
+                        interp_data = scipy.interpolate.griddata(numpy.transpose(point_indices), point_values,
+                                                                 (row_i, col_i), method=method)
+                    except scipy.spatial.qhull.QhullError as e:
+                        if len(point_indices[0]) < 3:
+                            # find the data that would fall in the griddata result and just insert those couple points
+                            # could do with a for loop and a couple if statements easier
+                            interp_data = interp_band.ReadAsArray(ic, ir, col_block_size, row_block_size)
+                            ind = numpy.transpose(point_indices)
+                            row_non_neg = ind[:, 0] >= 0
+                            row_not_big = ind[:, 0] < row_block_size
+                            col_non_neg = ind[:, 1] >= 0
+                            col_not_big = ind[:, 1] < col_block_size
+                            use_indices = numpy.logical_and.reduce((row_non_neg, row_not_big, col_non_neg, col_not_big))
+                            if numpy.count_nonzero(use_indices):
+                                interp_data[point_indices[0][use_indices], point_indices[1][use_indices]] = point_values[use_indices]
+                        else:
+                            raise e
+
+                    mask_data = mask_band.ReadAsArray(ic, ir, col_block_size, row_block_size)
+                    if numpy.isnan(mask_no_data):
+                        mask_array = numpy.isnan(mask_data)
+                    else:
+                        mask_array = mask_data == mask_no_data
+                    interp_data[mask_array] = nodata
                     # Write the data into the TIF on disk
-                    interp_band.WriteArray(interp_data, ir, ic)
-        if DEBUGGING:
-            points_array = points_band.ReadAsArray()
-            interp_array = interp_band.ReadAsArray()
-            _plot(points_array)
-            _plot(interp_array)
+                    interp_band.WriteArray(interp_data, ic, ir)
     else:
         points_array = points_band.ReadAsArray()
-        coverage_data = coverage_band.ReadAsArray()
+        mask_data = mask_band.ReadAsArray()
 
         # Find the points that actually have data
         if numpy.isnan(points_no_data):
@@ -1105,8 +1111,8 @@ def interpolate_raster(input_file_full_path, dst_filename, sr_cell_size=None, me
         interp_data = scipy.interpolate.griddata(numpy.transpose(point_indices), point_values,
                                                  (xi, yi), method=method)
         _plot(interp_data)
-        # mask based on the cell coverage found using the MIN mode
-        interp_data[coverage_data == coverage_no_data] = nodata
+        # mask based on the cell mask found using the MIN mode
+        interp_data[mask_data == mask_no_data] = nodata
         _plot(interp_data)
         # Write the data into the TIF on disk
         interp_band.WriteArray(interp_data)
@@ -1114,12 +1120,9 @@ def interpolate_raster(input_file_full_path, dst_filename, sr_cell_size=None, me
     # release the temporary tif files and delete them
     point_band = None
     point_ds = None
-    coverage_band = None
-    coverage_ds = None
-    if not DEBUGGING:
-        os.remove(min_filename)
-        os.remove(point_filename)
-
+    mask_band = None
+    mask_ds = None
+    return interp_ds
 
 def upsample_vr(path_to_vr, output_path, output_res):
     """ Use the world_raster_database to create an output 'points' tif of the correct resolution that covers the VR extents.
@@ -1142,12 +1145,15 @@ def upsample_vr(path_to_vr, output_path, output_res):
     """
     # output_path = pathlib.Path(output_path)
     mask_path = pathlib.Path(output_path).with_suffix(".mask.tif")
-    points_ds, mask_ds = vr_to_points_and_mask(path_to_vr, output_path, mask_path, output_res)
-    interpolate_raster(points_ds, mask_ds)
-    if not _debug:
-        del mask_ds
-        os.remove(mask_path)
-    return points_ds
+    points_path = pathlib.Path(output_path).with_suffix(".points.tif")
+    vr, points_ds, mask_ds = vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res)
+    # can we write directly into the points_ds instead of copying?
+    interp_ds = interpolate_raster(vr, points_ds, mask_ds, output_path)
+    # if not _debug:
+    #     del mask_ds
+    #     os.remove(mask_path)
+    #     os.remove(points_path)
+    return interp_ds
 
 if __name__ == "__main__":
     # print(ellipse_mask(5,5))
