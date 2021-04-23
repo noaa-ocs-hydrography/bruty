@@ -645,21 +645,11 @@ def test_close_refinement():
 
 @jit (nopython=True)
 def vr_close_refinements(upsampled, left_or_top_rcb, left_or_top_xyz, right_or_bottom_rcb, right_or_bottom_xyz, max_dist, horz=True):
-    # FIXME  if the upsampled tif has an opposite DY (written bottom up instead of top down) then the logic
-    #   below breaks -- would need a flag or check the matrix geotransform or read the r,c data
-    #   currently we are assuming that moving up the BAG rows moves down the tif rows.
-    #   Really there is a similar concern for X where we assume increasing column in BAG increases in TIF (upsampled array)
     # closes the gap between two refinements - have to specify if they are horizontal or vertical
     rb_index = 0
     lt_last = -1
     rb_last = 0
     lt_index = 0
-
-    # @todo make this compare x,y position vs max_dist instead of upsampled indices
-    ri, rj, rd = right_or_bottom_rcb[:, rb_index, rb_last]
-    rx, ry, rz =  right_or_bottom_xyz[:, rb_index, rb_last]
-    li, lj, ld = left_or_top_rcb[:, lt_index, lt_last]
-    lx, ly, lz = left_or_top_xyz[:, lt_index, lt_last]
 
     # get the x, y at the ends of the matrices, then difference them.
     # If the difference is less than zero then the upsampled is going in the opposite convention than the bag
@@ -670,7 +660,22 @@ def vr_close_refinements(upsampled, left_or_top_rcb, left_or_top_xyz, right_or_b
         pos_rows = 1
     if pos_cols == 0:
         pos_cols = 1
-    if rj - lj < max_dist:  # make sure the gap between supercells is less than max_dist for upsampling
+    if max_dist >= 0:
+        # make sure the gap between supercells is less than max_dist for upsampling
+        rx1, ry1, rz1 = right_or_bottom_xyz[:, 0, 0]
+        rx2, ry2, rz2 = right_or_bottom_xyz[:, -1, -1]
+        lx1, ly1, lz1 = left_or_top_xyz[:, 0, 0]
+        lx2, ly2, lz2 = left_or_top_xyz[:, -1, -1]
+
+        # find the closest distance from one cell to the other -- this is order independent by checking all possibilities, but slower.
+        dx = numpy.abs(numpy.array([(rx1-lx1), (rx1-lx2), (rx2-lx1), (rx2-lx2)])).min()
+        dy = numpy.abs(numpy.array([(ry1-ly1), (ry1-ly2), (ry2-ly1), (ry2-ly2)])).min()
+        grid_dist = dx if horz else dy
+        close_enough = grid_dist <= max_dist
+    else:
+        close_enough = True
+
+    if close_enough:  # make sure the gap between supercells is less than max_dist for upsampling
         more_data = True
         if horz:
             max_lt = left_or_top_rcb.shape[1] - 2
@@ -828,23 +833,32 @@ def vr_triangle_closing(upsampled, mapping):
                         start_j = j
                     upsampled[r_i, int(start_j):j2+1] = 1
 
-def vr_close_neighbors(upsampled, refinements, refinements_xyz):
+def vr_close_neighbors(upsampled, refinements, refinements_xyz, refinements_res, supercell_gap_percentage=-1):
     # numba wants integers for row column indices, so the refinements arrays are ints.
     # numba doesn't like structured arrays(?) so passing integers in refinements and floats in refinements_xyz
-    # @todo reduce this to only doing the upper and right boundaries.
-    #    the other edges will be covered when processing the neighbors.
-    #    corners need to be done since an empty refinement would not need to fill edges but the corner still needs to be processed.
+
+    # only doing the upper and right boundaries.
+    # the other edges will be covered when processing the neighbors.
+    # two top corners need to be done since an empty refinement (evaluate to None) would not need to fill edges but the corner still needs to be processed.
+    # @todo maybe need to do all four corners - bottom may not fill in otherwise from left to right
     # FIXME ??
     #    COULD reduce to top two corners only since three corners would have to exist and only pass in two rows of refinements instead of three
 
     # fill the boundaries between all refinements in the 3x3 set.
     center_refinement = refinements[1][1]
     center_refinement_xyz = refinements_xyz[1][1]
+    max_dist = -1
     if center_refinement is not None:
         if refinements[1][2] is not None:
-            vr_close_refinements(upsampled, center_refinement, center_refinement_xyz, refinements[1][2], refinements_xyz[1][2], 100)
+            if supercell_gap_percentage>=0:
+                max_dist = refinements_res[1][1][0] + refinements_res[1][2][0]  # x res of center and x res of right
+                max_dist *= supercell_gap_percentage / 2  # divide by two since we summed two resolutions
+            vr_close_refinements(upsampled, center_refinement, center_refinement_xyz, refinements[1][2], refinements_xyz[1][2], max_dist)
         if refinements[2][1] is not None:
-            vr_close_refinements(upsampled, center_refinement, center_refinement_xyz, refinements[2][1], refinements_xyz[2][1], 100, horz=False)
+            if supercell_gap_percentage>=0:
+                max_dist = refinements_res[1][1][1] + refinements_res[2][1][1]  # y res of center and y res of top
+                max_dist *= supercell_gap_percentage / 2  # divide by two since we summed two resolutions
+            vr_close_refinements(upsampled, center_refinement, center_refinement_xyz, refinements[2][1], refinements_xyz[2][1], max_dist, horz=False)
     # fill in the corners by getting a corner point from each refinement
     # upper right of center refinement
     # if the refinement is None then a TypeError will occur and just set a 'false' in the depth attribute
@@ -909,7 +923,7 @@ def vr_to_sr_points(vr_path, output_path, output_res, driver='GTiff'):
     cnt, sr_ds = area_db.export(output_path, driver=driver, layers=[LayersEnum.ELEVATION])
     return sr_ds, area_db, cnt
 
-def vr_raster_mask(vr, points_ds, output_path):
+def vr_raster_mask(vr, points_ds, output_path, supercell_gap_percentage=-1):
     """ Given a VR and it's computed SR point raster, compute the coverage mask that describes where upsample-interpolation would be valid
 
     Parameters
@@ -942,13 +956,14 @@ def vr_raster_mask(vr, points_ds, output_path):
     # list of lists for neighbors.  None indicates an empty refinement
     neighbors_rcb = [[None, None, None], [None, None, None], [None, None, None]]
     neighbors_xyz = [[None, None, None], [None, None, None], [None, None, None]]
+    neighbors_res = [[None, None, None], [None, None, None], [None, None, None]]
     # iterate VR refinements filling in the mask cells
     for ri, rj in tqdm(sorted_refinement_indices, mininterval=.75):
         # get surrounding vr refinements as buffer
         for i in (-1, 0, 1):
             for j in (-1, 0, 1):
                 try:
-                    refinement_data_rcb, refinement_data_xyz = cached_refinements[(ri + i, rj + j)]
+                    refinement_data_rcb, refinement_data_xyz, refinement_res = cached_refinements[(ri + i, rj + j)]
                 except KeyError:
                     # read the refinement, convert to raster row/cols and cache the result
                     refinement = vr.read_refinement(ri + i, rj + j)
@@ -959,19 +974,22 @@ def vr_raster_mask(vr, points_ds, output_path):
                         bool_depth[pts[4] == vr.fill_value] = 0
                         refinement_data_rcb = numpy.array((r, c, bool_depth), dtype=numpy.int32)  # row col bool
                         refinement_data_xyz = numpy.array((pts[0], pts[1], pts[4]), dtype=numpy.float64)
+                        refinement_res = refinement.cell_size_x, refinement.cell_size_y
 
                     else:
                         refinement_data_xyz = None
                         refinement_data_rcb = None
-                    cached_refinements[(ri + i, rj + j)] = (refinement_data_rcb, refinement_data_xyz)
+                        refinement_res = None
+                    cached_refinements[(ri + i, rj + j)] = (refinement_data_rcb, refinement_data_xyz, refinement_res)
                 # adjust for the indices being +/- 1 to 0 thru 2 for indexing, so i+1, j+1
                 neighbors_rcb[i+1][j+1] = refinement_data_rcb
                 neighbors_xyz[i+1][j+1] = refinement_data_xyz
+                neighbors_res[i+1][j+1] = refinement_res
         #   Get the output tif in that same area
         #   -- phase one just grab refinements area,
         #   -- phase two consider a second larger cache area that the calculation goes into and that larger cache writes to tif as needed
         # @todo - read/write as blocks but testing by processing the whole VR area
-        vr_close_neighbors(output_matrix, neighbors_rcb, neighbors_xyz)
+        vr_close_neighbors(output_matrix, neighbors_rcb, neighbors_xyz, neighbors_res, supercell_gap_percentage=supercell_gap_percentage)
         while len(cached_refinements) > max_cache:
             cached_refinements.popitem(last=False)  # get rid of the oldest cached item, False makes it FIFO
     band.WriteArray(output_matrix)
@@ -979,7 +997,7 @@ def vr_raster_mask(vr, points_ds, output_path):
     return interp_ds
 
 
-def vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res):
+def vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res, supercell_gap_percentage=-1):
     """ Given an input VR file path, create two output rasters.
     One contains points and one contains a mask of where upsample-interpolation would be appropriate.
 
@@ -998,7 +1016,7 @@ def vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res):
     """
     vr = bag.VRBag(path_to_vr, mode='r')
     points_ds, area_db, cnt = vr_to_sr_points(path_to_vr, points_path, output_res)
-    mask_ds = vr_raster_mask(vr, points_ds, mask_path)
+    mask_ds = vr_raster_mask(vr, points_ds, mask_path, supercell_gap_percentage=supercell_gap_percentage)
     return vr, points_ds, mask_ds
 
 
@@ -1146,13 +1164,13 @@ def upsample_vr(path_to_vr, output_path, output_res):
     # output_path = pathlib.Path(output_path)
     mask_path = pathlib.Path(output_path).with_suffix(".mask.tif")
     points_path = pathlib.Path(output_path).with_suffix(".points.tif")
-    vr, points_ds, mask_ds = vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res)
+    vr, points_ds, mask_ds = vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res, supercell_gap_percentage=1.99)
     # can we write directly into the points_ds instead of copying?
     interp_ds = interpolate_raster(vr, points_ds, mask_ds, output_path)
-    # if not _debug:
-    #     del mask_ds
-    #     os.remove(mask_path)
-    #     os.remove(points_path)
+    if not _debug:
+         del mask_ds
+         os.remove(mask_path)
+         os.remove(points_path)
     return interp_ds
 
 if __name__ == "__main__":
