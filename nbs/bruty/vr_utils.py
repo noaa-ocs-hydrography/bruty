@@ -320,7 +320,9 @@ def triangle_closing(upsampled, mapping):
                     upsampled[r_i, int(start_j):j2+1] = 1
 
 @jit (nopython=True)
-def draw_triangle(matrix, pts):
+def draw_triangle(matrix, pts, fill):
+    # @todo change algorithm to standard or Bresenham see--
+    #   http://www.sunshine2k.de/coding/java/TriangleRasterization/TriangleRasterization.html
     # pts = numpy.array(((ai, aj), (bi, bj), (ci, cj)))
     top, middle, bottom = numpy.argsort(pts[:,0])
     if pts[top][0] != pts[middle][0]:
@@ -330,11 +332,11 @@ def draw_triangle(matrix, pts):
             c1, c2 = slope_tm * (row-pts[top][0]) + pts[top][1], slope_tb * (row-pts[top][0]) + pts[top][1]
             j1 = int(numpy.ceil(min(c1,c2)))
             j2 = int(numpy.trunc(max(c1,c2)))
-            matrix[row, j1:j2+1] = 4
+            matrix[row, j1:j2+1] = fill
     else:
         j1 = min(pts[top][1], pts[middle][1])
         j2 = max(pts[top][1], pts[middle][1])
-        matrix[pts[top][0], j1:j2+1] = 5
+        matrix[pts[top][0], j1:j2+1] = fill
     if pts[middle][0] != pts[bottom][0]:
         slope_tb = (pts[top][1] - pts[bottom][1]) / (pts[top][0] - pts[bottom][0])
         slope_mb = (pts[middle][1] - pts[bottom][1]) / (pts[middle][0] - pts[bottom][0])
@@ -342,14 +344,14 @@ def draw_triangle(matrix, pts):
             c1, c2 = slope_mb * (row-pts[middle][0]) + pts[middle][1], slope_tb * (row-pts[top][0]) + pts[top][1]
             j1 = int(numpy.ceil(min(c1,c2)))
             j2 = int(numpy.trunc(max(c1,c2)))
-            matrix[row, j1:j2+1] = 7
+            matrix[row, j1:j2+1] = fill
     else:
         j1 = min(pts[bottom][1], pts[middle][1])
         j2 = max(pts[bottom][1], pts[middle][1])
-        matrix[pts[bottom][0], j1:j2+1] = 6
+        matrix[pts[bottom][0], j1:j2+1] = fill
 
 @jit (nopython=True)
-def close_quad(matrix, ul, ur, ll, lr):
+def close_quad(matrix, ul, ur, ll, lr, fill):
     # fixme -- allow for lines to fill?  if two points are there then make line between since triangle doesn't work
     # numba doesn't like indices that are tuples like -- draw_triangle(matrix, pts[(0,1,3)])
     # also doesn't like making arrays from arrays it looks like -- numpy.array([ul, ll, ur], dtype=numpy.int32)
@@ -372,16 +374,16 @@ def close_quad(matrix, ul, ur, ll, lr):
         draw_lr = True
     if draw_ul:
         tri = numpy.array([[li1, lj1], [li2, lj2], [ri1, rj1]], dtype=numpy.int32)  # [uld, lld, urd]
-        draw_triangle(matrix, tri)
+        draw_triangle(matrix, tri, fill)
     if draw_ll:
         tri = numpy.array([[li1, lj1], [li2, lj2], [ri2, rj2]], dtype=numpy.int32)  # [uld, lld, lrd]
-        draw_triangle(matrix, tri)
+        draw_triangle(matrix, tri, fill)
     if draw_lr:
         tri = numpy.array([[li2, lj2], [ri2, rj2], [ri1, rj1]], dtype=numpy.int32)  # [lld, lrd, urd]
-        draw_triangle(matrix, tri)
+        draw_triangle(matrix, tri, fill)
     if draw_ur:
         tri = numpy.array([[li1, lj1],[ri2, rj2], [ri1, rj1]], dtype=numpy.int32)  # [uld, lrd, urd]
-        draw_triangle(matrix, tri)
+        draw_triangle(matrix, tri, fill)
 
 @jit (nopython=True)
 def test_close_refinements(upsampled, left_or_top, right_or_bottom, max_dist, horz=True):
@@ -644,7 +646,7 @@ def test_close_refinement():
 
 
 @jit (nopython=True)
-def vr_close_refinements(upsampled, left_or_top_rcb, left_or_top_xyz, right_or_bottom_rcb, right_or_bottom_xyz, max_dist, horz=True):
+def vr_close_refinements(upsampled, left_or_top_rcb, left_or_top_xyz, right_or_bottom_rcb, right_or_bottom_xyz, max_dist, fill, horz=True):
     # closes the gap between two refinements - have to specify if they are horizontal or vertical
     rb_index = 0
     lt_last = -1
@@ -707,8 +709,9 @@ def vr_close_refinements(upsampled, left_or_top_rcb, left_or_top_xyz, right_or_b
                 rb1 = lj1 * pos_cols
                 rb2 = rj1 * pos_cols
 
-            # @todo check the x/y distance so we don't close over a long diagonal?  Think of a 32 ro 64m res in  a 64m supergrid agains a 1m grid
-            vr_close_quad(upsampled, (ri1, rj1, rd1), (ri2, rj2, rd2), (li1, lj1, ld1), (li2, lj2, ld2))
+            # @todo check the x/y distance so we don't close over a long diagonal?  Think of a 32 ro 64m res in  a 64m supergrid against a 1m grid
+            # make sure the quad goes in order around the outside - going diagonally around the outside will leave empty pixels
+            vr_close_quad(upsampled, (ri1, rj1, rd1), (ri2, rj2, rd2), (li2, lj2, ld2), (li1, lj1, ld1), fill)
             # @fixme -- I think we can move the indices twice,
             #   moving once duplicates a triangle
             #   -- can only break on the first loop in case there is one triangle left
@@ -734,7 +737,7 @@ def vr_close_refinements(upsampled, left_or_top_rcb, left_or_top_xyz, right_or_b
                 break
 
 @jit (nopython=True)
-def vr_close_quad(matrix, ul, ur, lr, ll):  # pass in points in connection order
+def vr_close_quad(matrix, ul, ur, lr, ll, fill):  # pass in points in connection order
     # fixme -- allow for lines to fill?  if two points are there then make line between since triangle doesn't work
     # numba doesn't like indices that are tuples like -- draw_triangle(matrix, pts[(0,1,3)])
     # also doesn't like making arrays from arrays it looks like -- numpy.array([ul, ll, ur], dtype=numpy.int32)
@@ -757,19 +760,19 @@ def vr_close_quad(matrix, ul, ur, lr, ll):  # pass in points in connection order
         draw_lr = True
     if draw_ul:
         tri = numpy.array([[li1, lj1], [li2, lj2], [ri1, rj1]], dtype=numpy.int32)  # [uld, lld, urd]
-        draw_triangle(matrix, tri)
+        draw_triangle(matrix, tri, fill)
     if draw_ll:
         tri = numpy.array([[li1, lj1], [li2, lj2], [ri2, rj2]], dtype=numpy.int32)  # [uld, lld, lrd]
-        draw_triangle(matrix, tri)
+        draw_triangle(matrix, tri, fill)
     if draw_lr:
         tri = numpy.array([[li2, lj2], [ri2, rj2], [ri1, rj1]], dtype=numpy.int32)  # [lld, lrd, urd]
-        draw_triangle(matrix, tri)
+        draw_triangle(matrix, tri, fill)
     if draw_ur:
         tri = numpy.array([[li1, lj1],[ri2, rj2], [ri1, rj1]], dtype=numpy.int32)  # [uld, lrd, urd]
-        draw_triangle(matrix, tri)
+        draw_triangle(matrix, tri, fill)
 
 @jit (nopython=True)
-def vr_triangle_closing(upsampled, mapping):
+def vr_triangle_closing(upsampled, mapping, fill):
     pos_rows = numpy.sign(mapping[0, -1, -1] - mapping[0, 0, 0])
     pos_cols = numpy.sign(mapping[1, -1, -1] - mapping[1, 0, 0])
     if pos_rows == 0:  # this implies the whole bag fits in one cell, so either a low res output or a refinement with only one point
@@ -803,37 +806,38 @@ def vr_triangle_closing(upsampled, mapping):
                 i3, j3, d3 = ti, tj, td
 
             if d and d1 and d2 and d3:
-                upsampled[i:i3+1, j:j3+1] = 1
+                upsampled[i:i3+1, j:j3+1] = fill
             elif d and d1 and d2:  # top left
                 for r_i in range(i, i1+1):
                     if i1 != i:  # avoid divide by zero - range is only one scan line
                         end_j = numpy.trunc(j2 - (j2 - j) * (r_i - i)/(i1-i))
                     else:
                         end_j = j2
-                    upsampled[r_i, j:int(end_j)+1] = 1
+                    upsampled[r_i, j:int(end_j)+1] = fill
             elif d and d1 and d3:  # bottom left
                 for r_i in range(i, i1+1):
                     if i1 != i:  # avoid divide by zero - range is only one scan line
                         end_j = numpy.trunc(j + (j3 - j) * (r_i - i)/(i1-i))
                     else:
                         end_j = j3
-                    upsampled[r_i, j:int(end_j)+1] = 1
+                    upsampled[r_i, j:int(end_j)+1] = fill
             elif d and d2 and d3:  # top right
                 for r_i in range(i, i3+1):
                     if i3 != i:  # avoid divide by zero - range is only one scan line
                         start_j = numpy.ceil(j + (j2 - j) * (r_i - i)/(i3-i))
                     else:
                         start_j = j
-                    upsampled[r_i, int(start_j):j2+1] = 1
+                    upsampled[r_i, int(start_j):j2+1] = fill
             elif d1 and d2 and d3:  # bottom right
                 for r_i in range(i2, i3+1):
                     if i3 != i2:  # avoid divide by zero - range is only one scan line
                         start_j = numpy.ceil(j2 - (j2 - j) * (r_i - i2)/(i3-i2))
                     else:
                         start_j = j
-                    upsampled[r_i, int(start_j):j2+1] = 1
+                    upsampled[r_i, int(start_j):j2+1] = fill
 
-def vr_close_neighbors(upsampled, refinements, refinements_xyz, refinements_res, supercell_gap_percentage=-1):
+def vr_close_neighbors(upsampled, refinements, refinements_xyz, refinements_res, supercell_gap_percentage=-1,
+                       edges=True, corners=True, internal=True, vrfill=2, interpfill=3):
     # numba wants integers for row column indices, so the refinements arrays are ints.
     # numba doesn't like structured arrays(?) so passing integers in refinements and floats in refinements_xyz
 
@@ -847,61 +851,75 @@ def vr_close_neighbors(upsampled, refinements, refinements_xyz, refinements_res,
     # fill the boundaries between all refinements in the 3x3 set.
     center_refinement = refinements[1][1]
     center_refinement_xyz = refinements_xyz[1][1]
-    max_dist = -1
-    if center_refinement is not None:
-        if refinements[1][2] is not None:
-            if supercell_gap_percentage>=0:
-                max_dist = refinements_res[1][1][0] + refinements_res[1][2][0]  # x res of center and x res of right
-                max_dist *= supercell_gap_percentage / 2  # divide by two since we summed two resolutions
-            vr_close_refinements(upsampled, center_refinement, center_refinement_xyz, refinements[1][2], refinements_xyz[1][2], max_dist)
-        if refinements[2][1] is not None:
-            if supercell_gap_percentage>=0:
-                max_dist = refinements_res[1][1][1] + refinements_res[2][1][1]  # y res of center and y res of top
-                max_dist *= supercell_gap_percentage / 2  # divide by two since we summed two resolutions
-            vr_close_refinements(upsampled, center_refinement, center_refinement_xyz, refinements[2][1], refinements_xyz[2][1], max_dist, horz=False)
-    # fill in the corners by getting a corner point from each refinement
-    # upper right of center refinement
-    # if the refinement is None then a TypeError will occur and just set a 'false' in the depth attribute
-    no_data = numpy.array([0,0,0], dtype=numpy.int32)
-    try:
-        ll = center_refinement[:, -1, -1]
-    except TypeError:
-        ll = no_data
-    try:
-        ul = refinements[2][1][:, 0, -1]
-    except TypeError:
-        ul = no_data
-    try:
-        lr = refinements[1][2][:, -1, 0]
-    except TypeError:
-        lr = no_data
-    try:
-        ur = refinements[2][2][:, 0, 0]
-    except TypeError:
-        ur = no_data
-    # rows=[c[0] for c in (ll, lr, ur, ul)]; cols = [c[1] for c in (ll, lr, ur, ul)]; print(refinements_xyz[1][1][:, -1, -1][0]), print(refinements_xyz[1][1][:, -1, -1][1]); print(rows, cols); print(upsampled[min(rows): max(rows)+1, min(cols):max(cols)+1])
-    vr_close_quad(upsampled, ul, ur, lr, ll)  # hole_at = 370867.325,4759142.356   numpy.abs(refinements_xyz[1][1][:, -1, -1][0]-370867.325)<32 and numpy.abs(refinements_xyz[1][1][:, -1, -1][1]-4759142.356)<32
-    # upper left of center refinement
-    try:
-        lr = center_refinement[:, -1, 0]
-    except TypeError:
-        lr = no_data
-    try:
-        ul = refinements[2][0][:, 0, -1]
-    except TypeError:
-        ul = no_data
-    try:
-        ur = refinements[2][1][:, 0, 0]
-    except TypeError:
-        ur = no_data
-    try:
-        ll = refinements[1][0][:, -1, -1]
-    except TypeError:
-        ll = no_data
-    vr_close_quad(upsampled, ul, ur, lr, ll)
+    # find a particular supercell by a corner position
+    # if _debug:
+    #     supersize = 130  # tolerance
+    #     px, py = 370738.52, 4758378.13  # corner position
+    #     for i, (x,y,z) in enumerate((center_refinement_xyz[:, -1, -1], center_refinement_xyz[:, -1, 0],
+    #                   center_refinement_xyz[:, 0, -1], center_refinement_xyz[:, 0, 0])):
+    #         if x > px-supersize and x < px+supersize and y > py-supersize and y < py+supersize:
+    #             pass  # add a breakpoint here
 
-    # fill in the interior of a refinement
-    vr_triangle_closing(upsampled, refinements[1][1])
+    max_dist = -1
+    if edges:
+        if center_refinement is not None:
+            if refinements[1][2] is not None:
+                if supercell_gap_percentage>=0:
+                    max_dist = refinements_res[1][1][0] + refinements_res[1][2][0]  # x res of center and x res of right
+                    max_dist *= supercell_gap_percentage / 2  # divide by two since we summed two resolutions
+                vr_close_refinements(upsampled, center_refinement, center_refinement_xyz, refinements[1][2], refinements_xyz[1][2], max_dist, interpfill)
+            if refinements[2][1] is not None:
+                if supercell_gap_percentage>=0:
+                    max_dist = refinements_res[1][1][1] + refinements_res[2][1][1]  # y res of center and y res of top
+                    max_dist *= supercell_gap_percentage / 2  # divide by two since we summed two resolutions
+                vr_close_refinements(upsampled, center_refinement, center_refinement_xyz, refinements[2][1], refinements_xyz[2][1], max_dist, interpfill, horz=False)
+
+    if corners:
+        # fill in the corners by getting a corner point from each refinement
+        # upper right of center refinement
+        # if the refinement is None then a TypeError will occur and just set a 'false' in the depth attribute
+        # @todo don't close corner if the data is too far from the supercell edge?
+        no_data = numpy.array([0,0,0], dtype=numpy.int32)
+        try:
+            ll = center_refinement[:, -1, -1]
+        except TypeError:
+            ll = no_data
+        try:
+            ul = refinements[2][1][:, 0, -1]
+        except TypeError:
+            ul = no_data
+        try:
+            lr = refinements[1][2][:, -1, 0]
+        except TypeError:
+            lr = no_data
+        try:
+            ur = refinements[2][2][:, 0, 0]
+        except TypeError:
+            ur = no_data
+        # rows=[c[0] for c in (ll, lr, ur, ul)]; cols = [c[1] for c in (ll, lr, ur, ul)]; print(refinements_xyz[1][1][:, -1, -1][0]), print(refinements_xyz[1][1][:, -1, -1][1]); print(rows, cols); print(upsampled[min(rows): max(rows)+1, min(cols):max(cols)+1])
+        vr_close_quad(upsampled, ul, ur, lr, ll, interpfill)  # hole_at = 370867.325,4759142.356   numpy.abs(refinements_xyz[1][1][:, -1, -1][0]-370867.325)<32 and numpy.abs(refinements_xyz[1][1][:, -1, -1][1]-4759142.356)<32
+        # upper left of center refinement
+        try:
+            lr = center_refinement[:, -1, 0]
+        except TypeError:
+            lr = no_data
+        try:
+            ul = refinements[2][0][:, 0, -1]
+        except TypeError:
+            ul = no_data
+        try:
+            ur = refinements[2][1][:, 0, 0]
+        except TypeError:
+            ur = no_data
+        try:
+            ll = refinements[1][0][:, -1, -1]
+        except TypeError:
+            ll = no_data
+        vr_close_quad(upsampled, ul, ur, lr, ll, interpfill)
+
+    if internal:
+        # fill in the interior of a refinement
+        vr_triangle_closing(upsampled, center_refinement, vrfill)
 
 def vr_to_sr_points(vr_path, output_path, output_res, driver='GTiff'):
     """ Create a single res raster from vr, only fills points that where vr existed (no interpolation etc).
@@ -923,7 +941,7 @@ def vr_to_sr_points(vr_path, output_path, output_res, driver='GTiff'):
     cnt, sr_ds = area_db.export(output_path, driver=driver, layers=[LayersEnum.ELEVATION])
     return sr_ds, area_db, cnt
 
-def vr_raster_mask(vr, points_ds, output_path, supercell_gap_percentage=-1):
+def vr_raster_mask(vr, points_ds, output_path, supercell_gap_percentage=-1, block_size=-1, use_nbs_codes=True):
     """ Given a VR and it's computed SR point raster, compute the coverage mask that describes where upsample-interpolation would be valid
 
     Parameters
@@ -941,10 +959,10 @@ def vr_raster_mask(vr, points_ds, output_path, supercell_gap_percentage=-1):
     max_cache = 100  # test using a 100 refinement cache
     points_band = points_ds.GetRasterBand(1)
     points_no_data = points_band.GetNoDataValue()
-    interp_ds = points_ds.GetDriver().CreateCopy(str(output_path), points_ds)
-    output_geotransform = interp_ds.GetGeoTransform()
+    mask_ds = points_ds.GetDriver().CreateCopy(str(output_path), points_ds)
+    output_geotransform = mask_ds.GetGeoTransform()
     # @todo make read work on blocks not just whole file
-    band = interp_ds.GetRasterBand(1)
+    band = mask_ds.GetRasterBand(1)
     output_matrix = band.ReadAsArray()
 
     good_refinements = numpy.argwhere(vr.get_valid_refinements())  # bool matrix of which refinements have data
@@ -957,44 +975,65 @@ def vr_raster_mask(vr, points_ds, output_path, supercell_gap_percentage=-1):
     neighbors_rcb = [[None, None, None], [None, None, None], [None, None, None]]
     neighbors_xyz = [[None, None, None], [None, None, None], [None, None, None]]
     neighbors_res = [[None, None, None], [None, None, None], [None, None, None]]
-    # iterate VR refinements filling in the mask cells
-    for ri, rj in tqdm(sorted_refinement_indices, mininterval=.75):
-        # get surrounding vr refinements as buffer
-        for i in (-1, 0, 1):
-            for j in (-1, 0, 1):
-                try:
-                    refinement_data_rcb, refinement_data_xyz, refinement_res = cached_refinements[(ri + i, rj + j)]
-                except KeyError:
-                    # read the refinement, convert to raster row/cols and cache the result
-                    refinement = vr.read_refinement(ri + i, rj + j)
-                    if refinement is not None:
-                        pts = refinement.get_xy_pts_matrix()
-                        r, c = inv_affine(pts[0], pts[1], *output_geotransform)
-                        bool_depth = numpy.ones(r.shape, dtype=numpy.int32)
-                        bool_depth[pts[4] == vr.fill_value] = 0
-                        refinement_data_rcb = numpy.array((r, c, bool_depth), dtype=numpy.int32)  # row col bool
-                        refinement_data_xyz = numpy.array((pts[0], pts[1], pts[4]), dtype=numpy.float64)
-                        refinement_res = refinement.cell_size_x, refinement.cell_size_y
+    if use_nbs_codes:
+        # since we want strict reason codes and the edges/corners may overwrite the internal vr upsample flag
+        # then we will do all the edges and corners in a first pass then the internal refinements in a second pass
+        passes = ((True, True, False), (False, False, True))
+    else:
+        # to speed operations for the survey outlines, we'll do all at once since we don't care why something is filled
+        passes = ((True, True, True))
+    for corners, edges, intra_refinment in passes:
+        block_row, block_col = -1, -1  # position of the currently held block from the rasters
+        # iterate VR refinements filling in the mask cells
+        for ri, rj in tqdm(sorted_refinement_indices, mininterval=.75):
+            # get surrounding vr refinements as buffer
+            for i in (-1, 0, 1):
+                for j in (-1, 0, 1):
+                    try:
+                        refinement_data_rcb, refinement_data_xyz, refinement_res = cached_refinements[(ri + i, rj + j)]
+                    except KeyError:
+                        # read the refinement, convert to raster row/cols and cache the result
+                        refinement = vr.read_refinement(ri + i, rj + j)
+                        if refinement is not None:
+                            pts = refinement.get_xy_pts_matrix()
+                            r, c = inv_affine(pts[0], pts[1], *output_geotransform)
+                            bool_depth = numpy.ones(r.shape, dtype=numpy.int32)
+                            bool_depth[pts[4] == vr.fill_value] = 0
+                            refinement_data_rcb = numpy.array((r, c, bool_depth), dtype=numpy.int32)  # row col bool
+                            refinement_data_xyz = numpy.array((pts[0], pts[1], pts[4]), dtype=numpy.float64)
+                            refinement_res = refinement.cell_size_x, refinement.cell_size_y
 
-                    else:
-                        refinement_data_xyz = None
-                        refinement_data_rcb = None
-                        refinement_res = None
-                    cached_refinements[(ri + i, rj + j)] = (refinement_data_rcb, refinement_data_xyz, refinement_res)
-                # adjust for the indices being +/- 1 to 0 thru 2 for indexing, so i+1, j+1
-                neighbors_rcb[i+1][j+1] = refinement_data_rcb
-                neighbors_xyz[i+1][j+1] = refinement_data_xyz
-                neighbors_res[i+1][j+1] = refinement_res
-        #   Get the output tif in that same area
-        #   -- phase one just grab refinements area,
-        #   -- phase two consider a second larger cache area that the calculation goes into and that larger cache writes to tif as needed
-        # @todo - read/write as blocks but testing by processing the whole VR area
-        vr_close_neighbors(output_matrix, neighbors_rcb, neighbors_xyz, neighbors_res, supercell_gap_percentage=supercell_gap_percentage)
-        while len(cached_refinements) > max_cache:
-            cached_refinements.popitem(last=False)  # get rid of the oldest cached item, False makes it FIFO
+                        else:
+                            refinement_data_xyz = None
+                            refinement_data_rcb = None
+                            refinement_res = None
+                        cached_refinements[(ri + i, rj + j)] = (refinement_data_rcb, refinement_data_xyz, refinement_res)
+                    # adjust for the indices being +/- 1 to 0 thru 2 for indexing, so i+1, j+1
+                    neighbors_rcb[i+1][j+1] = refinement_data_rcb
+                    neighbors_xyz[i+1][j+1] = refinement_data_xyz
+                    neighbors_res[i+1][j+1] = refinement_res
+            #   Get the output tif in that same area
+            #   -- phase one just grab refinements area,
+            #   -- phase two consider a second larger cache area that the calculation goes into and that larger cache writes to tif as needed
+            # @todo - read/write as blocks but testing by processing the whole VR area
+            # if block_size > 0:
+
+            vr_close_neighbors(output_matrix, neighbors_rcb, neighbors_xyz, neighbors_res,
+                               supercell_gap_percentage=supercell_gap_percentage, corners=corners, edges=edges, internal=intra_refinment)
+            if block_size > 0:
+                band.WriteArray(output_matrix)
+            while len(cached_refinements) > max_cache:
+                cached_refinements.popitem(last=False)  # get rid of the oldest cached item, False makes it FIFO
+    if use_nbs_codes:  # write the point posistions as 1 since the rest are 2=upsampled 3=interpolated (gaps between refinements)
+        points_array = points_band.ReadAsArray()
+        if numpy.isnan(points_no_data):
+            point_indices = numpy.nonzero(~numpy.isnan(points_array))
+        else:
+            point_indices = numpy.nonzero(points_array != points_no_data)
+        output_matrix[point_indices] = 1
     band.WriteArray(output_matrix)
     band = None
-    return interp_ds
+    return mask_ds
 
 
 def vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res, supercell_gap_percentage=-1):
@@ -1169,6 +1208,7 @@ def upsample_vr(path_to_vr, output_path, output_res):
     interp_ds = interpolate_raster(vr, points_ds, mask_ds, output_path)
     if not _debug:
          del mask_ds
+         del points_ds
          os.remove(mask_path)
          os.remove(points_path)
     return interp_ds
