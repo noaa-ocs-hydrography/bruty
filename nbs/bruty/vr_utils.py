@@ -15,7 +15,7 @@ import rasterio
 
 from HSTB.drivers import bag
 from nbs.bruty import morton, world_raster_database
-from nbs.bruty.utils import tqdm
+from nbs.bruty.utils import tqdm, iterate_gdal_image
 from nbs.bruty.raster_data import affine, inv_affine, affine_center, LayersEnum
 
 _debug = False
@@ -963,7 +963,8 @@ def vr_raster_mask(vr, points_ds, output_path, supercell_gap_percentage=-1, bloc
     output_geotransform = mask_ds.GetGeoTransform()
     # @todo make read work on blocks not just whole file
     band = mask_ds.GetRasterBand(1)
-    output_matrix = band.ReadAsArray()
+    if block_size < 0:
+        block_size = max(mask_ds.RasterXSize, mask_ds.RasterYSize)
 
     good_refinements = numpy.argwhere(vr.get_valid_refinements())  # bool matrix of which refinements have data
     mort = morton.interleave2d_64(good_refinements.T)
@@ -981,16 +982,17 @@ def vr_raster_mask(vr, points_ds, output_path, supercell_gap_percentage=-1, bloc
         passes = ((True, True, False), (False, False, True))
     else:
         # to speed operations for the survey outlines, we'll do all at once since we don't care why something is filled
-        passes = ((True, True, True))
+        passes = [(True, True, True)]
+    cached_row, cached_col = -1, -1  # position of the currently held cache block from the mask raster
     for corners, edges, intra_refinment in passes:
-        block_row, block_col = -1, -1  # position of the currently held block from the rasters
         # iterate VR refinements filling in the mask cells
         for ri, rj in tqdm(sorted_refinement_indices, mininterval=.75):
             # get surrounding vr refinements as buffer
+            index_ranges = numpy.zeros((3, 3, 2, 2), dtype=numpy.int32)
             for i in (-1, 0, 1):
                 for j in (-1, 0, 1):
                     try:
-                        refinement_data_rcb, refinement_data_xyz, refinement_res = cached_refinements[(ri + i, rj + j)]
+                        refinement_data_rcb, refinement_data_xyz, refinement_res, refinement_index_range = cached_refinements[(ri + i, rj + j)]
                     except KeyError:
                         # read the refinement, convert to raster row/cols and cache the result
                         refinement = vr.read_refinement(ri + i, rj + j)
@@ -1002,41 +1004,87 @@ def vr_raster_mask(vr, points_ds, output_path, supercell_gap_percentage=-1, bloc
                             refinement_data_rcb = numpy.array((r, c, bool_depth), dtype=numpy.int32)  # row col bool
                             refinement_data_xyz = numpy.array((pts[0], pts[1], pts[4]), dtype=numpy.float64)
                             refinement_res = refinement.cell_size_x, refinement.cell_size_y
+                            refinement_index_range = numpy.array([[refinement_data_rcb[0].min(), refinement_data_rcb[0].max()],
+                                                                 [refinement_data_rcb[1].min(), refinement_data_rcb[1].max()]])
 
                         else:
                             refinement_data_xyz = None
                             refinement_data_rcb = None
                             refinement_res = None
-                        cached_refinements[(ri + i, rj + j)] = (refinement_data_rcb, refinement_data_xyz, refinement_res)
+                            refinement_index_range = numpy.array([[-1, -1], [-1, -1]])
+                        cached_refinements[(ri + i, rj + j)] = (refinement_data_rcb, refinement_data_xyz, refinement_res, refinement_index_range)
                     # adjust for the indices being +/- 1 to 0 thru 2 for indexing, so i+1, j+1
                     neighbors_rcb[i+1][j+1] = refinement_data_rcb
                     neighbors_xyz[i+1][j+1] = refinement_data_xyz
                     neighbors_res[i+1][j+1] = refinement_res
+                    index_ranges[i+1, j+1] = refinement_index_range  # track the indices so we can tell if the cache is valid
             #   Get the output tif in that same area
             #   -- phase one just grab refinements area,
             #   -- phase two consider a second larger cache area that the calculation goes into and that larger cache writes to tif as needed
             # @todo - read/write as blocks but testing by processing the whole VR area
-            # if block_size > 0:
-
-            vr_close_neighbors(output_matrix, neighbors_rcb, neighbors_xyz, neighbors_res,
+            # if the block size (cache) is big enough then we won't need to read from the data file more than once
+            rows = index_ranges[:,:,0]
+            min_row = int(rows[rows>=0].min())
+            max_row = int(rows[rows>=0].max())
+            cols = index_ranges[:,:,1]
+            min_col = int(cols[cols>=0].min())
+            max_col = int(cols[cols>=0].max())
+            min_row_ok = min_row >= cached_row and min_row < cached_row + block_size
+            max_row_ok = max_row >= cached_row and max_row < cached_row + block_size
+            min_col_ok = min_col >= cached_col and min_col < cached_col + block_size
+            max_col_ok = max_col >= cached_col and max_col < cached_col + block_size
+            cache_ok = min_col_ok and min_row_ok and max_col_ok and max_row_ok
+            if cached_row < 0 or not cache_ok:
+                if cached_row >= 0:  # write the current cache to the file before moving the cache location
+                    band.WriteArray(output_matrix, cached_col, cached_row)
+                # reset the cache row and col to a new location and revise the block size if it's too small
+                if max_row-min_row >= block_size:
+                    block_size = max_row - min_row + 1 
+                if max_col - min_col >= block_size:
+                    block_size = max_col - min_col + 1
+                # set the cache position to the min row/col and then offset by half of whatever extra cells would be read based on block size
+                # also set it back from the edge, no reason to read past the end of the raser
+                # and make sure the cache index is >= 0
+                cached_row = max(0, min(mask_ds.RasterYSize-block_size, min_row - int(((block_size - (max_row - min_row + 1)) / 2))))
+                cached_col = max(0, min(mask_ds.RasterXSize-block_size, min_col - int(((block_size - (max_col - min_col + 1)) / 2))))
+                # read the new data
+                output_matrix = band.ReadAsArray(cached_col, cached_row, block_size, block_size)
+            # adjust the neighbors rows and cols to match the output_matrix based on the cache position
+            # if the block size is big enough then the cache starts at zero and we don't need to adjust the row/col of the refinements
+            if cached_row > 0 or cached_col > 0:
+                revised_neighbors_rcb = [[None, None, None], [None, None, None], [None, None, None]]
+                adjustment = numpy.array([[[cached_row, cached_col, 0]]], dtype=numpy.int32).T
+                for i in (-1, 0, 1):
+                    for j in (-1, 0, 1):
+                        if neighbors_rcb[i+1][j+1] is not None:
+                            revised_neighbors_rcb[i+1][j+1] = neighbors_rcb[i+1][j+1] - adjustment
+            else:
+                revised_neighbors_rcb = neighbors_rcb
+            vr_close_neighbors(output_matrix, revised_neighbors_rcb, neighbors_xyz, neighbors_res,
                                supercell_gap_percentage=supercell_gap_percentage, corners=corners, edges=edges, internal=intra_refinment)
-            if block_size > 0:
-                band.WriteArray(output_matrix)
             while len(cached_refinements) > max_cache:
                 cached_refinements.popitem(last=False)  # get rid of the oldest cached item, False makes it FIFO
-    if use_nbs_codes:  # write the point posistions as 1 since the rest are 2=upsampled 3=interpolated (gaps between refinements)
-        points_array = points_band.ReadAsArray()
-        if numpy.isnan(points_no_data):
-            point_indices = numpy.nonzero(~numpy.isnan(points_array))
-        else:
-            point_indices = numpy.nonzero(points_array != points_no_data)
-        output_matrix[point_indices] = 1
-    band.WriteArray(output_matrix)
+        if cached_row >= 0:  # write any remaining data to the file
+            band.WriteArray(output_matrix, cached_col, cached_row)
+    if use_nbs_codes:
+        # write the point posistions as 1 since the rest are 2=upsampled 3=interpolated (gaps between refinements)
+        for ic, ir, nodata, pts_bands in iterate_gdal_image(points_ds, min_block_size=block_size, max_block_size=block_size):
+            points_array = pts_bands[0]
+            # get the matching portion of the mask since mask and points must be same shapes
+            output_matrix = band.ReadAsArray(ic, ir, points_array.shape[1], points_array.shape[0])
+            # figure out where the points are
+            if numpy.isnan(nodata):
+                point_indices = numpy.nonzero(~numpy.isnan(points_array))
+            else:
+                point_indices = numpy.nonzero(points_array != nodata)
+            # set point positions to mask of 1
+            output_matrix[point_indices] = 1
+            band.WriteArray(output_matrix, ic, ir)  # push updated data back into file
     band = None
     return mask_ds
 
 
-def vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res, supercell_gap_percentage=-1):
+def vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res, supercell_gap_percentage=-1, block_size=-1, nbs_mask=True):
     """ Given an input VR file path, create two output rasters.
     One contains points and one contains a mask of where upsample-interpolation would be appropriate.
 
@@ -1055,7 +1103,8 @@ def vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res, superc
     """
     vr = bag.VRBag(path_to_vr, mode='r')
     points_ds, area_db, cnt = vr_to_sr_points(path_to_vr, points_path, output_res)
-    mask_ds = vr_raster_mask(vr, points_ds, mask_path, supercell_gap_percentage=supercell_gap_percentage)
+    mask_ds = vr_raster_mask(vr, points_ds, mask_path, supercell_gap_percentage=supercell_gap_percentage,
+                             block_size=block_size, use_nbs_codes=nbs_mask)
     return vr, points_ds, mask_ds
 
 
@@ -1181,7 +1230,7 @@ def interpolate_raster(vr, points_ds, mask_ds, output_path, use_blocks=True, nod
     mask_ds = None
     return interp_ds
 
-def upsample_vr(path_to_vr, output_path, output_res):
+def upsample_vr(path_to_vr, output_path, output_res, block_size=-1):
     """ Use the world_raster_database to create an output 'points' tif of the correct resolution that covers the VR extents.
     Make a copy of the tif which will hold a mask of which cells should be filled using the VR closing functions from vr_utils.
     Then run scipy.interpolate.griddata using linear (cublic makes weird peaks) on the original output 'points' tif.
@@ -1203,7 +1252,7 @@ def upsample_vr(path_to_vr, output_path, output_res):
     # output_path = pathlib.Path(output_path)
     mask_path = pathlib.Path(output_path).with_suffix(".mask.tif")
     points_path = pathlib.Path(output_path).with_suffix(".points.tif")
-    vr, points_ds, mask_ds = vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res, supercell_gap_percentage=1.99)
+    vr, points_ds, mask_ds = vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res, supercell_gap_percentage=1.99, block_size=block_size)
     # can we write directly into the points_ds instead of copying?
     interp_ds = interpolate_raster(vr, points_ds, mask_ds, output_path)
     if not _debug:
