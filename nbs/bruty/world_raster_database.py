@@ -419,6 +419,7 @@ class WorldDatabase(VABC):
         tile_list = numpy.unique(numpy.array((txs, tys)).T, axis=0)
         # itererate each tile that was found to have data
         # @todo figure out the contributor - should be the unique id from the database of surveys
+        # @FIXME - confirm that points outside bounds (less than lower left and greater than upper right) don't crash this
         for i_tile, (tx, ty) in enumerate(tile_list):
             if _debug:
                 print("debug skipping tiles")
@@ -497,11 +498,11 @@ class WorldDatabase(VABC):
         else:
             return 512, 512
 
-    def insert_survey_vr(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE):
+    def insert_survey_vr(self, vr, survey_score=100, flag=0, override_epsg=NO_OVERRIDE):
         """
         Parameters
         ----------
-        path_to_survey_data
+        vr
         survey_score
         flag
 
@@ -509,7 +510,8 @@ class WorldDatabase(VABC):
         -------
 
         """
-        vr = bag.VRBag(path_to_survey_data, mode='r')
+        if not isinstance(vr, bag.VRBag):
+            vr = bag.VRBag(vr, mode='r')
         refinement_list = numpy.argwhere(vr.get_valid_refinements())
         # in order to speed up the vr processing, which would have narrow strips being processed
         # use a morton ordering on the tile indices so they are more closely processed in geolocation
@@ -570,7 +572,8 @@ class WorldDatabase(VABC):
             # dump the accumulated arrays to the database if they are about to overflow the accumulation arrays
             if last_index + len(x) > max_len:
                 self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
-                                                      uncertainty_accum[:last_index], scores_accum[:last_index], flags_accum[:last_index])), path_to_survey_data, accumulation_db=storage_db)
+                                                      uncertainty_accum[:last_index], scores_accum[:last_index], flags_accum[:last_index])),
+                                         vr.filename, accumulation_db=storage_db)
                 self.next_contributor -= 1
                 last_index = 0
             # append the new data to the end of the accumulation arrays
@@ -585,7 +588,8 @@ class WorldDatabase(VABC):
 
         if last_index > 0:
             self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
-                                                  uncertainty_accum[:last_index], scores_accum[:last_index], flags_accum[:last_index])), path_to_survey_data, accumulation_db=storage_db)
+                                                  uncertainty_accum[:last_index], scores_accum[:last_index], flags_accum[:last_index])),
+                                     vr.filename, accumulation_db=storage_db)
             self.next_contributor -= 1
 
         self.next_contributor += 1
@@ -886,6 +890,8 @@ class CustomArea(WorldDatabase):
         shape = max(shape_x, shape_y)
         tiles = shape/512  # this should result in tiles max sizes between 512 and 1024 pixels
         zoom = int(numpy.log2(tiles))
+        if zoom < 0:
+            zoom = 0
         self.res_x = res_x
         self.res_y = res_y
         super().__init__(CustomBackend(epsg, res_x, res_y, min_x, min_y, max_x, max_y, AccumulationHistory, DiskHistory, TiffStorage, storage_directory, zoom_level=zoom))

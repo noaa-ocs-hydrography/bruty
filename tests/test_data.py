@@ -12,6 +12,7 @@ def make_clean_dir(name):
     use_dir = data_dir.joinpath(name)
     if os.path.exists(use_dir):
         shutil.rmtree(use_dir, onerror=onerr)
+    os.makedirs(use_dir)
     return use_dir
 
 os.makedirs(data_dir, exist_ok=True)
