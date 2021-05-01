@@ -52,6 +52,21 @@ if _debug or not has_numba:  # turn off jit --
 
 
 def ellipse_mask(r, c):
+    """ Create an elliptical mask instead of the diamond that would happen from the normal scipy functions
+
+    Parameters
+    ----------
+    r
+        number of rows to use
+    c
+        number of columns to use
+
+    Returns
+    -------
+    numpy.array
+        boolean array in the shape determined by r,c parameters
+
+    """
     center = numpy.array(((r - 1) / 2, (c - 1) / 2))
     accept_radius = 1.0
     # if the grid is even the center falls in between cells which would make the last row/column have all False
@@ -72,6 +87,24 @@ def ellipse_mask(r, c):
 
 @jit(nopython=True)
 def draw_triangle(matrix, pts, fill):
+    """ Fill a triangle area of an array with a given value
+
+    Parameters
+    ----------
+    matrix : numpy.array
+        The array to fill
+    pts : array, list
+        three points [(r,c,...), (r,c,...), (r,c,...)]
+        where first index is rows and the second index is columns, additional dimensions would be ignored
+    fill : number
+        value to put into the elements that the triangle contains
+
+    Returns
+    -------
+    None
+        The matrix is filled in place
+
+    """
     # @todo change algorithm to standard or Bresenham see--
     #   http://www.sunshine2k.de/coding/java/TriangleRasterization/TriangleRasterization.html
     # pts = numpy.array(((ai, aj), (bi, bj), (ci, cj)))
@@ -103,7 +136,36 @@ def draw_triangle(matrix, pts, fill):
 
 
 @jit(nopython=True)
-def vr_close_quad(matrix, ul, ur, lr, ll, fill):  # pass in points in connection order
+def vr_close_quad(matrix, ul, ur, lr, ll, fill):
+    """ Fill the supplied matrix in place with the given value in the area covered by the points supplied.
+
+    Pass in points in connection order, but it is not important if they actually start at upper left.
+    The points specify row, col and a boolean of if the point is valid.
+    If all four points are valid then the quadrangle will be filled.
+    If only three are valid then a triangle will be filled.
+    If two or one are valid then no action is taken.
+    @TODO should we draw a line or point in the 2, 1 cases?
+
+    Parameters
+    ----------
+    matrix : numpy.array
+    ul : array, list
+        a quadrangle point, just make sure they are in connection order
+    ur : array, list
+        a quadrangle point, just make sure they are in connection order
+    lr : array, list
+        a quadrangle point, just make sure they are in connection order
+    ll : array, list
+        a quadrangle point, just make sure they are in connection order
+    fill : number
+        value to use when filling the matrix
+
+    Returns
+    -------
+    None
+        matrix is updated in place
+
+    """
     # fixme -- allow for lines to fill?  if two points are there then make line between since triangle doesn't work
     # numba doesn't like indices that are tuples like -- draw_triangle(matrix, pts[(0,1,3)])
     # also doesn't like making arrays from arrays it looks like -- numpy.array([ul, ll, ur], dtype=numpy.int32)
@@ -139,7 +201,43 @@ def vr_close_quad(matrix, ul, ur, lr, ll, fill):  # pass in points in connection
 
 
 @jit(nopython=True)
-def vr_close_refinements(upsampled, left_or_top_rcb, left_or_top_xyz, right_or_bottom_rcb, right_or_bottom_xyz, max_dist, fill, horz=True):
+def vr_close_refinements(matrix, left_or_top_rcb, left_or_top_xyz, right_or_bottom_rcb, right_or_bottom_xyz, max_dist, fill, horz=True):
+    """ Close the area between two refinements.
+
+    Since refinements don't start on the edge of a supercell there is potentially a gap in between refinements.
+    This function walks along the edge of two neighboring refinements and fills the gap that could occur between them.
+
+
+    Parameters
+    ----------
+    matrix : numpy.array
+        data to operate on
+    left_or_top_rcb : numpy.array
+        a rectangular array of row/column/boolean
+        which defines the mapping from refinement row/columns to the output matrix row/columns
+    left_or_top_xyz : numpy.array
+        a rectangular array of x,y,z
+        which defines the mapping from refinement row/columns x,y,z of the projected space
+    right_or_bottom_rcb : numpy.array
+        a rectangular array of row/column/boolean
+        which defines the mapping from refinement row/columns to the output matrix row/columns
+    right_or_bottom_xyz : numpy.array
+        a rectangular array of x,y,z
+        which defines the mapping from refinement row/columns x,y,z of the projected space
+    max_dist : number
+        the distance in X (horizontal neighbors) or Y (vertical neighbors) to allow filling to take place.
+        If the adjacent rows/cols of the two refinements are too far away then no fill will take place
+    fill
+        value to place in the filled gap
+    horz
+        specifies if the refinements are vertical (north/south) or horizontal (east/west) neighbors
+
+    Returns
+    -------
+    None
+        Fille the matrix in place.
+
+    """
     # closes the gap between two refinements - have to specify if they are horizontal or vertical
     rb_index = 0
     lt_last = -1
@@ -147,7 +245,7 @@ def vr_close_refinements(upsampled, left_or_top_rcb, left_or_top_xyz, right_or_b
     lt_index = 0
 
     # get the x, y at the ends of the matrices, then difference them.
-    # If the difference is less than zero then the upsampled is going in the opposite convention than the bag
+    # If the difference is less than zero then the matrix is going in the opposite convention than the bag
     # so we need to flip the compare logic for walking along the gap between the two
     pos_rows = numpy.sign(right_or_bottom_rcb[0, -1, -1] - right_or_bottom_rcb[0, 0, 0])
     pos_cols = numpy.sign(right_or_bottom_rcb[1, -1, -1] - right_or_bottom_rcb[1, 0, 0])
@@ -204,7 +302,7 @@ def vr_close_refinements(upsampled, left_or_top_rcb, left_or_top_xyz, right_or_b
 
             # @todo check the x/y distance so we don't close over a long diagonal?  Think of a 32 ro 64m res in  a 64m supergrid against a 1m grid
             # make sure the quad goes in order around the outside - going diagonally around the outside will leave empty pixels
-            vr_close_quad(upsampled, (ri1, rj1, rd1), (ri2, rj2, rd2), (li2, lj2, ld2), (li1, lj1, ld1), fill)
+            vr_close_quad(matrix, (ri1, rj1, rd1), (ri2, rj2, rd2), (li2, lj2, ld2), (li1, lj1, ld1), fill)
             # @fixme -- I think we can move the indices twice,
             #   moving once duplicates a triangle
             #   -- can only break on the first loop in case there is one triangle left
@@ -231,23 +329,42 @@ def vr_close_refinements(upsampled, left_or_top_rcb, left_or_top_xyz, right_or_b
 
 
 @jit(nopython=True)
-def vr_triangle_closing(upsampled, mapping, fill):
-    pos_rows = numpy.sign(mapping[0, -1, -1] - mapping[0, 0, 0])
-    pos_cols = numpy.sign(mapping[1, -1, -1] - mapping[1, 0, 0])
+def vr_triangle_closing(matrix, refinement_rcb, fill):
+    """ Fill in the internal parts of a refinement retaining any holes caused by missing data but filling in spaces
+    between valid data in the matrix.
+
+    Parameters
+    ----------
+    matrix : numpy.array
+        data to operate on
+    refinement_rcb : numpy.array
+        a rectangular array of row/column/boolean
+        which defines the mapping from refinement row/columns to the output matrix row/columns
+    fill : number
+        value to fill the output matrix with
+
+    Returns
+    -------
+    None
+        modifies matrix in place
+
+    """
+    pos_rows = numpy.sign(refinement_rcb[0, -1, -1] - refinement_rcb[0, 0, 0])
+    pos_cols = numpy.sign(refinement_rcb[1, -1, -1] - refinement_rcb[1, 0, 0])
     if pos_rows == 0:  # this implies the whole bag fits in one cell, so either a low res output or a refinement with only one point
         pos_rows = -1  # this is the default read order used below
     if pos_cols == 0:
         pos_cols = 1
     # fixme -- this won't work on refinements of size 1
-    for r in range(mapping.shape[1] - 1):
-        for c in range(mapping.shape[2] - 1):
+    for r in range(refinement_rcb.shape[1] - 1):
+        for c in range(refinement_rcb.shape[2] - 1):
             # since tiffs are normally negative DY and bags are positive DY, we'll read assuming that and adjust if the tiff is +DY or -DX
-            i1, j1, d1 = mapping[:, r, c]
-            i, j, d = mapping[:, r + 1, c]
-            i3, j3, d3 = mapping[:, r, c + 1]
-            i2, j2, d2 = mapping[:, r + 1, c + 1]
+            i1, j1, d1 = refinement_rcb[:, r, c]
+            i, j, d = refinement_rcb[:, r + 1, c]
+            i3, j3, d3 = refinement_rcb[:, r, c + 1]
+            i2, j2, d2 = refinement_rcb[:, r + 1, c + 1]
             # does numba support swap commands?
-            if pos_rows == 1:  # upsampled is in same Y order as bag, so flip top/bottom rows in same col since we assumed opposite
+            if pos_rows == 1:  # matrix is in same Y order as bag, so flip top/bottom rows in same col since we assumed opposite
                 # switch i and i1
                 ti, tj, td = i, j, d
                 i, j, d = i1, j1, d1
@@ -265,28 +382,28 @@ def vr_triangle_closing(upsampled, mapping, fill):
                 i3, j3, d3 = ti, tj, td
 
             if d and d1 and d2 and d3:
-                upsampled[i:i3 + 1, j:j3 + 1] = fill
+                matrix[i:i3 + 1, j:j3 + 1] = fill
             elif d and d1 and d2:  # top left
                 for r_i in range(i, i1 + 1):
                     if i1 != i:  # avoid divide by zero - range is only one scan line
                         end_j = numpy.trunc(j2 - (j2 - j) * (r_i - i) / (i1 - i))
                     else:
                         end_j = j2
-                    upsampled[r_i, j:int(end_j) + 1] = fill
+                    matrix[r_i, j:int(end_j) + 1] = fill
             elif d and d1 and d3:  # bottom left
                 for r_i in range(i, i1 + 1):
                     if i1 != i:  # avoid divide by zero - range is only one scan line
                         end_j = numpy.trunc(j + (j3 - j) * (r_i - i) / (i1 - i))
                     else:
                         end_j = j3
-                    upsampled[r_i, j:int(end_j) + 1] = fill
+                    matrix[r_i, j:int(end_j) + 1] = fill
             elif d and d2 and d3:  # top right
                 for r_i in range(i, i3 + 1):
                     if i3 != i:  # avoid divide by zero - range is only one scan line
                         start_j = numpy.ceil(j + (j2 - j) * (r_i - i) / (i3 - i))
                     else:
                         start_j = j
-                    upsampled[r_i, int(start_j):j2 + 1] = fill
+                    matrix[r_i, int(start_j):j2 + 1] = fill
             elif d1 and d2 and d3:  # bottom right
                 for r_i in range(i2, i3 + 1):
                     if i3 != i2:  # avoid divide by zero - range is only one scan line
@@ -296,8 +413,42 @@ def vr_triangle_closing(upsampled, mapping, fill):
                     upsampled[r_i, int(start_j):j2 + 1] = fill
 
 
-def vr_close_neighbors(upsampled, refinements, refinements_xyz, refinements_res, supercell_gap_percentage=-1,
+def vr_close_neighbors(matrix, refinements, refinements_xyz, refinements_res, supercell_gap_percentage=-1,
                        edges=True, corners=True, internal=True, vrfill=2, interpfill=3):
+    """ This function is used to help convert a variable res bag to a single resolution matrix.
+    Given a 3x3 of refinements
+    (their row/col/bool mapping to the matrix space, their xyzs in their own projection and resolutions in that projection)
+    this function will fill the center refinement, fill the gaps between it and the refinement above and right of it and the top two corners.
+
+    Parameters
+    ----------
+    matrix : numpy.array
+        data to write the filled cells into
+    refinements : list of lists of numpy arrays
+        3x3 list of arrays of row,col,is_valid for each refinement where row, col are in the matrix address space
+    refinements_xyz
+        3x3 list of arrays of x,y,z for each refinement where x,y,z are in the projection of the VR bag
+    refinements_res
+        3x3 lists of tuples of res_x and res_y
+    supercell_gap_percentage
+        How wide of a gap to fill between refinements.  The multiplier is times the average of the two resolutions with gaps being filled.
+        Zero would never gaps and 2.0 would be the sum of the two refinements, so 4m and 8m refinements would fill a gap of 12m (2.0*6)
+    edges : boolean
+         determines if edge gaps should be filled
+    corners : boolean
+         determines if corner gaps should be filled
+    internal : boolean
+         determines if internal space of the center refinement should be filled.
+    vrfill : int
+        value to insert into matrix at positions being closed within the center refinement
+    interpfill : int
+        value to insert into matrix in the gaps between the center and upper and right refinements
+
+    Returns
+    -------
+    None
+        matrix is modified in place
+    """
     # numba wants integers for row column indices, so the refinements arrays are ints.
     # numba doesn't like structured arrays(?) so passing integers in refinements and floats in refinements_xyz
 
@@ -324,13 +475,13 @@ def vr_close_neighbors(upsampled, refinements, refinements_xyz, refinements_res,
                 if supercell_gap_percentage >= 0:
                     max_dist = refinements_res[1][1][0] + refinements_res[1][2][0]  # x res of center and x res of right
                     max_dist *= supercell_gap_percentage / 2  # divide by two since we summed two resolutions
-                vr_close_refinements(upsampled, center_refinement, center_refinement_xyz, refinements[1][2], refinements_xyz[1][2], max_dist,
+                vr_close_refinements(matrix, center_refinement, center_refinement_xyz, refinements[1][2], refinements_xyz[1][2], max_dist,
                                      interpfill)
             if refinements[2][1] is not None:
                 if supercell_gap_percentage >= 0:
                     max_dist = refinements_res[1][1][1] + refinements_res[2][1][1]  # y res of center and y res of top
                     max_dist *= supercell_gap_percentage / 2  # divide by two since we summed two resolutions
-                vr_close_refinements(upsampled, center_refinement, center_refinement_xyz, refinements[2][1], refinements_xyz[2][1], max_dist,
+                vr_close_refinements(matrix, center_refinement, center_refinement_xyz, refinements[2][1], refinements_xyz[2][1], max_dist,
                                      interpfill, horz=False)
 
     if corners:
@@ -356,7 +507,7 @@ def vr_close_neighbors(upsampled, refinements, refinements_xyz, refinements_res,
         except TypeError:
             ur = no_data
         # rows=[c[0] for c in (ll, lr, ur, ul)]; cols = [c[1] for c in (ll, lr, ur, ul)]; print(refinements_xyz[1][1][:, -1, -1][0]), print(refinements_xyz[1][1][:, -1, -1][1]); print(rows, cols); print(upsampled[min(rows): max(rows)+1, min(cols):max(cols)+1])
-        vr_close_quad(upsampled, ul, ur, lr, ll,
+        vr_close_quad(matrix, ul, ur, lr, ll,
                       interpfill)  # hole_at = 370867.325,4759142.356   numpy.abs(refinements_xyz[1][1][:, -1, -1][0]-370867.325)<32 and numpy.abs(refinements_xyz[1][1][:, -1, -1][1]-4759142.356)<32
         # upper left of center refinement
         try:
@@ -375,19 +526,32 @@ def vr_close_neighbors(upsampled, refinements, refinements_xyz, refinements_res,
             ll = refinements[1][0][:, -1, -1]
         except TypeError:
             ll = no_data
-        vr_close_quad(upsampled, ul, ur, lr, ll, interpfill)
+        vr_close_quad(matrix, ul, ur, lr, ll, interpfill)
 
     if internal:
         # fill in the interior of a refinement
-        vr_triangle_closing(upsampled, center_refinement, vrfill)
+        vr_triangle_closing(matrix, center_refinement, vrfill)
 
 
 def vr_to_sr_points(vr, output_path, output_res, driver='GTiff'):
     """ Create a single res raster from vr, only fills points that where vr existed (no interpolation etc).
 
+    Parameters
+    ----------
+    vr : str or VRBag
+        either the path to a VR bag file or an open instance of HSTB.drivers.bag.VRBag
+    output_path : str or pathlib.Path
+        location to store the single res gdal dataset
+    output_res : float
+        size of the output cells in the projection of the VRBag
+    driver : str
+        gdal driver name, defaults to 'GTiff'
+
     Returns
     -------
-    cnt, epsg
+    gdal.dataset, world_raster_database.CustomArea, int
+        Returns the single resolution dataset, the CustomArea object that was used to make a 'points only' tif and
+        the number of points that were inserted into the single res dataset
 
     """
     try:

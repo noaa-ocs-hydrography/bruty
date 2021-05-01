@@ -263,8 +263,7 @@ def test_close_gap():
 def test_vr_to_points():
     # make a VR that covers 48m x 48m to export at 1m.
     # Each supergrid refinement covers 24x24, so 2x2 super grids.
-    # Make the refinements roughly be 24m (one cell), 8m (3x3), 2m (12x12) and 1m (24x24)
-    # @todo consider adding the refinement insets from the corners
+    # Make the refinements roughly be 24m (per cell), 8m (3x3), 2m (12x12) and 1m (24x24)
     use_dir = make_clean_dir("vr_tests12")
     vr = bag.VRBag.new_bag(use_dir.joinpath("fake_vr.bag"), mode="w")
     srs = osr.SpatialReference()
@@ -331,6 +330,7 @@ def test_vr_to_points():
     assert numpy.count_nonzero(~numpy.isnan(data_ud[25:48, 25:48])) == 1  # 1x1 = 1 data points should be filled in the quadrant
     # make sure the data points are where they should be, 1m inset + 20m res
     assert data_ud[24+1+10, 24+1+10] == 1  # row/col 1 --> 24 plus 1m offset plus half 20m res --> 10
+
 
 def test_upsample():
     vr_path = data_dir.parent.joinpath("H-10771.bag")
