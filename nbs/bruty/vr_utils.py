@@ -413,7 +413,7 @@ def vr_triangle_closing(matrix, refinement_rcb, fill):
                     upsampled[r_i, int(start_j):j2 + 1] = fill
 
 
-def vr_close_neighbors(matrix, refinements, refinements_xyz, refinements_res, supercell_gap_percentage=-1,
+def vr_close_neighbors(matrix, refinements, refinements_xyz, refinements_res, supercell_gap_multiplier=-1,
                        edges=True, corners=True, internal=True, vrfill=2, interpfill=3):
     """ This function is used to help convert a variable res bag to a single resolution matrix.
     Given a 3x3 of refinements
@@ -430,7 +430,7 @@ def vr_close_neighbors(matrix, refinements, refinements_xyz, refinements_res, su
         3x3 list of arrays of x,y,z for each refinement where x,y,z are in the projection of the VR bag
     refinements_res
         3x3 lists of tuples of res_x and res_y
-    supercell_gap_percentage
+    supercell_gap_multiplier
         How wide of a gap to fill between refinements.  The multiplier is times the average of the two resolutions with gaps being filled.
         Zero would never gaps and 2.0 would be the sum of the two refinements, so 4m and 8m refinements would fill a gap of 12m (2.0*6)
     edges : boolean
@@ -472,15 +472,15 @@ def vr_close_neighbors(matrix, refinements, refinements_xyz, refinements_res, su
     if edges:
         if center_refinement is not None:
             if refinements[1][2] is not None:
-                if supercell_gap_percentage >= 0:
+                if supercell_gap_multiplier >= 0:
                     max_dist = refinements_res[1][1][0] + refinements_res[1][2][0]  # x res of center and x res of right
-                    max_dist *= supercell_gap_percentage / 2  # divide by two since we summed two resolutions
+                    max_dist *= supercell_gap_multiplier / 2  # divide by two since we summed two resolutions
                 vr_close_refinements(matrix, center_refinement, center_refinement_xyz, refinements[1][2], refinements_xyz[1][2], max_dist,
                                      interpfill)
             if refinements[2][1] is not None:
-                if supercell_gap_percentage >= 0:
+                if supercell_gap_multiplier >= 0:
                     max_dist = refinements_res[1][1][1] + refinements_res[2][1][1]  # y res of center and y res of top
-                    max_dist *= supercell_gap_percentage / 2  # divide by two since we summed two resolutions
+                    max_dist *= supercell_gap_multiplier / 2  # divide by two since we summed two resolutions
                 vr_close_refinements(matrix, center_refinement, center_refinement_xyz, refinements[2][1], refinements_xyz[2][1], max_dist,
                                      interpfill, horz=False)
 
@@ -577,19 +577,32 @@ def vr_to_sr_points(vr, output_path, output_res, driver='GTiff'):
     return sr_ds, area_db, cnt
 
 
-def vr_raster_mask(vr, points_ds, output_path, supercell_gap_percentage=-1, block_size=-1, use_nbs_codes=True):
-    """ Given a VR and it's computed SR point raster, compute the coverage mask that describes where upsample-interpolation would be valid
+def vr_raster_mask(vr, points_ds, output_path, supercell_gap_multiplier=-1, block_size=1024, use_nbs_codes=True):
+    """ Given a VR and it's computed SR point raster, compute the coverage mask that describes where upsample-interpolation would be valid.
 
     Parameters
     ----------
-    vr
-    sr_ds
+    vr : str or HSTB.drivers.bag.VRBag
+        full path to the VR file or an open HSTB.drivers.bag.VRBag instance
+    points_ds : gdal.dataset
+        an open dataset of a single resolution raster which will be used to make a matching size/resolution mask dataset
     output_path
-    output_res
+        location to store mask dataset
+    supercell_gap_multiplier
+        How wide of a gap to fill between refinements.  The multiplier is times the average of the two resolutions with gaps being filled.
+        Zero would never gaps and 2.0 would be the sum of the two refinements, so 4m and 8m refinements would fill a gap of 12m (2.0*6)
+    block_size
+        specify to control memory usage, less than zero will process entire dataset in memory.
+        Greater than zero specifies the size of the numpy array to read/write from/to datasets.
+    use_nbs_codes
+        True creates a strict mask where 3 = interpolated gaps, 2 = upsampled intra-refinement locations and 1 = original point locations.
 
+        False give the same raster coverage result but the values (1,2) may not be correct exact due to being overwritten when processing
+        neighboring refinements.
     Returns
     -------
     dataset
+        an open gdal.dataset with the mask data which was saved to output_path
 
     """
     max_cache = 100  # test using a 100 refinement cache
@@ -694,7 +707,7 @@ def vr_raster_mask(vr, points_ds, output_path, supercell_gap_percentage=-1, bloc
             else:
                 revised_neighbors_rcb = neighbors_rcb
             vr_close_neighbors(output_matrix, revised_neighbors_rcb, neighbors_xyz, neighbors_res,
-                               supercell_gap_percentage=supercell_gap_percentage, corners=corners, edges=edges, internal=intra_refinment)
+                               supercell_gap_multiplier=supercell_gap_multiplier, corners=corners, edges=edges, internal=intra_refinment)
             while len(cached_refinements) > max_cache:
                 cached_refinements.popitem(last=False)  # get rid of the oldest cached item, False makes it FIFO
         if cached_row >= 0:  # write any remaining data to the file
@@ -717,41 +730,81 @@ def vr_raster_mask(vr, points_ds, output_path, supercell_gap_percentage=-1, bloc
     return mask_ds
 
 
-def vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res, supercell_gap_percentage=-1, block_size=-1, nbs_mask=True):
+def vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res, supercell_gap_multiplier=-1, block_size=1024, nbs_mask=True):
     """ Given an input VR file path, create two output rasters.
-    One contains points and one contains a mask of where upsample-interpolation would be appropriate.
+    One contains original point locations and one contains a mask of where upsample-interpolation would be appropriate.
 
     Parameters
     ----------
-    path_to_vr
+    path_to_vr : str
+        path to the VR file
     points_path
+        output location of the points raster
     mask_path
+        output location of the mask raster
     output_res
+        resolution in the VR projection of the resulting single resolution datasets
+    supercell_gap_multiplier
+        How wide of a gap to fill between refinements.  The multiplier is times the average of the two resolutions with gaps being filled.
+        Zero would never gaps and 2.0 would be the sum of the two refinements, so 4m and 8m refinements would fill a gap of 12m (2.0*6)
+    block_size
+        specify to control memory usage, less than zero will process entire dataset in memory.
+        Greater than zero specifies the size of the numpy array to read/write from/to datasets.
+    nbs_mask
+        True creates a strict mask where 3 = interpolated gaps, 2 = upsampled intra-refinement locations and 1 = original point locations.
+
+        False give the same raster coverage result but the values (1,2) may not be correct exact due to being overwritten when processing
+        neighboring refinements.
 
     Returns
     -------
-    tuple(dataset, dataset)
-        points gdal dataset and mask gdal dataset which are stored on disk at the supplied paths.
+    tuple(vr, dataset, dataset)
+        HSTB.drivers.bag.VRBag instance, points gdal dataset and mask gdal dataset which are stored on disk at the supplied paths.
 
     """
     vr = bag.VRBag(path_to_vr, mode='r')
     points_ds, area_db, cnt = vr_to_sr_points(path_to_vr, points_path, output_res)
-    mask_ds = vr_raster_mask(vr, points_ds, mask_path, supercell_gap_percentage=supercell_gap_percentage,
+    mask_ds = vr_raster_mask(vr, points_ds, mask_path, supercell_gap_multiplier=supercell_gap_multiplier,
                              block_size=block_size, use_nbs_codes=nbs_mask)
     return vr, points_ds, mask_ds
 
 
 def interpolate_raster(vr, points_ds, mask_ds, output_path, use_blocks=True, nodata=numpy.nan, method='linear'):
-    """ Interpolation scheme
-    Given the POINT version of the TIFF with only data at precise points of VR BAG (old version of function would create POINT tiff)
-    Load in blocks with enough buffer around the outside (nominally 3x3 supergrids with 1 supergrid buffer)
-        run scipy.interpolate.griddata on the block (use linear as cubic causes odd peaks and valleys)
-        copy the interior (3x3 supergrids without the buffer area) into the output TIFF
+    """ Create a interpolated single resolution raster representing the area covered by the supplied VR bag file.
+    Data inside a refinement will be 'upsampled' between any data cells that have valid data.
+    Data between refinements will be 'interpolated' if the gap is less than the sum of the reolutions of the two refinements.
 
-    Given the mask version of the TIFF  (old function used to Create a 'min')
-    Load blocks of data and copy any NaNs from the MIN (cell based coverage) into the INTERP grid to remove erroneous interpolations,
-    this essentially limits coverage to VR cells that were filled
+    Parameters
+    ----------
+    vr
+        An open HSTB.drivers.bag.VRBag instance
+    points_ds
+        open gdal dataset of the points raster made from the vr
+    mask_ds
+        open gdal dataset of the mask raster made from the vr and points
+    output_path
+        path to store the resulting interpolated single resolution dataset
+    use_blocks
+        Reduce memory usage by reading/writing blocks from the gdal.dataset rather than loading the entire raster into memory
+    nodata
+        Value to write into the output file as the nodata value
+    method
+        scipy.interpolate method to use when processing the datasets.
+    Returns
+    -------
+    dataset
+        An open gdal.dataset object of the file saved at output_path with the interpolated data
     """
+    # Interpolation scheme
+    # Given the POINT version of the TIFF with only data at precise points of VR BAG (old version of function would create POINT tiff)
+    # Load in blocks with enough buffer around the outside (nominally 3x3 supergrids with 1 supergrid buffer)
+    #     run scipy.interpolate.griddata on the block (use linear as cubic causes odd peaks and valleys)
+    #     copy the interior (3x3 supergrids without the buffer area) into the output TIFF
+    #
+    # Given the mask version of the TIFF  (old function used to Create a 'min')
+    # Load blocks of data and copy any NaNs from the MIN (cell based coverage) into the INTERP grid to remove erroneous interpolations,
+    # this essentially limits coverage to VR cells that were filled
+
     dx = vr.cell_size_x
     dy = vr.cell_size_y
     cell_szx = numpy.abs(points_ds.GetGeoTransform()[1])
@@ -864,7 +917,7 @@ def interpolate_raster(vr, points_ds, mask_ds, output_path, use_blocks=True, nod
     return interp_ds
 
 
-def upsample_vr(path_to_vr, output_path, output_res, block_size=-1):
+def upsample_vr(path_to_vr, output_path, output_res, block_size=1024, keep_mask=False):
     """ Use the world_raster_database to create an output 'points' tif of the correct resolution that covers the VR extents.
     Make a copy of the tif which will hold a mask of which cells should be filled using the VR closing functions from vr_utils.
     Then run scipy.interpolate.griddata using linear (cublic makes weird peaks) on the original output 'points' tif.
@@ -878,21 +931,28 @@ def upsample_vr(path_to_vr, output_path, output_res, block_size=-1):
         output location for a resampled + filled raster dataset
     output_res
         output resolution in the projection the vr is in
-
+    block_size
+        numpy array size to use when reading/writing to gdal datasets, less than zero will load entire dataset to memory
+    keep_mask
+        True will retain the mask raster file on disk when finished
+        False will remove the mask raster from disk
     Returns
     -------
+    dataset
+        An open gdal.dataset object of the file saved at output_path with the interpolated data
 
     """
     # output_path = pathlib.Path(output_path)
     mask_path = pathlib.Path(output_path).with_suffix(".mask.tif")
     points_path = pathlib.Path(output_path).with_suffix(".points.tif")
-    vr, points_ds, mask_ds = vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res, supercell_gap_percentage=1.99,
+    vr, points_ds, mask_ds = vr_to_points_and_mask(path_to_vr, points_path, mask_path, output_res, supercell_gap_multiplier=1.99,
                                                    block_size=block_size)
     # can we write directly into the points_ds instead of copying?
     interp_ds = interpolate_raster(vr, points_ds, mask_ds, output_path)
     if not _debug:
-        del mask_ds
+        if not keep_mask:
+            del mask_ds
+            os.remove(mask_path)
         del points_ds
-        os.remove(mask_path)
         os.remove(points_path)
     return interp_ds
