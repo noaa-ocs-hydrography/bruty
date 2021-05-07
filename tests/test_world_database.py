@@ -122,6 +122,20 @@ def test_sortkey_bounds():
     assert (numpy.isnan(output_data[2, :, 4])).all()
 
 
+def test_db_json(db):
+    use_dir = make_clean_dir("json_db")
+    # @todo parameterize this
+    # db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+    db = CustomArea(None, 395813.20000000007, 3350563.9800000004, 406818.20000000007, 3343878.9800000004, 4, 4, use_dir)
+    db2 = WorldDatabase.open(use_dir)
+    assert db2.db.storage_class.__name__ == db.db.storage_class.__name__
+    assert db2.db.history_class.__name__ == db.db.history_class.__name__
+    assert db2.db.data_class.__name__ == db.db.data_class.__name__
+    assert db2.db.tile_scheme.min_x == db.db.tile_scheme.min_x
+    assert db2.db.tile_scheme.max_y == db.db.tile_scheme.max_y
+    assert db2.db.tile_scheme.epsg == db.db.tile_scheme.epsg
+    assert db2.db.tile_scheme.zoom == db.db.tile_scheme.zoom
+
 def test_make_db():
     use_dir = simple_utm_dir
     if os.path.exists(use_dir):

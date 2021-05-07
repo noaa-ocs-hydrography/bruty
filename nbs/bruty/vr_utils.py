@@ -13,7 +13,6 @@ from skimage.draw import polygon
 
 try:
     from numba import jit
-
     has_numba = True
 except ModuleNotFoundError:
     has_numba = False

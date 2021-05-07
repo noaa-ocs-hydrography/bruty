@@ -9,13 +9,47 @@ class TilingScheme(VABC):
     Also it will return the boundaries of a tile given the index.
     """
 
-    def __init__(self, min_x=-180, min_y=-90.0, max_x=180.0, max_y=90.0, zoom=13):
+    def __init__(self, min_x=-180, min_y=-90.0, max_x=180.0, max_y=90.0, zoom=13, epsg=None):
         self._version = 1
+        self._loaded_from_version = None
         self.min_y = min(min_y, max_y)
         self.max_y = max(min_y, max_y)
         self.min_x = min(min_x, max_x)
         self.max_x = max(min_x, max_x)
         self.zoom = zoom
+        self.epsg = epsg
+
+    def for_json(self):
+        json_dict = {'class': self.__class__.__name__,
+                     'module': self.__class__.__module__,
+                     'version': self._version,
+                     'min_x': self.min_x,
+                     'max_x': self.max_x,
+                     'min_y': self.min_y,
+                     'max_y': self.max_y,
+                     'zoom': self.zoom,
+                     'epsg': self.epsg,
+                     }
+        return json_dict
+
+    @staticmethod
+    def create_from_json(json_dict):
+        cls = eval(json_dict['class'])
+        # bypasses the init function as we will use 'from_json' to initialize - like what pickle does
+        obj = cls.__new__(cls)
+        obj.from_json(json_dict)
+        return obj
+
+    def from_json(self, json_dict):
+        self.min_x = json_dict['min_x']
+        self.max_x = json_dict['max_x']
+        self.min_y = json_dict['min_y']
+        self.max_y = json_dict['max_y']
+        self.zoom = json_dict['zoom']
+        self.epsg = json_dict['epsg']
+        self._version = json_dict['version']
+        # do version updates here
+        self._loaded_from_version = json_dict['version']
 
     def height(self):
         return self.max_y - self.min_y
@@ -51,13 +85,30 @@ class TilingScheme(VABC):
         return 2**zoom
 
 class ExactTilingScheme(TilingScheme):
-    def __init__(self, res_x, res_y,  min_x=-180, min_y=-90.0, max_x=180.0, max_y=90.0, zoom=13):
-        super().__init__(min_x, min_y, max_x, max_y, zoom)
+    def __init__(self, res_x, res_y,  min_x=-180, min_y=-90.0, max_x=180.0, max_y=90.0, zoom=13, epsg=None):
+        super().__init__(min_x, min_y, max_x, max_y, zoom=zoom, epsg=epsg)
         self.res_x = res_x
         self.res_y = res_y
         self.edges_x, self.edges_y = self.calc_edges()
         self.max_x = self.edges_x[-1]
         self.max_y = self.edges_y[-1]
+
+    def for_json(self):
+        json_dict = super().for_json()
+        json_dict['res_x'] = self.res_x
+        json_dict['res_y'] = self.res_y
+        json_dict['edges_x'] = self.edges_x.tolist()
+        json_dict['edges_y'] = self.edges_y.tolist()
+        return json_dict
+
+    def from_json(self, json_dict):
+        # restore the basic elements
+        super().from_json(json_dict)
+        # do version updates here if needed
+        self.res_x = json_dict['res_x']
+        self.res_y = json_dict['res_y']
+        self.edges_x = numpy.array(json_dict['edges_x'])
+        self.edges_y = numpy.array(json_dict['edges_y'])
 
     def xy_to_tile_index(self, x, y, zoom=None):
         # y index is bigger than x because there is a smaller range (-90 to 90) which makes smaller tiles in the y direction
@@ -86,7 +137,7 @@ class ExactTilingScheme(TilingScheme):
         return xs, ys
 
 class LatLonTiles(TilingScheme):
-    def __init__(self, min_x=-180, min_y=-90.0, max_x=180.0, max_y=90.0, zoom=13):
+    def __init__(self, min_x=-180, min_y=-90.0, max_x=180.0, max_y=90.0, zoom=13, epsg=None):
         """ Latitude Longitude grid, defaults the the whole world.
         Parameters
         ----------
@@ -96,10 +147,10 @@ class LatLonTiles(TilingScheme):
         max_y
         zoom
         """
-        super().__init__(min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y, zoom=zoom)
+        super().__init__(min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y, zoom=zoom, epsg=epsg)
 
 class ExactLatLonTiles(ExactTilingScheme):
-    def __init__(self, res_x, resy_y, min_x=-180, min_y=-90.0, max_x=180.0, max_y=90.0, zoom=13):
+    def __init__(self, res_x, resy_y, min_x=-180, min_y=-90.0, max_x=180.0, max_y=90.0, zoom=13, epsg=None):
         """ Latitude Longitude grid, defaults the the whole world.
         Parameters
         ----------
@@ -109,7 +160,7 @@ class ExactLatLonTiles(ExactTilingScheme):
         max_y
         zoom
         """
-        super().__init__(res_x, res_y, min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y, zoom=zoom)
+        super().__init__(res_x, res_y, min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y, zoom=zoom, epsg=epsg)
 
 class TMSTilesMercator(TilingScheme):
     """ Use the global spherical mercator projection coordinates (EPSG:900913) to match the Google Tile scheme,
@@ -117,8 +168,7 @@ class TMSTilesMercator(TilingScheme):
     """
     def __init__(self, zoom=13):
         circumference = 2 * numpy.pi * 6378137 / 2.0
-        self.epsg = 900913
-        super().__init__(min_x=-circumference, min_y=-circumference, max_x=circumference, max_y=circumference, zoom=zoom)
+        super().__init__(min_x=-circumference, min_y=-circumference, max_x=circumference, max_y=circumference, zoom=zoom, epsg=900913)
 
 
 class GoogleTilesLatLon(LatLonTiles):
@@ -142,8 +192,7 @@ class GoogleTilesMercator(GoogleTilesLatLon):
     """
     def __init__(self, zoom=13):
         circumference = 2 * numpy.pi * 6378137 / 2.0
-        self.epsg = 900913
-        super().__init__(min_x=-circumference, min_y=-circumference, max_x=circumference, max_y=circumference, zoom=zoom)
+        super().__init__(min_x=-circumference, min_y=-circumference, max_x=circumference, max_y=circumference, zoom=zoom, epsg=900913)
 
     # def _flip_y(self, ty, zoom):
     #     return (self.num_tiles(zoom) - 1) - ty
@@ -156,14 +205,12 @@ class GoogleTilesMercator(GoogleTilesLatLon):
     #     return super().tile_index_to_xy(tx, self._flip_y(ty, zoom), zoom)
 
 class UTMTiles(TilingScheme):
-    def __init__(self, zoom=13):
-        self.epsg = None
-        super().__init__(min_x=-1000000, min_y=-1000000, max_x=2000000, max_y=10000000, zoom=zoom)
+    def __init__(self, zoom=13, epsg=None):
+        super().__init__(min_x=-1000000, min_y=-1000000, max_x=2000000, max_y=10000000, zoom=zoom, epsg=epsg)
 
 class ExactUTMTiles(ExactTilingScheme):
-    def __init__(self, res_x, res_y, zoom=13):
-        self.epsg = None
-        super().__init__(res_x, res_y, min_x=-1000000, min_y=-1000000, max_x=2000000, max_y=10000000, zoom=zoom)
+    def __init__(self, res_x, res_y, zoom=13, epsg=None):
+        super().__init__(res_x, res_y, min_x=-1000000, min_y=-1000000, max_x=2000000, max_y=10000000, zoom=zoom, epsg=epsg)
 
 
 def test():

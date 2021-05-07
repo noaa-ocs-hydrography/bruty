@@ -1,3 +1,4 @@
+import json
 import os
 import pathlib
 import shutil
@@ -48,6 +49,7 @@ class WorldTilesBackend(VABC):
             Root directory to store file structure under, if applicable.
         """
         self._version = 1
+        self._loaded_from_version = None
         self.tile_scheme = tile_scheme
         self.data_path = pathlib.Path(data_path)
         self.data_class = data_class
@@ -55,6 +57,51 @@ class WorldTilesBackend(VABC):
         self.storage_class = storage_class
         if data_path:
             os.makedirs(self.data_path, exist_ok=True)
+        self.to_file()  # store parameters so it can be loaded back from disk
+
+    @staticmethod
+    def from_file(data_dir, filename="backend_metadata.json"):
+        data_path = pathlib.Path(data_dir).joinpath(filename)
+        infile = open(data_path, 'r')
+        data = json.load(infile)
+        data['data_path'] = pathlib.Path(data_dir)  # overridde in case the user copied the data to a different path
+        return WorldTilesBackend.create_from_json(data)
+
+    def to_file(self, data_path=None):
+        if not data_path:
+            data_path = self.data_path.joinpath("backend_metadata.json")
+        outfile = open(data_path, 'w')
+        json.dump(self.for_json(), outfile)
+
+    def for_json(self):
+        json_dict = {'class': self.__class__.__name__,
+                     'module': self.__class__.__module__,
+                     'data_path': str(self.data_path),
+                     'version': self._version,
+                     'tile_scheme': self.tile_scheme.for_json(),
+                     'data_class': self.data_class.__name__,
+                     'history_class': self.history_class.__name__,
+                     'storage_class': self.storage_class.__name__,
+                     }
+        return json_dict
+
+    @staticmethod
+    def create_from_json(json_dict):
+        cls = eval(json_dict['class'])
+        # bypasses the init function as we will use 'from_json' to initialize - like what pickle does
+        obj = cls.__new__(cls)
+        obj.from_json(json_dict)
+        return obj
+
+    def from_json(self, json_dict):
+        self.tile_scheme = TilingScheme.create_from_json(json_dict['tile_scheme'])
+        self.data_class = eval(json_dict['data_class'])
+        self.history_class = eval(json_dict['history_class'])
+        self.storage_class = eval(json_dict['storage_class'])
+        self.data_path = pathlib.Path(json_dict['data_path'])
+        # do any version updates here
+        self._loaded_from_version = json_dict['version']
+        self._version = json_dict['version']
 
     def iterate_filled_tiles(self):
         for tx_dir in os.scandir(self.data_path):
@@ -98,7 +145,7 @@ class WorldTilesBackend(VABC):
 
     @property
     def __version__(self) -> int:
-        return 1
+        return self._version
 
     @property
     def epsg(self) -> int:
@@ -220,8 +267,8 @@ class WorldTilesBackend(VABC):
 
 
 class LatLonBackend(WorldTilesBackend):
-    def __init__(self, history_class, storage_class, data_class, data_path, zoom_level=13):
-        tile_scheme = LatLonTiles(zoom=zoom_level)
+    def __init__(self, history_class, storage_class, data_class, data_path, zoom_level=13, epsg=None):
+        tile_scheme = LatLonTiles(zoom=zoom_level, epsg=epsg)
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
 
 
@@ -234,15 +281,13 @@ class GoogleLatLonTileBackend(WorldTilesBackend):
 
 class UTMTileBackend(WorldTilesBackend):
     def __init__(self, utm_epsg, history_class, storage_class, data_class, data_path, zoom_level=13):
-        tile_scheme = UTMTiles(zoom=zoom_level)
-        tile_scheme.epsg = utm_epsg
+        tile_scheme = UTMTiles(zoom=zoom_level, epsg=utm_epsg)
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
 
 
 class UTMTileBackendExactRes(WorldTilesBackend):
     def __init__(self, res_x, res_y, utm_epsg, history_class, storage_class, data_class, data_path, zoom_level=13):
-        tile_scheme = ExactUTMTiles(res_x, res_y, zoom=zoom_level)
-        tile_scheme.epsg = utm_epsg
+        tile_scheme = ExactUTMTiles(res_x, res_y, zoom=zoom_level, epsg=utm_epsg)
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
 
 
@@ -261,14 +306,6 @@ class TMSMercatorTileBackend(WorldTilesBackend):
 class WMTileBackend(WorldTilesBackend):
     def __init__(self, storage, zoom_level=13):
         super().__init__(storage)
-
-
-# @todo - get rid of the tile directories and raise IndexErrors if tile index is not 0,0
-class SingleFileBackend(WorldTilesBackend):
-    def __init__(self, epsg, x1, y1, x2, y2, history_class, storage_class, data_class, data_path):
-        tile_scheme = TilingScheme(x1, y1, x2, y2, zoom=0)
-        tile_scheme.epsg = epsg
-        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
 
 
 # @todo - Implement locks
@@ -339,6 +376,35 @@ class WorldDatabase(VABC):
     def __init__(self, backend):
         self.db = backend
         self.next_contributor = 0  # fixme: this is a temporary hack until we have a database of surveys with unique ids available
+        self.to_file()
+
+    @staticmethod
+    def open(data_dir):
+        filename = "wdb_metadata.json"
+        data_path = pathlib.Path(data_dir).joinpath(filename)
+        infile = open(data_path, 'r')
+        data = json.load(infile)
+        data['data_path'] = pathlib.Path(data_dir)  # overridde in case the user copied the data to a different path
+        cls = eval(data['class'])
+        obj = cls.__new__(cls)
+        obj.from_json(data)
+        return obj
+
+    def to_file(self, data_path=None):
+        if not data_path:
+            data_path = self.db.data_path.joinpath("wdb_metadata.json")
+        outfile = open(data_path, 'w')
+        json.dump(self.for_json(), outfile)
+
+    def for_json(self):
+        json_dict = {'class': self.__class__.__name__,
+                     'module': self.__class__.__module__,
+                     }
+        return json_dict
+
+    def from_json(self, json_dict):
+        self.db = WorldTilesBackend.from_file(json_dict['data_path'])
+
 
     def insert_txt_survey(self, path_to_survey_data, survey_score=100, flags=0, format=None, override_epsg=NO_OVERRIDE):
         """ Reads a text file and inserts into the tiled database.
@@ -676,7 +742,7 @@ class WorldDatabase(VABC):
 
     def export_area(self, fname, x1, y1, x2, y2, res, target_epsg=None, driver="GTiff",
                     layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
-                    gdal_options=()):
+                    gdal_options=("BLOCKXSIZE=256", "BLOCKYSIZE=256", "TILED=YES", "COMPRESS=LZW", "BIGTIFF=YES")):
         """ Retrieves an area from the database at the requested resolution.
 
         # 1) Create a single tif tile that covers the area desired
@@ -825,6 +891,7 @@ class WorldDatabase(VABC):
         score_band.WriteArray(sort_key_scores[0], start_col, start_row)
         key2_band.WriteArray(sort_key_scores[1], start_col, start_row)
 
+
     def extract_soundings(self):
         # this is the same as extract area except score = depth
         pass
@@ -856,31 +923,10 @@ class WorldDatabase(VABC):
         pass
 
 
-class SingleFile(WorldDatabase):
-    def __init__(self, epsg, x1, y1, x2, y2, res_x, res_y, storage_directory):
-        min_x, min_y, max_x, max_y, self.shape_x, self.shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
-        self.res_x = res_x
-        self.res_y = res_y
-        super().__init__(SingleFileBackend(epsg, min_x, min_y, max_x, max_y, AccumulationHistory, DiskHistory, TiffStorage, storage_directory))
-
-    def init_tile(self, tx, ty, tile_history):
-        return self.shape_y, self.shape_x  # rows and columns
-
-    def export(self, fname, driver="GTiff", layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
-                    gdal_options=()):
-        """Export the full area of the 'single file database' in the epsg the data is stored in"""
-        y1 = self.db.tile_scheme.min_y
-        y2 = self.db.tile_scheme.max_y - self.res_y
-        x1 = self.db.tile_scheme.min_x
-        x2 = self.db.tile_scheme.max_x - self.res_x
-        return super().export_area(fname, x1, y1, x2, y2, (self.res_x, self.res_y), driver=driver,
-                    layers=layers, gdal_options=gdal_options)
-
 
 class CustomBackend(WorldTilesBackend):
     def __init__(self, utm_epsg, res_x, res_y,  x1, y1, x2, y2, history_class, storage_class, data_class, data_path, zoom_level=13):
-        tile_scheme = ExactTilingScheme(res_x, res_y, min_x=x1, min_y=y1, max_x=x2, max_y=y2, zoom=zoom_level)
-        tile_scheme.epsg = utm_epsg
+        tile_scheme = ExactTilingScheme(res_x, res_y, min_x=x1, min_y=y1, max_x=x2, max_y=y2, zoom=zoom_level, epsg=utm_epsg)
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
 
 
@@ -892,12 +938,11 @@ class CustomArea(WorldDatabase):
         zoom = int(numpy.log2(tiles))
         if zoom < 0:
             zoom = 0
-        self.res_x = res_x
-        self.res_y = res_y
-        super().__init__(CustomBackend(epsg, res_x, res_y, min_x, min_y, max_x, max_y, AccumulationHistory, DiskHistory, TiffStorage, storage_directory, zoom_level=zoom))
+        super().__init__(CustomBackend(epsg, res_x, res_y, min_x, min_y, max_x, max_y, AccumulationHistory, DiskHistory, TiffStorage,
+                                       storage_directory, zoom_level=zoom))
 
     def export(self, fname, driver="GTiff", layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
-                    gdal_options=()):
+                    gdal_options=("BLOCKXSIZE=256", "BLOCKYSIZE=256", "TILED=YES", "COMPRESS=LZW", "BIGTIFF=YES")):
         """Export the full area of the 'single file database' in the epsg the data is stored in"""
         y1 = self.db.tile_scheme.min_y
         y2 = self.db.tile_scheme.max_y - self.res_y
@@ -905,6 +950,14 @@ class CustomArea(WorldDatabase):
         x2 = self.db.tile_scheme.max_x - self.res_x
         return super().export_area(fname, x1, y1, x2, y2, (self.res_x, self.res_y), driver=driver,
                     layers=layers, gdal_options=gdal_options)
+
+    @property
+    def res_x(self):
+        return self.db.tile_scheme.res_x
+
+    @property
+    def res_y(self):
+        return self.db.tile_scheme.res_y
 
 
 if __name__ == "__main__":
@@ -916,7 +969,6 @@ if __name__ == "__main__":
     epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
     epsg = 26918
     ds = None
-    # db = SingleFile(epsg, x1, y1, x1+(numx+1)*resx, y1+(numy+1)*resy, 4, 4, r"G:\Data\NBS\Speed_test\test_db")
     # db = WorldDatabase(UTMTileBackendExactRes(4, 4, epsg, RasterHistory, DiskHistory, TiffStorage,
     #                                     r"G:\Data\NBS\Speed_test\test_db_world"))
     db = CustomArea(epsg, x1, y1, x1+(numx+1)*resx, y1+(numy+1)*resy, 4, 4, r"G:\Data\NBS\Speed_test\test_cust4")
@@ -1080,19 +1132,20 @@ if __name__ == "__main__":
                             }
 
                 export_path = export_dir.joinpath(cell_name + ".tif")
-                cnt = db.export_area(export_path, minx, miny, maxx, maxy, (dx+dx*.1, dy+dy*.1), target_epsg=export_epsg)
+                cnt, exported_dataset = db.export_area(export_path, minx, miny, maxx, maxy, (dx+dx*.1, dy+dy*.1), target_epsg=export_epsg)
 
                 # export_path = export_dir.joinpath(cell_name + ".bag")
                 # bag_options = [key + "=" + val for key, val in bag_options_dict.items()]
-                # cnt2 = db.export_area(export_path, minx, miny, maxx, maxy, (dx+dx*.1, dy+dy*.1), target_epsg=export_epsg,
+                # cnt2, ex_ds = db.export_area(export_path, minx, miny, maxx, maxy, (dx+dx*.1, dy+dy*.1), target_epsg=export_epsg,
                 #                       driver='BAG', gdal_options=bag_options)
 
                 if cnt > 0:
                     # output in native UTM -- Since the coordinates "twist" we need to check all four corners,
                     # not just lower left and upper right
                     x1, y1, x2, y2 = transform_rect(minx, miny, maxx, maxy, geotransform.transform)
-                    cnt = db.export_area(export_dir.joinpath(cell_name + "_utm.tif"),x1, y1, x2, y2, output_res)
+                    cnt, utm_dataset = db.export_area(export_dir.joinpath(cell_name + "_utm.tif"),x1, y1, x2, y2, output_res)
                 else:
+                    exported_dataset = None  # close the gdal file
                     os.remove(export_path)
                 os.remove(export_path.with_suffix(".score.tif"))
 
@@ -1131,7 +1184,7 @@ if __name__ == "__main__":
             #  image = (273250.0, 50.0, 0.0, 4586700.0, 0.0, -50.0)  db = (273250.0, 50, 0, 4552600.0, 0, 50)
             #  fixed by using cell centers rather than corners.
             #  Same problem could happen of course if the centers are the edges of the export tiff
-            # db = SingleFile(26919, x1, y1, x2, y2, res_x, res_y, soundings_file.parent.joinpath('debug'))  # NAD823 zone 19.  WGS84 would be 32619
+            # db = CustomArea(26919, x1, y1, x2, y2, res_x, res_y, soundings_file.parent.joinpath('debug'))  # NAD823 zone 19.  WGS84 would be 32619
             # db.insert_survey_gdal(str(soundings_file))
             # db.export_area_new(str(soundings_file.parent.joinpath("output_soundings_debug5.tiff")), x1, y1, x2, y2, (res_x, res_y), )
             save_soundings_from_image(soundings_file, str(soundings_file) + "_3.gpkg", 50)
