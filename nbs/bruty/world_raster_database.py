@@ -375,7 +375,6 @@ class WorldDatabase(VABC):
 
     def __init__(self, backend):
         self.db = backend
-        self.next_contributor = 0  # fixme: this is a temporary hack until we have a database of surveys with unique ids available
         self.to_file()
 
     @staticmethod
@@ -405,8 +404,30 @@ class WorldDatabase(VABC):
     def from_json(self, json_dict):
         self.db = WorldTilesBackend.from_file(json_dict['data_path'])
 
+    def insert_survey(self, path_to_survey_data, contrib_id=None, compare_callback=None):
+        done = False
+        extension = pathlib.Path(str(path_to_survey_data).lower()).suffix
+        if extension == '.bag':
+            try:
+                vr = bag.VRBag(vr, mode='r')
+            except HSTB.drivers.bag.BAGError:
+                pass
+            else:
+                self.insert_survey_vr(vr, contrib_id=contrib_id, compare_callback=compare_callback)
+                done = True
+        if not done:
+            if extension in ['.bag', '.tif', '.tiff']:
+                self.insert_survey_gdal(path_to_survey_data, contrib_id=contrib_id, compare_callback=compare_callback)
+                done = True
+        if not done:
+            if extension in ['.csar',]:
+                # export to xyz
+                raise
+                self.insert_txt_survey(path_to_survey_data, contrib_id=contrib_id, compare_callback=compare_callback)
+                done = True
 
-    def insert_txt_survey(self, path_to_survey_data, survey_score=100, flags=0, format=None, override_epsg=NO_OVERRIDE):
+    def insert_txt_survey(self, path_to_survey_data, survey_score=100, flags=0, format=None, override_epsg=NO_OVERRIDE,
+                          contrib_id=None, compare_callback=None):
         """ Reads a text file and inserts into the tiled database.
         The format parameter is passed to numpy.loadtxt and needs to have names of x, y, depth, uncertainty.
 
@@ -445,9 +466,10 @@ class WorldDatabase(VABC):
         uncertainty = data['uncertainty']
         score = numpy.full(x.shape, survey_score)
         flags = numpy.full(x.shape, flags)
-        self.insert_survey_array(numpy.array((x, y, depth, uncertainty, score, flags)), path_to_survey_data)
+        self.insert_survey_array(numpy.array((x, y, depth, uncertainty, score, flags)), path_to_survey_data,
+                                 contrib_id=contrib_id, compare_callback=compare_callback)
 
-    def insert_survey_array(self, input_survey_data, contrib_name, accumulation_db=None):
+    def insert_survey_array(self, input_survey_data, contrib_name, accumulation_db=None, contrib_id=None, compare_callback=None):
         """ Insert a numpy array (or list of lists) of data into the database.
 
         Parameters
@@ -460,6 +482,20 @@ class WorldDatabase(VABC):
             If multiple calls will be made from the same survey then an accumulation database can be supplied.
             This will keep the contributor from having multiple records in the history.
             A subsequent call to db.append_accumulation_db would be needed to transfer the data into this database.
+        contrib_id
+            An integer id for the dataset being supplied
+        compare_callback
+            A function which if supplied (also requires contrib_id) will be called with the data being inserted and the existing raster data.
+            The function(pts, new_arrays) should return arrays and if sorts should be reversed (sort_vals, new_sort_values, reverse).
+            NOTE: pts is ordered as 'raster_data.LayersEnum' with X, Y prepended (so raster_data.Layers(Elevation) is index=2)
+                new_arrays is just in default raster_data order
+
+            As an example, here is what happens if compare_callback is None  (Score then depth)
+
+            sort_vals = (pts[LayersEnum.SCORE + 2], pts[LayersEnum.ELEVATION + 2])
+            new_sort_values = numpy.array((new_arrays[LayersEnum.SCORE], new_arrays[LayersEnum.ELEVATION]))
+            reverse = (False, False)
+
 
         Returns
         -------
@@ -472,7 +508,7 @@ class WorldDatabase(VABC):
             contrib_name = str(contrib_name)
         if not accumulation_db:
             accumulation_db = self.db
-        contributor = numpy.full(input_survey_data[0].shape, self.next_contributor)
+        contributor = numpy.full(input_survey_data[0].shape, contrib_id)
         survey_data = numpy.array((input_survey_data[0], input_survey_data[1], input_survey_data[2],
                                    input_survey_data[3], contributor, input_survey_data[4], input_survey_data[5]))
         # if a multidemensional array was passed in then reshape it to be one dimenion.
@@ -522,20 +558,29 @@ class WorldDatabase(VABC):
 
             # replace x,y with row, col for the points
             i, j = raster_data.xy_to_rc_using_dims(new_arrays.shape[1], new_arrays.shape[2], pts[0], pts[1])
-            new_sort_values = numpy.array((new_arrays[LayersEnum.SCORE], new_arrays[LayersEnum.ELEVATION]))
+            # if there is a contributor ID and callback,
+            # pass the existing contributors to the callback function and genenerate as many comparison matrices as needed
+            # also allow for depth (elevation) to be placed into the comparison matrices.
+            # @fixme confirm this is working
+            if compare_callback is not None and contrib_id is not None:
+                sort_vals, new_sort_values, reverse = compare_callback(pts, new_arrays)
+            else:  # default to score, depth with no reversals
+                new_sort_values = numpy.array((new_arrays[LayersEnum.SCORE], new_arrays[LayersEnum.ELEVATION]))
+                sort_vals = (pts[LayersEnum.SCORE + 2], pts[LayersEnum.ELEVATION + 2])
+                reverse = (False, False)
+
             # combine the existing data ('new_arrays') with newly supplied data (pts derived from survey_data)
             # negative depths, so don't reverse the sort of the second key (depth)
-            merge_arrays(i, j, (pts[LayersEnum.SCORE + 2], pts[LayersEnum.ELEVATION + 2]), pts[2:], new_arrays, new_sort_values,
-                         reverse_sort=(False, False))
+            merge_arrays(i, j, sort_vals, pts[2:], new_arrays, new_sort_values, reverse_sort=reverse)
             # create a new raster data set to either replace the old one in the database or add a new history item
             # depending on if there is an accumulation buffer (i.e. don't save history) or regular database (save history of additions)
             rd = RasterData.from_arrays(new_arrays)
             rd.set_metadata(raster_data.get_metadata())  # copy the metadata to the new raster
-            rd.contributor = contrib_name
+            rd.contributor = contrib_name, contrib_id
             tile_history.append(rd)
             meta = tile_history.get_metadata()
             meta.setdefault("contributors", {})[
-                str(self.next_contributor)] = contrib_name  # JSON only allows strings as keys - first tried an integer key which gets weird
+                str(contrib_id)] = contrib_name  # JSON only allows strings as keys - first tried an integer key which gets weird
             tile_history.set_metadata(meta)
 
             # for x, y, depth, uncertainty, score, flag in sorted_pts:
@@ -546,7 +591,6 @@ class WorldDatabase(VABC):
             #     #   We are not trying to implement CUBE or CHRT here, just pick a value and shoalest is safest
             #     # raster_data = raster_data[]
 
-        self.next_contributor += 1
 
     def init_tile(self, tx, ty, tile_history):
         # @todo lookup the resolution to use by default.
@@ -564,7 +608,7 @@ class WorldDatabase(VABC):
         else:
             return 512, 512
 
-    def insert_survey_vr(self, vr, survey_score=100, flag=0, override_epsg=NO_OVERRIDE):
+    def insert_survey_vr(self, vr, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, contrib_id=None, compare_callback=None):
         """
         Parameters
         ----------
@@ -639,8 +683,7 @@ class WorldDatabase(VABC):
             if last_index + len(x) > max_len:
                 self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
                                                       uncertainty_accum[:last_index], scores_accum[:last_index], flags_accum[:last_index])),
-                                         vr.filename, accumulation_db=storage_db)
-                self.next_contributor -= 1
+                                         vr.filename, accumulation_db=storage_db, contrib_id=contrib_id, compare_callback=compare_callback)
                 last_index = 0
             # append the new data to the end of the accumulation arrays
             prev_index = last_index
@@ -655,14 +698,13 @@ class WorldDatabase(VABC):
         if last_index > 0:
             self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
                                                   uncertainty_accum[:last_index], scores_accum[:last_index], flags_accum[:last_index])),
-                                     vr.filename, accumulation_db=storage_db)
-            self.next_contributor -= 1
+                                     vr.filename, accumulation_db=storage_db, contrib_id=contrib_id, compare_callback=compare_callback)
 
-        self.next_contributor += 1
         self.db.append_accumulation_db(storage_db)
         shutil.rmtree(storage_db.data_path, onerror=onerr)
 
-    def insert_survey_gdal(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, data_band=1, uncert_band=2):
+    def insert_survey_gdal(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, data_band=1, uncert_band=2,
+                           contrib_id=None, compare_callback=None):
         """ Insert a gdal readable dataset into the database.
         Currently works for BAG and probably geotiff.
         Parameters
@@ -734,9 +776,8 @@ class WorldDatabase(VABC):
                     uncertainty = pts[3]
                     scores = numpy.full(x.shape, survey_score)
                     flags = numpy.full(x.shape, flag)
-                    self.insert_survey_array(numpy.array((x, y, depth, uncertainty, scores, flags)), path_to_survey_data, accumulation_db=storage_db)
-                    self.next_contributor -= 1  # undoing the next_contributor increment that happens in insert_survey_array since we call it multiple times and we'll increment it below
-        self.next_contributor += 1
+                    self.insert_survey_array(numpy.array((x, y, depth, uncertainty, scores, flags)), path_to_survey_data, accumulation_db=storage_db,
+                                             contrib_id=contrib_id, compare_callback=compare_callback)
         self.db.append_accumulation_db(storage_db)
         shutil.rmtree(storage_db.data_path)
 
