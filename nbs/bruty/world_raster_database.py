@@ -404,26 +404,26 @@ class WorldDatabase(VABC):
     def from_json(self, json_dict):
         self.db = WorldTilesBackend.from_file(json_dict['data_path'])
 
-    def insert_survey(self, path_to_survey_data, contrib_id=None, compare_callback=None):
+    def insert_survey(self, path_to_survey_data, override_epsg=NO_OVERRIDE, contrib_id=None, compare_callback=None):
         done = False
         extension = pathlib.Path(str(path_to_survey_data).lower()).suffix
         if extension == '.bag':
             try:
-                vr = bag.VRBag(vr, mode='r')
-            except HSTB.drivers.bag.BAGError:
+                vr = bag.VRBag(path_to_survey_data, mode='r')
+            except bag.BAGError:
                 pass
             else:
-                self.insert_survey_vr(vr, contrib_id=contrib_id, compare_callback=compare_callback)
+                self.insert_survey_vr(vr, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback)
                 done = True
         if not done:
             if extension in ['.bag', '.tif', '.tiff']:
-                self.insert_survey_gdal(path_to_survey_data, contrib_id=contrib_id, compare_callback=compare_callback)
+                self.insert_survey_gdal(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback)
                 done = True
         if not done:
             if extension in ['.csar',]:
                 # export to xyz
-                raise
-                self.insert_txt_survey(path_to_survey_data, contrib_id=contrib_id, compare_callback=compare_callback)
+                # FIXME -- export points from csar and support LAS or whatever points file is decided on.
+                # self.insert_txt_survey(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback)
                 done = True
 
     def insert_txt_survey(self, path_to_survey_data, survey_score=100, flags=0, format=None, override_epsg=NO_OVERRIDE,

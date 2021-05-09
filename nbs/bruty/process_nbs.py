@@ -2,6 +2,7 @@
 # sys.path.append(r"C:\Git_Repos\nbs")
 # sys.path.append(r"C:\Git_Repos\bruty")
 import os
+import pathlib
 import shutil
 from functools import partial
 
@@ -12,6 +13,7 @@ from fuse_dev.fuse.meta_review.meta_review import database_has_table, split_URL_
 from nbs.bruty.raster_data import TiffStorage, LayersEnum
 from nbs.bruty.history import DiskHistory, RasterHistory, AccumulationHistory
 from nbs.bruty.world_raster_database import WorldDatabase, UTMTileBackend
+from nbs.bruty.utils import onerr
 
 _debug = True
 
@@ -50,26 +52,33 @@ def get_nbs_records(table_name, database, username, password, hostname='OCS-VS-N
     return fields, records
 
 
-def survey_sort(id_to_score, pts, existing_arrays):
-    existing_elevation = existing_arrays[LayersEnum.ELEVATION]
+def nbs_survey_sort(id_to_score, pts, existing_arrays):
+    # return arrays that merge_arrays will use for sorting.
+    # basically the nbs sort is 4 keys: Decay Score, resolution, depth, alphabetical.
+    # Decay and resolution get merged into one array since they are true for all points of the survey while depth varies with position.
+    # alphabetical is a final tie breaker to make sure the same contributor is picked in the cases where the first three tie.
+
     # find all the contributors to look up
-    contributors = numpy.unique(existing_arrays[LayersEnum.CONTRIBUTOR])
+    all_contributors = existing_arrays[LayersEnum.CONTRIBUTOR]
+    unique_contributors = numpy.unique(all_contributors[~numpy.isnan(all_contributors)])
     # make arrays to store the integer scores in
-    existing_decay_and_res = existing_arrays[LayersEnum.CONTRIBUTOR].copy()
-    existing_alphabetical = existing_arrays[LayersEnum.CONTRIBUTOR].copy()
+    existing_decay_and_res = all_contributors.copy()
+    existing_alphabetical = all_contributors.copy()
     # for each unique contributor fill with the associated decay/resolution score and the alphabetical score
-    for contrib in contributors:
-        existing_decay_and_res[existing_arrays[LayersEnum.CONTRIBUTOR] == contrib] = id_to_score[contrib][0]
-        existing_alphabetical[existing_arrays[LayersEnum.CONTRIBUTOR] == contrib] = id_to_score[contrib][1]
-
-    pts_contributors = numpy.unique(existing_arrays[LayersEnum.CONTRIBUTOR])
-    decay_and_res_score = pts[LayersEnum.CONTRIBUTOR + 2].copy()
-    alphabetical = pts[LayersEnum.CONTRIBUTOR + 2].copy()
-    for contrib in pts_contributors:
-        decay_and_res_score[pts[LayersEnum.CONTRIBUTOR] == contrib] = id_to_score[contrib][0]
-        alphabetical[pts[LayersEnum.CONTRIBUTOR] == contrib] = id_to_score[contrib][1]
-
+    for contrib in unique_contributors:
+        existing_decay_and_res[all_contributors == contrib] = id_to_score[contrib][0]
+        existing_alphabetical[all_contributors == contrib] = id_to_score[contrib][1]
+    existing_elevation = existing_arrays[LayersEnum.ELEVATION]
+    # @FIXME is contributor an int or float -- needs to be int 32 and maybe int 64 (or two int 32s)
+    pts_contributors = pts[LayersEnum.CONTRIBUTOR + 2]
+    unique_pts_contributors = numpy.unique(pts_contributors[~numpy.isnan(pts_contributors)])
+    decay_and_res_score = pts_contributors.copy()
+    alphabetical = pts_contributors.copy()
+    for contrib in unique_pts_contributors:
+        decay_and_res_score[pts_contributors == contrib] = id_to_score[contrib][0]
+        alphabetical[pts_contributors == contrib] = id_to_score[contrib][1]
     elevation = pts[LayersEnum.ELEVATION + 2]
+
     return numpy.array((decay_and_res_score, elevation, alphabetical)), \
            numpy.array((existing_decay_and_res, existing_elevation, existing_alphabetical)), \
            (False, False, False)
@@ -109,7 +118,7 @@ def id_to_scoring(fields, records):
                     continue
             rec_list.append((sid, res, decay))
             # Switch to lower case, these were from filenames that I'm not sure are case sensitive
-            names_list.append((rec[filename_col].lower(), path, sid))
+            names_list.append((rec[filename_col].lower(), sid, path))  # sid would be the next thing sorted if the names match
     # sort the names so we can use an integer to use for sorting by name
     names_list.sort()
     # do an ordered 2 key sort on decay then res (lexsort likes them backwards)
@@ -127,7 +136,7 @@ def id_to_scoring(fields, records):
         sort_dict[sid] = [sort_val]
     # the NBS sort order then uses depth after decay but before alphabetical, so we can't merge the name sort with the decay+res
     # add a second value for the alphabetical naming which is the last resort to maintain constistency of selection
-    for n, (filename, path, sid) in enumerate(names_list):
+    for n, (filename, sid, path) in enumerate(names_list):
         sort_dict[sid].append(n)
     return sorted_recs, names_list, sort_dict
 
@@ -142,31 +151,51 @@ def process_nbs_database(world_db_path, table_name, database, username, password
         db = WorldDatabase(UTMTileBackend(epsg, RasterHistory, DiskHistory, TiffStorage, world_db_path))  # NAD823 zone 19.  WGS84 would be 32619
     path_col = fields.index('script_to_filename')
     id_col = fields.index('sid')
-    comp = partial(survey_sort, sort_dict)
+    comp = partial(nbs_survey_sort, sort_dict)
     total = 0
-    print('changing path')
-    for filename, path, sid in names_list:
+    print('------------   changing paths !!!!!!!!!!')
+    for i, (filename, sid, path) in enumerate(names_list):
+        copy_data = False
         path_e = path.lower().replace('\\\\nos.noaa\\ocs\\hsd\\projects\\nbs\\nbs_data\\pbc_northeast_utm19n_mllw',
                                       r'E:\Data\nbs\PBC_Northeast_UTM19N_MLLW')
         path_c = path.lower().replace('\\\\nos.noaa\\ocs\\hsd\\projects\\nbs\\nbs_data\\pbc_northeast_utm19n_mllw',
                                       r'C:\Data\nbs\PBC_Northeast_UTM19N_MLLW')
-        try:
-            total += os.stat(path_e).st_size
-            # os.makedirs(os.path.dirname(path_c), exist_ok=True)
-            # shutil.copy(path_e, path_c)
-            if path_e.endswith("csar"):
-                total += os.stat(path_e + "0").st_size
-                # os.makedirs(os.path.dirname(path_c+"0"), exist_ok=True)
-                shutil.copy(path_e + "0", path_c + "0")
-        except FileNotFoundError:
-            print("File missing", sid, path)
-        # db.insert_survey(path, contrib_id=sid, compare_func=comp)
+        path = path_c
+        if copy_data:
+            try:
+                total += os.stat(path_e).st_size
+                # os.makedirs(os.path.dirname(path_c), exist_ok=True)
+                # shutil.copy(path_e, path_c)
+                if path_e.endswith("csar"):
+                    total += os.stat(path_e + "0").st_size
+                    # os.makedirs(os.path.dirname(path_c+"0"), exist_ok=True)
+                    shutil.copy(path_e + "0", path_c + "0")
+            except FileNotFoundError:
+                print("File missing", sid, path)
+        # @FIXME is contributor an int or float -- needs to be int 32 and maybe int 64 (or two int 32s)
+        if _debug:
+            if i>10:
+                break
+        db.insert_survey(path, override_epsg=db.db.epsg, contrib_id=sid, compare_callback=comp)
+        print('inserted', path)
+
     print('data MB:', total / 1000000)
 
 
 if __name__ == '__main__':
-    db_path = r"c:\data\nbs\test_db"
-    if not os.path.exists(db_path):
+    data_dir = pathlib.Path(__file__).parent.parent.parent.joinpath('tests').joinpath("test_data_output")
+
+    def make_clean_dir(name):
+        use_dir = data_dir.joinpath(name)
+        if os.path.exists(use_dir):
+            shutil.rmtree(use_dir, onerror=onerr)
+        os.makedirs(use_dir)
+        return use_dir
+
+    db_path = data_dir.joinpath(r"test_pbc_19_db")
+    # db_path = make_clean_dir(r"test_pbc_19_db")  # reset the database
+
+    if not os.path.exists(db_path.joinpath("wdb_metadata.json")):
         db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, db_path))  # NAD823 zone 19.  WGS84 would be 32619
         del db
 
