@@ -1,3 +1,5 @@
+import os
+import pathlib
 import time
 import numpy
 import rasterio.crs
@@ -53,14 +55,14 @@ def affine_center(r, c, x0, dxx, dyx, y0, dxy, dyy):
     return affine(r + 0.5, c + 0.5, x0, dxx, dyx, y0, dxy, dyy)
 
 
-def get_geotransformer(epsg1, epsg2):
+def get_crs_transformer(epsg1, epsg2):
     if epsg1 != epsg2:
         input_crs = CRS.from_epsg(epsg1)
         output_crs = CRS.from_epsg(epsg2)
-        georef_transformer = Transformer.from_crs(input_crs, output_crs, always_xy=True)
+        crs_transformer = Transformer.from_crs(input_crs, output_crs, always_xy=True)
     else:
-        georef_transformer = None
-    return georef_transformer
+        crs_transformer = None
+    return crs_transformer
 
 
 def merge_arrays(x, y, keys, data, *args, **kywrds):
@@ -73,7 +75,7 @@ def merge_arrays(x, y, keys, data, *args, **kywrds):
 
 
 def merge_array(pts, output_data, output_sort_key_values,
-                geotransform=None, affine_transform=None, start_col=0, start_row=0, block_cols=None, block_rows=None,
+                crs_transform=None, affine_transform=None, start_col=0, start_row=0, block_cols=None, block_rows=None,
                 reverse_sort=None, key_bounds=None
                 ):
     """  Merge a new dataset (array) into an existing dataset (array).
@@ -99,7 +101,7 @@ def merge_array(pts, output_data, output_sort_key_values,
     output_sort_key_values
         array of length must match the number of sort keys passed in.
         Must match the row/column size of the output_data
-    geotransform
+    crs_transform
         object with a .transform(x,y) method returning x2, y2
     affine_transform
         If supplied, converts from x,y to row,col
@@ -125,7 +127,7 @@ def merge_array(pts, output_data, output_sort_key_values,
         would specify ((None, 0), (40, None), None).
 
         !!Note - exclusive bands do not work!!  passing in (40, 0) to try and get above 40 or below 0 will return nothing.
-        @todo add the ability to have a callback or specify the range is and/or so excludes would work.
+        @todo add the ability to have a callback or specify the if the range is and/or so excludes would work.
 
     Returns
     -------
@@ -154,8 +156,8 @@ def merge_array(pts, output_data, output_sort_key_values,
         sorted_pts = pts[:, sorted_ind]
 
         # 7) Use affine geotransform convert x,y into the i,j for the exported area
-        if geotransform:
-            transformed_x, transformed_y = geotransform.transform(sorted_pts[0], sorted_pts[1])
+        if crs_transform:
+            transformed_x, transformed_y = crs_transform.transform(sorted_pts[0], sorted_pts[1])
         else:
             transformed_x, transformed_y = sorted_pts[0], sorted_pts[1]
 
@@ -211,6 +213,31 @@ def merge_array(pts, output_data, output_sort_key_values,
             key[ri, rj] = sorted_pts[2 + key_num, replace_cells]
 
 
+def remake_tif(fname):
+    """Tiffs that are updated don't compress properly, so move them to a temporary name, copy the data and delete the temporary name"""
+    os.rename(fname, fname+".old.tif")
+    ds = gdal.Open(fname+".old.tif")
+    data = ds.ReadAsArray()
+    driver = gdal.GetDriverByName('GTiff')
+    if 0:
+        new_ds = driver.Create(fname, xsize=ds.RasterXSize, ysize=ds.RasterYSize, bands=ds.RasterCount, eType=gdal.GDT_Float32, options=['COMPRESS=LZW', "TILED=YES", "BIGTIFF=YES"])
+        new_ds.SetProjection(ds.GetProjection())
+        new_ds.SetGeoTransform(ds.GetGeoTransform())
+        for n in range(ds.RasterCount):
+            band = new_ds.GetRasterBand(n + 1)
+            band.WriteArray(data[n])
+    else:
+        new_ds = driver.CreateCopy(fname, ds, options=['COMPRESS=LZW', "TILED=YES", "BIGTIFF=YES"])
+
+    new_ds = None
+    ds = None
+    os.remove(fname+".old.tif")
+# for (dirpath, dirnames, filenames) in os.walk(r'C:\data\nbs\test_data_output\test_pbc_19_db'):
+#     for fname in filenames:
+#         if fname.endswith(".tif"):
+#             remake_tif(os.path.join(dirpath, fname))
+
+
 def soundings_from_image(fname, res):
     ds = gdal.Open(str(fname))
     srs = osr.SpatialReference(wkt=ds.GetProjection())
@@ -258,11 +285,35 @@ def soundings_from_image(fname, res):
         x, y = affine_center(r + ir, c + ic, *xform)
         # first key is depth second is latitude (just to have a tiebreaker so results stay consistent)
         # reusing the depth (output_array[2]) and y output_array[1] in the sortkey arrays
-        merge_arrays(x, y, (depths, x, y), (x, y, depths), output_array, output_sort_values, output_xform)
+        merge_arrays(x, y, (depths, x, y), (x, y, depths), output_array, output_sort_values, affine_transform=output_xform)
     return srs, output_array
 
 
 def iterate_gdal_image(dataset, band_nums=(1,), min_block_size=512, max_block_size=1024):
+    """ Iterate a gdal dataset using blocks to reduce memory usage.
+    The last blocks at the edge of the dataset will have a smaller size than the others.
+    Reads down all the rows first then moves to the next group of columns.
+    The function will use the dataset's GetBlockSize() if it falls between the min and max block size arguments
+
+    Ex: a 10x10 image read in blocks of 4x4 would return  two 4x4 arrays followed by a 2x4 array.  Then 4x4, 4x4, 2x4.  Then 4x2, 4x2, 2x2.
+
+    Parameters
+    ----------
+    dataset
+        gdal dataset to read from
+    band_nums
+        list of band number integers to read arrays from
+    min_block_size
+        minimum size to allow block reads to use
+    max_block_size
+        maximum size to allow block reads to use
+
+    Returns
+    -------
+    ic, ir, nodata, data
+        column index, row index, no data value, list of arrays from the dataset
+
+    """
     bands = [dataset.GetRasterBand(num) for num in band_nums]
     block_sizes = bands[0].GetBlockSize()
     row_block_size = min(max(block_sizes[1], min_block_size), max_block_size)
@@ -282,6 +333,152 @@ def iterate_gdal_image(dataset, band_nums=(1,), min_block_size=512, max_block_si
             else:
                 rows = row_size - ir
             yield ic, ir, nodata, [band.ReadAsArray(ic, ir, cols, rows) for band in bands]
+
+def iterate_gdal_buffered_image(dataset, col_buffer_size, row_buffer_size, band_nums=(1,), min_block_size=512, max_block_size=1024):
+    """ Iterate a gdal dataset using blocks to reduce memory usage.
+    The last blocks at the edge of the dataset will have a smaller size than the others.
+    Reads down all the rows first then moves to the next group of columns.
+    The function will use the dataset's GetBlockSize() if it falls between the min and max block size arguments
+
+    Unlike the iterate_gdal_image() this will keep the data size consistent,
+    i.e. when it reaches an edge of the dataset it will move the row/col read positions back to where they can read enough data.
+    This is to allow mathematical operations to have a minimum amount of data available.
+    Without this the 'data' portion could be a 1x1 which may not be desired.
+    It also means that you may receive the same cells in multiple reads.
+
+    Ex: a 10x10 image read in blocks of 4x4 with a buffer size of 1 would return
+      5x5, 6x5, 5x6, 6x6, 6x6, 5x6, 6x5, 6x5, 5x5
+    # (one based) iteration numbers the data should come back in
+    table = numpy.array([[ 1, 1, 1,  14,  14,  47,  47,  47,  47,  7],
+                         [ 1, 1, 1,  14,  14,  47,  47,  47,  47,  7],
+                         [ 1, 1, 1,  14,  14,  47,  47,  47,  47,  7],
+                         [12,12,124,1245,1245,4578,4578,4578,4578,78],
+                         [12,12,124,1245,1245,4578,4578,4578,4578,78],
+                         [23,23,236,2356,2356,5689,5689,5689,5689,89],
+                         [23,23,236,2356,2356,5689,5689,5689,5689,89],
+                         [23,23,236,2356,2356,5689,5689,5689,5689,89],
+                         [23,23, 23,2356,2356,5689,5689,5689,5689,89],
+                         [ 3, 3, 3,  36,  36,  69,  69,  69,  69,  9],
+                         ])
+
+    Parameters
+    ----------
+    dataset
+        gdal dataset to read from
+    row_buffer_size
+        number of rows to additionally read on either side of the data array
+    col_buffer_size
+        number of columns to additionally read on either side of the data array
+    band_nums
+        list of band number integers to read arrays from
+    min_block_size
+        minimum size to allow block reads to use
+    max_block_size
+        maximum size to allow block reads to use
+
+    Returns
+    -------
+    (ic, ir, cols, rows, col_buffer_lower, row_buffer_lower, nodata, data)
+        ic = column index of the data, not including the buffer
+        ir = row index of the data, not including the buffer
+        cols = size of the data, not including buffers
+        rows = size of the data, not including buffers
+        col_buffer_lower = The amount of column buffer preceding the data
+        row_buffer_lower = The amount of row buffer preceding the data
+        nodata = no data value
+        data = list of arrays from the dataset
+
+    """
+    bands = [dataset.GetRasterBand(num) for num in band_nums]
+    block_sizes = bands[0].GetBlockSize()
+    row_block_size = min(max(block_sizes[1], min_block_size), max_block_size)
+    col_block_size = min(max(block_sizes[0], min_block_size), max_block_size)
+    col_size = bands[0].XSize
+    row_size = bands[0].YSize
+    nodata = bands[0].GetNoDataValue()
+    for ic in tqdm(range(0, col_size, col_block_size), mininterval=.7):
+        cols = col_block_size
+        if ic + col_block_size > col_size:  # read a full set of data by offsetting the column index back a bit
+            ic = col_size - cols
+        col_buffer_lower = col_buffer_size if ic >= col_buffer_size else ic
+        col_buffer_upper = col_buffer_size if col_size - (ic + col_block_size) >= col_buffer_size else col_size - (ic + col_block_size)
+        read_cols = col_buffer_lower + cols + col_buffer_upper
+        for ir in tqdm(range(0, row_size, row_block_size), mininterval=.7):
+            rows = row_block_size
+            if ir + row_block_size > row_size:
+                ir = row_size - rows
+            row_buffer_lower = row_buffer_size if ir >= row_buffer_size else ir
+            row_buffer_upper = row_buffer_size if row_size - (ir + row_block_size) >= row_buffer_size else row_size - (ir + row_block_size)
+            read_rows = row_buffer_lower + rows + row_buffer_upper
+
+            yield (ic, ir, cols, rows, col_buffer_lower, row_buffer_lower, nodata,
+                  [band.ReadAsArray(ic - col_buffer_lower, ir - row_buffer_lower, read_cols, read_rows) for band in bands])
+
+
+class BufferedImageOps:
+    def __init__(self, dataset_or_path):
+        if isinstance(dataset_or_path, (str, pathlib.Path)):
+            self.ds = gdal.Open(str(dataset_or_path), gdal.GA_Update)  # pathlib needs str() conversion
+        else:
+            self.ds = dataset_or_path
+        # the data block location, not including the buffers
+        self.ir = 0
+        self.ic = 0
+        # buffer sizes before the data
+        self.row_buffer_lower = 0
+        self.col_buffer_lower = 0
+        # how much data is inside the arrays
+        self.data_rows = 0
+        self.data_cols = 0
+        # size of what came back from the ReadAsArray calls
+        self.read_shape = None
+
+    def iterate_gdal(self, col_buffer_size, row_buffer_size, band_nums=(1,), min_block_size=512, max_block_size=1024):
+        """ See iterate_gdal_buffered_image() where dataset will be automatically supplied based on the __init__() for this instance """
+        self.band_nums = band_nums
+        for block in iterate_gdal_buffered_image(self.ds, row_buffer_size, col_buffer_size,
+                                                 band_nums=(1,), min_block_size=min_block_size, max_block_size=max_block_size):
+            self.ic, self.ir, self.data_cols, self.data_rows, self.col_buffer_lower, self.row_buffer_lower, nodata, data = block
+            self.read_shape = data[0].shape
+            yield block
+
+    def write_array(self, array, band=None):
+        """ Write an array back into a gdal dataset in the band specified.  Band can be from a different dataset if the indexing matches.
+        I.e. you could read this dataset using the iterate to get an array then write it back to another dataset, perhaps made using CreateCopy
+
+        Parameters
+        ----------
+        array
+            array of either the shape of the non-buffered data block or the entire read data from the last iterate_gdal_image call
+        band
+            None will use the first band number from the __init__ construction.
+            If an integer is provided it is interpreted as the value to call GetRasterBand() with.
+            Lastly, a Band object can be supplied which could be from this dataset or a different one
+            - useful when transforming data between one file and another
+
+        Returns
+        -------
+        None
+
+        """
+        band_num = None
+        if band is None:
+            band_num = self.band_nums[0]
+        elif isinstance(band, int):
+            band_num = band
+        # either didn't supply band or used an integer, so get a raster band from the dataset
+        if band_num:
+            band = self.ds.GetRasterBand(band_num)
+        # figure out if the supplied array includes the buffers or not
+        if array.shape[0] == self.data_rows and array.shape[1] == self.data_cols:
+            ic = self.ic
+            ir = self.ir
+        elif array.shape == self.read_shape:
+            ic = self.ic - self.col_buffer_lower
+            ir = self.ir - self.row_buffer_lower
+        else:
+            raise ValueError("The array did not match the buffered array size that was read or the non-buffered size")
+        band.WriteArray(array, ic, ir)
 
 
 def save_soundings_from_image(inputname, outputname, res, flip_depth=True):
@@ -406,7 +603,7 @@ def calc_area_array_params(x1, y1, x2, y2, res_x, res_y):
     return min_x, min_y, max_x, max_y, shape_x, shape_y
 
 
-def compute_delta_coord(x, y, dx, dy, geotransform, inv_geotransform):
+def compute_delta_coord(x, y, dx, dy, crs_transform, inv_crs_transform):
     """ Given a refernce point, desired delta and geotransform+inverse, compute what the desired delta in the target SRS is in the source SRS.
     For example, 4 meters in Mississippi would be (epsg 4326 is WGS84 and 26915 is UTMzone 15N):
     compute_delta_coord(-93, 20, 4, 4, get_geotransform(4326, 26915), get_geotransform(26915, 4326))
@@ -420,31 +617,31 @@ def compute_delta_coord(x, y, dx, dy, geotransform, inv_geotransform):
         The X distance desired in the target reference system
     dy
         The Y distance desired in the target reference system
-    geotransform
-        a geotransform (something with a .transform method) going from source to target
-    inv_geotransform
-        a geotransform (something with a .transform method) going from target to source
+    crs_transform
+        a transformation (something with a .transform method) going from source to target
+    inv_crs_transform
+        a transformation (something with a .transform method) going from target to source
 
     Returns
     -------
     dx, dy
         The delta in x and y in the source reference system for the given delta in the target system
     """
-    target_x, target_y = geotransform.transform(x, y)
-    x2, y2 = inv_geotransform.transform(target_x + dx, target_y + dy)
+    target_x, target_y = crs_transform.transform(x, y)
+    x2, y2 = inv_crs_transform.transform(target_x + dx, target_y + dy)
     sdx = numpy.abs(x2 - x)
     sdy = numpy.abs(y2 - y)
     return sdx, sdy
 
 
 def compute_delta_coord_epsg(x, y, dx, dy, source_epsg, target_epsg):
-    geotransform = get_geotransformer(source_epsg, target_epsg)
-    inv_geotransform = get_geotransformer(target_epsg, source_epsg)
-    return compute_delta_coord(x, y, dx, dy, geotransform, inv_geotransform)
+    crs_transform = get_crs_transformer(source_epsg, target_epsg)
+    inv_crs_transform = get_crs_transformer(target_epsg, source_epsg)
+    return compute_delta_coord(x, y, dx, dy, crs_transform, inv_crs_transform)
 
 
 def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg,
-                           driver="GTiff", options=(), nodata=numpy.nan):
+                           driver="GTiff", options=(), nodata=numpy.nan, etype=gdal.GDT_Float32):
     """ Makes a north up gdal dataset with nodata = numpy.nan and LZW compression.
     Specifying a positive res_y will be input as a negative value into the gdal file,
     since tif/gdal likes max_y and a negative Y pixel size.
@@ -455,7 +652,7 @@ def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, sh
     fname
         filename to create
     bands
-        list of names of bands in the file
+        number of bands to create or a list of names for bands in the file
     min_x
         minimum X coordinate
     max_y
@@ -476,7 +673,8 @@ def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, sh
         gdal driver options.  Generally bag metadata or tiff compression settings etc
     nodata
         no_data value - defaults to nan but for bag will be set to 1000000
-
+    etype
+        data type to store in the tif, usually a float but could be gdal.GDT_Int32 etc
     Returns
     -------
     gdal.dataset
@@ -487,12 +685,16 @@ def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, sh
         nodata = 1000000.0
     if not options:
         if driver.lower() == "gtiff":
-            options=['COMPRESS=LZW', "BIGTIFF=YES"]
+            options=['COMPRESS=LZW', "TILED=YES", "BIGTIFF=YES"]
         if driver.lower() == 'bag':
             options = list(options)
             options.insert(0, 'TEMPLATE=G:\\Pydro_new_svn_1\\Pydro21\\NOAA\\site-packages\\Python38\\git_repos\\hstb_resources\\HSTB\\resources\\gdal_bag_template.xml')
 
-    dataset = gdal_driver.Create(str(fname), xsize=shape_x, ysize=shape_y, bands=bands, eType=gdal.GDT_Float32,
+    try:
+        num_bands = int(bands)
+    except:
+        num_bands = len(bands)
+    dataset = gdal_driver.Create(str(fname), xsize=shape_x, ysize=shape_y, bands=num_bands, eType=etype,
                             options=options)
 
     # Set location
@@ -537,7 +739,7 @@ def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg,
     fname
         filename to create
     bands
-        list of names of bands in the file
+        number of bands to create or list of names of bands in the file
     x1
         an X corner coordinate
     y1
@@ -596,3 +798,5 @@ def transform_rect(x1, y1, x2, y2, transform_func):
     xs = (tx1, tx2, tx3, tx4)
     ys = (ty1, ty2, ty3, ty4)
     return min(xs), min(ys), max(xs), max(ys)
+
+

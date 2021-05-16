@@ -12,7 +12,7 @@ import rasterio.crs
 from osgeo import gdal, osr, ogr
 
 from HSTB.drivers import bag
-from nbs.bruty.utils import merge_arrays, merge_array, get_geotransformer, onerr, tqdm, make_gdal_dataset_size, make_gdal_dataset_area, \
+from nbs.bruty.utils import merge_arrays, merge_array, get_crs_transformer, onerr, tqdm, make_gdal_dataset_size, make_gdal_dataset_area, \
             calc_area_array_params, compute_delta_coord, iterate_gdal_image, add_uncertainty_layer, transform_rect
 from nbs.bruty.raster_data import TiffStorage, LayersEnum, RasterData, affine, inv_affine, affine_center, arrays_dont_match
 from nbs.bruty.history import DiskHistory, RasterHistory, AccumulationHistory
@@ -375,6 +375,9 @@ class WorldDatabase(VABC):
 
     def __init__(self, backend):
         self.db = backend
+        # @todo, should the survey lists be stored in a sqlite database?
+        self.included_surveys = {}
+        self.included_ids = {}
         self.to_file()
 
     @staticmethod
@@ -393,16 +396,24 @@ class WorldDatabase(VABC):
         if not data_path:
             data_path = self.db.data_path.joinpath("wdb_metadata.json")
         outfile = open(data_path, 'w')
-        json.dump(self.for_json(), outfile)
+        json.dump(self.for_json(), outfile, indent=2)
+        outfile.close()
 
     def for_json(self):
+        # @todo make a base class or mixin that auto converts to json,
+        #    maybe list the attributes desired with a callback that handles anything not auto converted to json
         json_dict = {'class': self.__class__.__name__,
                      'module': self.__class__.__module__,
+                     'survey_paths': self.included_surveys,
+                     'survey_ids': self.included_ids,
                      }
         return json_dict
 
     def from_json(self, json_dict):
         self.db = WorldTilesBackend.from_file(json_dict['data_path'])
+        # json stores all dictionary keys as strings, so have to convert back to integers
+        self.included_ids = {int(key): val for key, val in json_dict['survey_ids'].items()}
+        self.included_surveys = json_dict['survey_paths']
 
     def insert_survey(self, path_to_survey_data, override_epsg=NO_OVERRIDE, contrib_id=None, compare_callback=None):
         done = False
@@ -453,7 +464,7 @@ class WorldDatabase(VABC):
             epsg = rasterio.crs.CRS.from_string(vr.srs.ExportToWkt()).to_epsg()
         else:
             epsg = override_epsg
-        transformer = get_geotransformer(epsg, self.db.epsg)
+        transformer = get_crs_transformer(epsg, self.db.epsg)
 
         if not format:
             format = [('y', 'f8'), ('x', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')]
@@ -466,8 +477,16 @@ class WorldDatabase(VABC):
         uncertainty = data['uncertainty']
         score = numpy.full(x.shape, survey_score)
         flags = numpy.full(x.shape, flags)
-        self.insert_survey_array(numpy.array((x, y, depth, uncertainty, score, flags)), path_to_survey_data,
-                                 contrib_id=contrib_id, compare_callback=compare_callback)
+        tiles = self.insert_survey_array(numpy.array((x, y, depth, uncertainty, score, flags)), path_to_survey_data,
+                                         contrib_id=contrib_id, compare_callback=compare_callback)
+        self.finished_survey_insertion(path_to_survey_data, tiles, contrib_id)
+
+    def finished_survey_insertion(self, path_to_survey_data, tiles, contrib_id=None):
+        # store the tiles filled by this survey as a convenience lookup for the future when removing or querying.
+        self.included_surveys[path_to_survey_data] = (contrib_id, list(tiles))  # json doesn't like sets, convert to list
+        if contrib_id is not None:
+            self.included_ids[contrib_id] = (path_to_survey_data, list(tiles))
+        self.to_file()
 
     def insert_survey_array(self, input_survey_data, contrib_name, accumulation_db=None, contrib_id=None, compare_callback=None):
         """ Insert a numpy array (or list of lists) of data into the database.
@@ -576,7 +595,7 @@ class WorldDatabase(VABC):
             # depending on if there is an accumulation buffer (i.e. don't save history) or regular database (save history of additions)
             rd = RasterData.from_arrays(new_arrays)
             rd.set_metadata(raster_data.get_metadata())  # copy the metadata to the new raster
-            rd.contributor = contrib_name, contrib_id
+            rd.set_last_contributor(contrib_id, contrib_name)
             tile_history.append(rd)
             meta = tile_history.get_metadata()
             meta.setdefault("contributors", {})[
@@ -590,7 +609,7 @@ class WorldDatabase(VABC):
             #     #   but has to be sorted by depth so the shallowest sounding in a cell is retained in case there were multiple
             #     #   We are not trying to implement CUBE or CHRT here, just pick a value and shoalest is safest
             #     # raster_data = raster_data[]
-
+        return [tuple((int(tx), int(ty))) for tx, ty in tile_list]  # convert to a vanilla python int for compatibility with json
 
     def init_tile(self, tx, ty, tile_history):
         # @todo lookup the resolution to use by default.
@@ -633,11 +652,12 @@ class WorldDatabase(VABC):
             epsg = rasterio.crs.CRS.from_string(vr.srs.ExportToWkt()).to_epsg()
         else:
             epsg = override_epsg
-        georef_transformer = get_geotransformer(epsg, self.db.epsg)
+        georef_transformer = get_crs_transformer(epsg, self.db.epsg)
         temp_path = tempfile.mkdtemp(dir=self.db.data_path)
         storage_db = self.db.make_accumulation_db(temp_path)
         x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum = None, None, None, None, None, None
         max_len = 500000
+        all_tiles = set()
         for iref, (ti, tj) in enumerate(sorted_refinement_indices):
             # get an individual refinement and convert it to x,y from the row column system it was in.
             refinement = vr.read_refinement(ti, tj)
@@ -681,9 +701,10 @@ class WorldDatabase(VABC):
                 last_index = 0
             # dump the accumulated arrays to the database if they are about to overflow the accumulation arrays
             if last_index + len(x) > max_len:
-                self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
+                tiles = self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
                                                       uncertainty_accum[:last_index], scores_accum[:last_index], flags_accum[:last_index])),
                                          vr.filename, accumulation_db=storage_db, contrib_id=contrib_id, compare_callback=compare_callback)
+                all_tiles.update(tiles)
                 last_index = 0
             # append the new data to the end of the accumulation arrays
             prev_index = last_index
@@ -696,12 +717,14 @@ class WorldDatabase(VABC):
             flags_accum[prev_index:last_index] = flags
 
         if last_index > 0:
-            self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
+            tiles = self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
                                                   uncertainty_accum[:last_index], scores_accum[:last_index], flags_accum[:last_index])),
                                      vr.filename, accumulation_db=storage_db, contrib_id=contrib_id, compare_callback=compare_callback)
-
+            all_tiles.update(tiles)
         self.db.append_accumulation_db(storage_db)
         shutil.rmtree(storage_db.data_path, onerror=onerr)
+        # @fixme make sure vr.name is correct for full path
+        self.finished_survey_insertion(vr.name, all_tiles, contrib_id)
 
     def insert_survey_gdal(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, data_band=1, uncert_band=2,
                            contrib_id=None, compare_callback=None):
@@ -721,7 +744,8 @@ class WorldDatabase(VABC):
         None
 
         """
-        # # @todo FIXME - handle tifs that claim to be area and use cell center?
+        # @fixme rasterdata on disk is not storing the survey_ids?  Forgot to update/write metadata?
+
         # metadata = {**dataset.GetMetadata()}
         # pixel_is_area = True if 'AREA_OR_POINT' in metadata and metadata['AREA_OR_POINT'][:-2] == 'Area' else False
 
@@ -735,10 +759,11 @@ class WorldDatabase(VABC):
             epsg = override_epsg
         # fixme - do coordinate transforms correctly
         print("@todo - do transforms correctly with proj/vdatum etc")
-        georef_transformer = get_geotransformer(epsg, self.db.epsg)
+        georef_transformer = get_crs_transformer(epsg, self.db.epsg)
 
         temp_path = tempfile.mkdtemp(dir=self.db.data_path)
         storage_db = self.db.make_accumulation_db(temp_path)
+        all_tiles = set()
         # read the data array in blocks
         # if geo_debug and False:
         #     col_block_size = col_size
@@ -776,10 +801,13 @@ class WorldDatabase(VABC):
                     uncertainty = pts[3]
                     scores = numpy.full(x.shape, survey_score)
                     flags = numpy.full(x.shape, flag)
-                    self.insert_survey_array(numpy.array((x, y, depth, uncertainty, scores, flags)), path_to_survey_data, accumulation_db=storage_db,
-                                             contrib_id=contrib_id, compare_callback=compare_callback)
+                    tiles = self.insert_survey_array(numpy.array((x, y, depth, uncertainty, scores, flags)), path_to_survey_data,
+                                                     accumulation_db=storage_db, contrib_id=contrib_id, compare_callback=compare_callback)
+                    all_tiles.update(tiles)
         self.db.append_accumulation_db(storage_db)
         shutil.rmtree(storage_db.data_path)
+        # @fixme -- turn all_tiles into one consistent, unique list.  Is list of lists with duplicates right now
+        self.finished_survey_insertion(path_to_survey_data, all_tiles, contrib_id)
 
     def export_area(self, fname, x1, y1, x2, y2, res, target_epsg=None, driver="GTiff",
                     layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
@@ -793,7 +821,7 @@ class WorldDatabase(VABC):
         # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
         # 6) Sort on score in case multiple points go into a position that the right value is retained
         #      sort based on score then on depth so the shoalest top score is kept
-        # 7) Use affine geotransform convert x,y into the i,j for the exported area
+        # 7) Use affine crs_transform convert x,y into the i,j for the exported area
         # 8) Write the data into the export (single) tif.
         #      replace x,y with row, col for the points
 
@@ -827,8 +855,8 @@ class WorldDatabase(VABC):
         # 1) Create a single tif tile that covers the area desired
         if not target_epsg:
             target_epsg = self.db.tile_scheme.epsg
-        geotransform = get_geotransformer(self.db.tile_scheme.epsg, target_epsg)
-        inv_geotransform = get_geotransformer(target_epsg, self.db.tile_scheme.epsg)
+        crs_transform = get_crs_transformer(self.db.tile_scheme.epsg, target_epsg)
+        inv_crs_transform = get_crs_transformer(target_epsg, self.db.tile_scheme.epsg)
 
         try:
             dx, dy = res
@@ -849,8 +877,8 @@ class WorldDatabase(VABC):
         max_cols, max_rows = score_band.XSize, score_band.YSize
 
         # 2) Get the master db tile indices that the area overlaps and iterate them
-        if geotransform:
-            overview_x1, overview_y1, overview_x2, overview_y2 = transform_rect(x1, y1, x2, y2, inv_geotransform.transform)
+        if crs_transform:
+            overview_x1, overview_y1, overview_x2, overview_y2 = transform_rect(x1, y1, x2, y2, inv_crs_transform.transform)
         else:
             overview_x1, overview_y1, overview_x2, overview_y2 = x1, y1, x2, y2
         tile_count = 0
@@ -864,8 +892,8 @@ class WorldDatabase(VABC):
                 continue
             # 3) Read the single tif sub-area as an array that covers this tile being processed
             tx1, ty1, tx2, ty2 = tile_history.get_corners()
-            if geotransform:
-                target_x1, target_y1, target_x2, target_y2 = transform_rect(tx1, ty1, tx2, ty2, geotransform.transform)
+            if crs_transform:
+                target_x1, target_y1, target_x2, target_y2 = transform_rect(tx1, ty1, tx2, ty2, crs_transform.transform)
                 target_xs, target_ys = numpy.array([target_x1, target_x2]), numpy.array([target_y1, target_y2])
             else:
                 target_xs, target_ys = numpy.array([tx1, tx2]), numpy.array([ty1, ty2])
@@ -888,7 +916,7 @@ class WorldDatabase(VABC):
             tile_layers = raster_data.get_arrays(layers)
             # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
             self.merge_rasters(tile_layers, tile_score, raster_data, tile_depth,
-                               geotransform, affine_transform, start_col, start_row, block_cols, block_rows,
+                               crs_transform, affine_transform, start_col, start_row, block_cols, block_rows,
                                dataset, layers, score_band, score_key2_band)
             tile_count += 1
             # send the data to disk, I forget if this has any affect other than being able to look at the data in between steps to debug progress
@@ -900,7 +928,7 @@ class WorldDatabase(VABC):
 
     @staticmethod
     def merge_rasters(tile_layers, tile_score, raster_data, tile_depth,
-                      geotransform, affine_transform, start_col, start_row, block_cols, block_rows,
+                      crs_transform, affine_transform, start_col, start_row, block_cols, block_rows,
                       dataset, layers, score_band, key2_band, reverse_sort=(False, False)):
         export_sub_area_scores = score_band.ReadAsArray(start_col, start_row, block_cols, block_rows)
         export_sub_area_key2 = key2_band.ReadAsArray(start_col, start_row, block_cols, block_rows)
@@ -921,7 +949,7 @@ class WorldDatabase(VABC):
         #     tile_x, tile_y = geotransform.transform(tile_x, tile_y)
 
         merge_arrays(tile_x, tile_y, (tile_score, tile_depth), tile_layers,
-                     export_sub_area, sort_key_scores, geotransform, affine_transform,
+                     export_sub_area, sort_key_scores, crs_transform, affine_transform,
                      start_col, start_row, block_cols, block_rows,
                      reverse_sort=reverse_sort)
 

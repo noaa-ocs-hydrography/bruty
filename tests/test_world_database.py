@@ -11,7 +11,7 @@ from nbs.bruty.history import DiskHistory, MemoryHistory, RasterHistory
 from nbs.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
 from nbs.bruty.world_raster_database import LatLonBackend, GoogleLatLonTileBackend, UTMTileBackend, GoogleMercatorTileBackend, \
     TMSMercatorTileBackend, merge_arrays
-from nbs.bruty.world_raster_database import WorldDatabase, onerr, get_geotransformer, UTMTileBackendExactRes, CustomArea
+from nbs.bruty.world_raster_database import WorldDatabase, onerr, get_crs_transformer, UTMTileBackendExactRes, CustomArea
 
 from test_data import master_data, make_clean_dir, data_dir, SW_5x5, NW_5x5, SE_5x5, MID_5x5
 

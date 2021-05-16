@@ -1,5 +1,8 @@
+import json
 import os
 import enum
+import pathlib
+
 import numpy
 from collections.abc import Sequence
 
@@ -53,11 +56,15 @@ class TiffStorage(Storage):
     """This might be usable as any gdal raster by making the driver/extension a parameter"""
     extension = ".tif"
     def __init__(self, path, arrays=None, layers=None):
-        self.path = path
+        self.path = pathlib.Path(path)
+        self.metapath = path.with_suffix('.json')
         self._version = 1
+        self.metadata = {}
+        # @fixme - I think if this is called with arrays != None then the metadata will never get set.
+        #    Needs a way to set projection info after create
         if arrays is not None:
             self.set_arrays(arrays, layers)
-        self.metadata = {}
+
     def get_arrays(self, layers=None):
         layer_nums = self._layers_as_ints(layers)
         # @todo check the version number and update for additional layers if needed
@@ -69,56 +76,72 @@ class TiffStorage(Storage):
             del band
         del dataset
         return numpy.array(array_list)
+
     def set(self, data):
         self.set_metadata(data.get_metadata())  # @todo set metadata first, it gets used in set_arrays for writing tiff, maybe should move this to meta!
+        # the tifs are not compressing when being updated, so when we are setting all the data just recreate the whole tiff.
+        try:
+            os.remove(self.path)
+        except FileNotFoundError:
+            pass
+        # self._create_file(data.get_arrays(ALL_LAYERS).shape)  # this is call in set_arrays
         self.set_arrays(data.get_arrays(ALL_LAYERS), ALL_LAYERS)
+
     def get_metadata(self):
-        # @todo implement metadata
-        print("metadata not supported yet")
+        if not self.metadata:
+            try:
+                f = open(self.metapath, 'r')
+                metadata = json.load(f)
+            except:
+                self.metadata = {}
         return self.metadata.copy()
-        # raise NotImplementedError()
+
+    def _create_file(self, shape):
+        driver = gdal.GetDriverByName('GTiff')
+        # dataset = driver.CreateDataSource(self.path)
+        dataset = driver.Create(str(self.path), xsize=shape[2], ysize=shape[1], bands=len(LayersEnum), eType=gdal.GDT_Float32,
+                                options=['COMPRESS=LZW', "TILED=YES"])
+        meta = self.get_metadata()
+        try:
+            min_x = meta['min_x']
+            min_y = meta['min_y']
+            max_x = meta['max_x']
+            max_y = meta['max_y']
+            dx = (max_x - min_x) / shape[2]
+            dy = (max_y - min_y) / shape[1]
+            epsg = meta['epsg']
+            gt = [min_x, dx, 0, min_y, 0, dy]
+
+            # Set location
+            dataset.SetGeoTransform(gt)
+            if epsg is not None:
+                # Get raster projection
+                srs = osr.SpatialReference()
+                srs.ImportFromEPSG(epsg)
+                dest_wkt = srs.ExportToWkt()
+
+                # Set projection
+                dataset.SetProjection(dest_wkt)
+        except KeyError:
+            pass  # doesn't have full georeferencing
+
+        for band_index in LayersEnum:
+            band = dataset.GetRasterBand(band_index + 1)
+            if band_index == 0:  # tiff only supports one value of nodata, supress the warning
+                band.SetNoDataValue(float(numpy.nan))
+            band.SetDescription(LayersEnum(band_index).name)
+            del band
+        # dataset.SetProjection(crs.wkt)
+        # dataset.SetGeoTransform(transform.to_gdal())
+        return dataset
+
     def set_arrays(self, arrays, layers=None):
         layer_nums = self._layers_as_ints(layers)
         if os.path.exists(self.path):
             # note: this must be `gdal.OpenEx()` or it will raise an error. Why? I dunno.
             dataset = gdal.Open(str(self.path), gdal.GA_Update)
         else:
-            driver = gdal.GetDriverByName('GTiff')
-            # dataset = driver.CreateDataSource(self.path)
-            dataset = driver.Create(str(self.path), xsize=arrays.shape[2], ysize=arrays.shape[1], bands=len(LayersEnum), eType=gdal.GDT_Float32,
-                                    options=['COMPRESS=LZW'])
-            meta = self.get_metadata()
-            try:
-                min_x = meta['min_x']
-                min_y = meta['min_y']
-                max_x = meta['max_x']
-                max_y = meta['max_y']
-                dx = (max_x - min_x) / arrays.shape[2]
-                dy = (max_y - min_y) / arrays.shape[1]
-                epsg = meta['epsg']
-                gt = [min_x, dx, 0, min_y, 0, dy]
-
-                # Set location
-                dataset.SetGeoTransform(gt)
-                if epsg is not None:
-                    # Get raster projection
-                    srs = osr.SpatialReference()
-                    srs.ImportFromEPSG(epsg)
-                    dest_wkt = srs.ExportToWkt()
-
-                    # Set projection
-                    dataset.SetProjection(dest_wkt)
-            except KeyError:
-                pass  # doesn't have full georeferencing
-
-            for band_index in LayersEnum:
-                band = dataset.GetRasterBand(band_index + 1)
-                if band_index == 0:  # tiff only supports one value of nodata, supress the warning
-                    band.SetNoDataValue(float(numpy.nan))
-                band.SetDescription(LayersEnum(band_index).name)
-                del band
-            # dataset.SetProjection(crs.wkt)
-            # dataset.SetGeoTransform(transform.to_gdal())
+            dataset = self._create_file(arrays.shape)
 
         for index, lyr in enumerate(layer_nums):
             band = dataset.GetRasterBand(lyr + 1)
@@ -127,9 +150,9 @@ class TiffStorage(Storage):
         del dataset
 
     def set_metadata(self, metadata):
-        # @todo save metadata to a json file or something
-        print("set is not NotImplemented (stored to disk)")
-        self.metadata = metadata
+        self.metadata = metadata.copy()
+        f = open(self.metapath, 'w')
+        json.dump(metadata, f)
 
 class DatabaseStorage(Storage):
     pass
@@ -189,8 +212,50 @@ class RasterData(VABC):
 
     def set_epsg(self, val):
         self.set_metadata_element('epsg', val)
-    def get_epse(self):
+
+    def get_epsg(self):
         return self.get_metadata()['epsg']
+
+    def set_last_contributor(self, val, path):
+        meta = self.get_metadata()
+        meta['contrib_id'] = val
+        meta['contrib_path'] = path
+        all = set(self.get_all_contributor_ids())  # json won't serialize a set by default.  Could use pickle but avoiding python (and version) specific storage
+        all.add(val)
+        meta['all_ids'] = list(all)
+        all_paths = set(self.get_all_contributor_paths())
+        all_paths.add(path)
+        meta['all_paths'] = list(all_paths)
+        self.set_metadata(meta)
+
+    def get_last_contributor(self):
+        try:
+            last = self.get_metadata()['last']
+        except KeyError:
+            last = None
+        return last
+
+    def set_all_contributor_ids(self, val):
+        # uses a set to retain the list of all contributors that were used in creating this raster
+        self.set_metadata_element('all_ids', list(val.copy))
+
+    def get_all_contributor_ids(self):
+        try:
+            all = self.get_metadata()['all_ids'].copy()
+        except KeyError:
+            all = []
+        return all
+
+    def set_all_contributor_paths(self, val):
+        # uses a set to retain the list of all contributors that were used in creating this raster
+        self.set_metadata_element('all_paths', list(val))
+
+    def get_all_contributor_paths(self):
+        try:
+            all = self.get_metadata()['all_paths'].copy()
+        except KeyError:
+            all = []
+        return all
 
     def get_corners(self):
         meta = self.get_metadata()
