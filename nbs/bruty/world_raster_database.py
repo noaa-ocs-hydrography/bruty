@@ -138,7 +138,7 @@ class WorldTilesBackend(VABC):
             WorldTilesBackend instance
 
         """
-        # if self.history_class is RasterHistory:
+        # Use the same tile_scheme (which is just geographic parameters) with an AccumulationHistory to allow multiple passes on the same dataset to be added to the main database at one time
         use_history = AccumulationHistory
         new_db = WorldTilesBackend(self.tile_scheme, use_history, self.storage_class, self.data_class, data_path)
         return new_db
@@ -415,7 +415,7 @@ class WorldDatabase(VABC):
         self.included_ids = {int(key): val for key, val in json_dict['survey_ids'].items()}
         self.included_surveys = json_dict['survey_paths']
 
-    def insert_survey(self, path_to_survey_data, override_epsg=NO_OVERRIDE, contrib_id=None, compare_callback=None):
+    def insert_survey(self, path_to_survey_data, override_epsg=NO_OVERRIDE, contrib_id=None, compare_callback=None, reverse_z=False):
         done = False
         extension = pathlib.Path(str(path_to_survey_data).lower()).suffix
         if extension == '.bag':
@@ -424,21 +424,21 @@ class WorldDatabase(VABC):
             except bag.BAGError:
                 pass
             else:
-                self.insert_survey_vr(vr, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback)
+                self.insert_survey_vr(vr, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback, reverse_z=reverse_z)
                 done = True
         if not done:
             if extension in ['.bag', '.tif', '.tiff']:
-                self.insert_survey_gdal(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback)
+                self.insert_survey_gdal(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback, reverse_z=reverse_z)
                 done = True
         if not done:
             if extension in ['.csar',]:
                 # export to xyz
                 # FIXME -- export points from csar and support LAS or whatever points file is decided on.
-                # self.insert_txt_survey(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback)
+                # self.insert_txt_survey(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback, reverse_z=reverse_z)
                 done = True
 
     def insert_txt_survey(self, path_to_survey_data, survey_score=100, flags=0, format=None, override_epsg=NO_OVERRIDE,
-                          contrib_id=None, compare_callback=None):
+                          contrib_id=None, compare_callback=None, reverse_z=False):
         """ Reads a text file and inserts into the tiled database.
         The format parameter is passed to numpy.loadtxt and needs to have names of x, y, depth, uncertainty.
 
@@ -474,6 +474,8 @@ class WorldDatabase(VABC):
         if transformer:
             x, y = transformer.transform(x, y)
         depth = data['depth']
+        if reverse_z:
+            depth *= -1
         uncertainty = data['uncertainty']
         score = numpy.full(x.shape, survey_score)
         flags = numpy.full(x.shape, flags)
@@ -627,7 +629,7 @@ class WorldDatabase(VABC):
         else:
             return 512, 512
 
-    def insert_survey_vr(self, vr, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, contrib_id=None, compare_callback=None):
+    def insert_survey_vr(self, vr, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, contrib_id=None, compare_callback=None, reverse_z=False):
         """
         Parameters
         ----------
@@ -687,11 +689,13 @@ class WorldDatabase(VABC):
             if georef_transformer:
                 x, y = georef_transformer.transform(x, y)
             depth = pts[2]
+            if reverse_z:
+                depth *= -1
             uncertainty = pts[3]
             scores = numpy.full(x.shape, survey_score)
             flags = numpy.full(x.shape, flag)
             # it's really slow to add each refinement to the db, so store up points until it's bigger and write at once
-            if x_accum is None:  #initialize arrays here to get the correct types
+            if x_accum is None:  # initialize arrays here to get the correct types
                 x_accum = numpy.zeros([max_len], dtype=x.dtype)
                 y_accum = numpy.zeros([max_len], dtype=y.dtype)
                 depth_accum = numpy.zeros([max_len], dtype=depth.dtype)
@@ -727,7 +731,7 @@ class WorldDatabase(VABC):
         self.finished_survey_insertion(vr.name, all_tiles, contrib_id)
 
     def insert_survey_gdal(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, data_band=1, uncert_band=2,
-                           contrib_id=None, compare_callback=None):
+                           contrib_id=None, compare_callback=None, reverse_z=False):
         """ Insert a gdal readable dataset into the database.
         Currently works for BAG and probably geotiff.
         Parameters
@@ -798,6 +802,8 @@ class WorldDatabase(VABC):
                     if georef_transformer:
                         x, y = georef_transformer.transform(x, y)
                     depth = pts[2]
+                    if reverse_z:
+                        depth *= -1
                     uncertainty = pts[3]
                     scores = numpy.full(x.shape, survey_score)
                     flags = numpy.full(x.shape, flag)
@@ -1030,6 +1036,21 @@ class CustomArea(WorldDatabase):
 
 
 if __name__ == "__main__":
+
+    data_dir = pathlib.Path(r"G:\Data\NBS\H11305_for_Bruty")
+    # orig_db = CustomArea(26916, 395813.2, 3350563.98, 406818.2, 3343878.98, 4, 4, data_dir.joinpath('bruty'))
+    new_db = CustomArea(None, 395813.20000000007, 3350563.9800000004, 406818.20000000007, 3343878.9800000004, 4, 4, data_dir.joinpath('bruty_debug_center'))
+    # use depth band for uncertainty since it's not in upsample data
+    new_db.insert_survey_gdal(r"G:\Data\NBS\H11305_for_Bruty\1of3.tif", 0, uncert_band=1, override_epsg=None)
+    # new_db.insert_survey_gdal(r"G:\Data\NBS\H11305_for_Bruty\2of3.tif", 0, uncert_band=1, override_epsg=None)
+    # new_db.insert_survey_gdal(r"G:\Data\NBS\H11305_for_Bruty\3of3.tif", 0, uncert_band=1, override_epsg=None)
+    new_db.insert_survey_gdal(r"G:\Data\NBS\H11305_for_Bruty\H11305_VB_5m_MLLW_1of3.bag", 1, override_epsg=None)
+    # new_db.insert_survey_gdal(r"G:\Data\NBS\H11305_for_Bruty\H11305_VB_5m_MLLW_2of3.bag", 1, override_epsg=None)
+    # new_db.insert_survey_gdal(r"G:\Data\NBS\H11305_for_Bruty\H11305_VB_5m_MLLW_3of3.bag", 1, override_epsg=None)
+    new_db.export(r"G:\Data\NBS\H11305_for_Bruty\combine_new_centers.tif")
+    import sys
+    sys.exit()
+
     fname = r"G:\Data\NBS\Speed_test\H11045_VB_4m_MLLW_2of2.bag"
     ds = gdal.Open(fname)
     x1, resx, dxy, y1, dyx, resy = ds.GetGeoTransform()
@@ -1057,7 +1078,7 @@ if __name__ == "__main__":
     # db.export_area(use_dir.joinpath("export_tile_new.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
 
     build_mississippi = True
-    export_mississippi = True
+    export_mississippi = False
     process_utm_15 = True
     output_res = (4, 4)  # desired output size in meters
     data_dir = pathlib.Path(r'G:\Data\NBS\Mississipi')
@@ -1068,7 +1089,7 @@ if __name__ == "__main__":
         min_lon = -96
         max_lat = 35
         min_lat = 0
-        use_dir = data_dir.joinpath('vrbag_utm15_no_upsamples_db')
+        use_dir = data_dir.joinpath('vrbag_utm15_debug_db')
 
         data_files = [(r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13194_MB_VR_LWRP.bag", 92),
                       (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13193_MB_VR_LWRP.bag", 100),
@@ -1097,7 +1118,7 @@ if __name__ == "__main__":
         min_lon = -90
         max_lat = 35
         min_lat = 0
-        use_dir = data_dir.joinpath('vrbag_utm16_no_upsamples_db')
+        use_dir = data_dir.joinpath('vrbag_utm16_debug_db')
         data_files = [(r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13195_MB_VR_LWRP.bag", 93),
                       (r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13196_MB_VR_LWRP.bag", 91),
                       (r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13193_MB_VR_LWRP.bag", 100),
@@ -1112,7 +1133,7 @@ if __name__ == "__main__":
                                       use_dir))  # NAD823 zone 19.  WGS84 would be 32619
     if 0:  # find a specific point in the tiling database
         y, x = 30.120484, -91.030685
-        px, py = geotransform.transform(x, y)
+        px, py = crs_transform.transform(x, y)
         tile_index_x, tile_index_y = db.db.tile_scheme.xy_to_tile_index(px, py)
 
     if build_mississippi:
@@ -1149,8 +1170,8 @@ if __name__ == "__main__":
             if flddef.name == "CellName":
                 cell_field = i
                 break
-        geotransform = get_geotransformer(export_epsg, db.db.tile_scheme.epsg)
-        inv_geotransform = get_geotransformer(db.db.tile_scheme.epsg, export_epsg)
+        crs_transform = get_crs_transformer(export_epsg, db.db.tile_scheme.epsg)
+        inv_crs_transform = get_crs_transformer(db.db.tile_scheme.epsg, export_epsg)
         for feat in lyr:
             geom = feat.GetGeometryRef()
             # geom.GetGeometryCount()
@@ -1179,7 +1200,7 @@ if __name__ == "__main__":
 
                 print(cell_name)
                 # convert user res (4m in testing) size at center of cell for resolution purposes
-                dx, dy = compute_delta_coord(cx, cy, *output_res, geotransform, inv_geotransform)
+                dx, dy = compute_delta_coord(cx, cy, *output_res, crs_transform, inv_crs_transform)
 
                 bag_options_dict = {'VAR_INDIVIDUAL_NAME': 'Chief, Hydrographic Surveys Division',
                                      'VAR_ORGANISATION_NAME': 'NOAA, NOS, Office of Coast Survey',
@@ -1211,7 +1232,7 @@ if __name__ == "__main__":
                 if cnt > 0:
                     # output in native UTM -- Since the coordinates "twist" we need to check all four corners,
                     # not just lower left and upper right
-                    x1, y1, x2, y2 = transform_rect(minx, miny, maxx, maxy, geotransform.transform)
+                    x1, y1, x2, y2 = transform_rect(minx, miny, maxx, maxy, crs_transform.transform)
                     cnt, utm_dataset = db.export_area(export_dir.joinpath(cell_name + "_utm.tif"),x1, y1, x2, y2, output_res)
                 else:
                     exported_dataset = None  # close the gdal file

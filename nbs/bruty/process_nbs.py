@@ -214,8 +214,9 @@ def process_nbs_database(world_db_path, table_name, database, username, password
                 p.wait()
                 if os.path.exists(csv_path):
                     try:
+                        # points are in opposite convention as BAGs and exported CSAR tiffs, so reverse the z component
                         db.insert_txt_survey(csv_path, format=[('x', 'f8'), ('y', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')],
-                                             override_epsg=db.db.epsg, contrib_id=sid, compare_callback=comp)
+                                             override_epsg=db.db.epsg, contrib_id=sid, compare_callback=comp, reverse_z=True)
                     except ValueError:
                         print("Value Error")
                         print(traceback.format_exc())
@@ -225,9 +226,6 @@ def process_nbs_database(world_db_path, table_name, database, username, password
             else:
                 db.insert_survey(path, override_epsg=db.db.epsg, contrib_id=sid, compare_callback=comp)
             print('inserted', path)
-            # if _debug:
-            #     if i > 1500:
-            #         break
 
     print('data MB:', total / 1000000)
 
@@ -269,8 +267,8 @@ def convert_csar():
 if __name__ == '__main__':
     # data_dir = pathlib.Path(__file__).parent.parent.parent.joinpath('tests').joinpath("test_data_output")
     data_dir = pathlib.Path("c:\\data\\nbs\\test_data_output")  # avoid putting in the project directory as pycharm then tries to cache everything I think
-    build = False
-    export = True
+    build = True
+    export = False
     def make_clean_dir(name):
         use_dir = data_dir.joinpath(name)
         if os.path.exists(use_dir):
@@ -278,7 +276,13 @@ if __name__ == '__main__':
         os.makedirs(use_dir)
         return use_dir
 
-    db_path = data_dir.joinpath(r"test_pbc_19_db")
+    db_path = data_dir.joinpath(r"test_pbc_19_db_metacheck")
+    make_clean_dir(r"test_pbc_19_db_metacheck")
+
+    if not os.path.exists(db_path.joinpath("wdb_metadata.json")):
+        build = True
+        db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, db_path))  # NAD823 zone 19.  WGS84 would be 32619
+        del db
 
     # create logger with 'spam_application'
     logger = logging.getLogger('process_nbs')
@@ -311,11 +315,6 @@ if __name__ == '__main__':
 
     print("Using database at", db_path)
     # db_path = make_clean_dir(r"test_pbc_19_db")  # reset the database
-
-    if not os.path.exists(db_path.joinpath("wdb_metadata.json")):
-        build = True
-        db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, db_path))  # NAD823 zone 19.  WGS84 would be 32619
-        del db
 
     if build:
         # logging.basicConfig(filename=db_path.joinpath("build.log"), format='%(asctime)s %(message)s', encoding='utf-8', level=logging.DEBUG)

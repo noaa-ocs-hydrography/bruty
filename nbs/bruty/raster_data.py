@@ -60,6 +60,7 @@ class TiffStorage(Storage):
         self.metapath = path.with_suffix('.json')
         self._version = 1
         self.metadata = {}
+        self.get_metadata()  # read from disk, if applicable
         # @fixme - I think if this is called with arrays != None then the metadata will never get set.
         #    Needs a way to set projection info after create
         if arrays is not None:
@@ -91,7 +92,7 @@ class TiffStorage(Storage):
         if not self.metadata:
             try:
                 f = open(self.metapath, 'r')
-                metadata = json.load(f)
+                self.metadata = json.load(f)
             except:
                 self.metadata = {}
         return self.metadata.copy()
@@ -153,6 +154,7 @@ class TiffStorage(Storage):
         self.metadata = metadata.copy()
         f = open(self.metapath, 'w')
         json.dump(metadata, f)
+        f.close()
 
 class DatabaseStorage(Storage):
     pass
@@ -380,6 +382,7 @@ class RasterDelta(RasterData):
         delta_array[:LayersEnum.MASK, indices] = old_data[:LayersEnum.MASK, indices]
         delta_array[LayersEnum.MASK, indices] = 1
         r = RasterDelta(MemoryStorage(delta_array, ALL_LAYERS))
+        r.set_metadata(raster_old.get_metadata())
         # r.set_arrays(delta_array)
         return r
 

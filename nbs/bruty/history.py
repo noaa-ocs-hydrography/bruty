@@ -310,8 +310,8 @@ class RasterHistory(History):
             current_val = self.history[-1]
             for delta_idx in range(len(self.history) - 2, key-1, -1):
                 current_val = current_val.apply_delta(self.history[delta_idx])
-            current_val.set_corners(self.min_x, self.min_y, self.max_x, self.max_y)
-            current_val.set_epsg(self.epsg)
+            # current_val.set_corners(self.min_x, self.min_y, self.max_x, self.max_y)
+            # current_val.set_epsg(self.epsg)
             return current_val
 
     def insert(self, key, value):
