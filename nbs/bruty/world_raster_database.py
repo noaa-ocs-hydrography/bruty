@@ -20,6 +20,7 @@ from nbs.bruty.abstract import VABC, abstractmethod
 from nbs.bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles, TilingScheme, \
             ExactUTMTiles, ExactTilingScheme
 from nbs.bruty import morton
+from nbs.bruty.nbs_locks import LockNotAcquired, AreaLock, Lock, EXCLUSIVE, SHARED, NON_BLOCKING
 
 geo_debug = False
 _debug = False
@@ -180,9 +181,13 @@ class WorldTilesBackend(VABC):
         """
         return str(tx), str(ty)
 
-    def get_tile_history_by_index(self, tx, ty):
+    def get_history_path_by_index(self, tx, ty):
         tx_str, ty_str = self.tile_index_to_str(tx, ty)
-        history = self.history_class(self.storage_class(self.data_class, self.data_path.joinpath(tx_str).joinpath(ty_str)))
+        return self.data_path.joinpath(tx_str).joinpath(ty_str)
+
+    def get_tile_history_by_index(self, tx, ty):
+        hist_path = self.get_history_path_by_index(tx, ty)
+        history = self.history_class(self.storage_class(self.data_class, hist_path))
         lx, ly, ux, uy = self.tile_scheme.tile_index_to_xy(tx, ty)
         history.set_corners(lx, ly, ux, uy)
         history.set_epsg(self.epsg)
@@ -308,57 +313,6 @@ class WMTileBackend(WorldTilesBackend):
         super().__init__(storage)
 
 
-# @todo - Implement locks
-# class Lock:
-#     def __init__(self, storage, idn):
-#         pass
-#     def aquire(self, timeout=0):
-#         pass
-#     def release(self):
-#         pass
-#     def is_active(self):
-#         pass
-#     def __del__(self):
-#         self.release()
-#     def notify(self):
-#         pass
-# class ReadLock(Lock):  # actively being read
-#     pass
-# class WriteLock(Lock):  # actively being modified
-#     pass
-# class PendingReadLock(WriteLock):  # something wants to read but there are active/pending writes
-#     pass
-# class PendingWriteLock(WriteLock):  # something wants to modify but there are active reads
-#     pass
-# class Storage(VABC):
-#     """ Class to control the metadata associated with a WorldDatabaseBackend.
-#     This would store things like read/write/pending_write locks and hashes etc per Tile id.
-#     """
-#     @abstractmethod
-#     def readable_tile(self, idnum):
-#         # lock the file for reading
-#         pass
-#
-#     @abstractmethod
-#     def writeable_tile(self, tile):
-#         # request lock for writing
-#         pass
-#
-#     def get_read_lock(self, idnum):
-#         pass
-#
-#     def get_write_lock(self, idnum):
-#         pass
-
-# @todo Implement database of files, locks, processing states etc
-# class PostgresStorage(Storage):
-#     pass
-# class SQLite(Storage):
-#     pass
-# class PickleStorage(Storage):  # this would only work for single instances
-#     pass
-
-
 class WorldDatabase(VABC):
     """ Class to control Tiles that cover the Earth.
     Also supplies locking of tiles for read/write.
@@ -382,22 +336,54 @@ class WorldDatabase(VABC):
 
     @staticmethod
     def open(data_dir):
-        filename = "wdb_metadata.json"
-        data_path = pathlib.Path(data_dir).joinpath(filename)
-        infile = open(data_path, 'r')
-        data = json.load(infile)
+        data_path = WorldDatabase.metadata_filename_in_dir(data_dir)
+        with Lock(data_path, 'r', SHARED) as infile:  # this will wait for the file to be available
+            data = json.load(infile)
         data['data_path'] = pathlib.Path(data_dir)  # overridde in case the user copied the data to a different path
         cls = eval(data['class'])
         obj = cls.__new__(cls)
         obj.from_json(data)
         return obj
 
-    def to_file(self, data_path=None):
-        if not data_path:
-            data_path = self.db.data_path.joinpath("wdb_metadata.json")
-        outfile = open(data_path, 'w')
-        json.dump(self.for_json(), outfile, indent=2)
-        outfile.close()
+    @staticmethod
+    def metadata_filename_in_dir(data_dir):
+        filename = "wdb_metadata.json"
+        data_path = pathlib.Path(data_dir).joinpath(filename)
+        return data_path
+
+    def metadata_filename(self):
+        return WorldDatabase.metadata_filename_in_dir(self.db.data_path)
+
+    def update_metadata_from_disk(self, data_path=None, locked_file=None):
+        local_lock = None
+        if data_path is None:
+            data_path = self.metadata_filename()
+        # Lock the file so no other processes change it at the same time as reading
+        if locked_file is None:
+             local_lock = Lock(data_path, 'r', SHARED)  # this will wait for the file to be available
+             local_lock.acquire()
+             infile = local_lock.fh
+        else:
+            infile = locked_file
+        data = json.load(infile)
+        self.update_metadata_from_json(data)
+        if local_lock is not None:
+            local_lock.release()
+
+    def to_file(self, data_path=None, locked_file=None):
+        local_lock = None
+        if locked_file is None:
+            if not data_path:
+                data_path = self.db.data_path.joinpath("wdb_metadata.json")
+            # outfile = open(data_path, 'w')
+            local_lock = Lock(data_path, 'w', EXCLUSIVE)  # this will wait for the file to be available
+            local_lock.acquire()
+            outfile = local_lock.fh
+        else:
+            outfile = locked_file
+        json.dump(self.for_json(), outfile, indent=0)
+        if local_lock is not None:
+            local_lock.release()
 
     def for_json(self):
         # @todo make a base class or mixin that auto converts to json,
@@ -410,7 +396,12 @@ class WorldDatabase(VABC):
         return json_dict
 
     def from_json(self, json_dict):
+        """Build the entire object from json"""
         self.db = WorldTilesBackend.from_file(json_dict['data_path'])
+        self.update_metadata_from_json(json_dict)
+
+    def update_metadata_from_json(self, json_dict):
+        """Just build the survey metadata lists (another process may have written) rather than all objects"""
         # json stores all dictionary keys as strings, so have to convert back to integers
         self.included_ids = {int(key): val for key, val in json_dict['survey_ids'].items()}
         self.included_surveys = json_dict['survey_paths']
@@ -479,16 +470,33 @@ class WorldDatabase(VABC):
         uncertainty = data['uncertainty']
         score = numpy.full(x.shape, survey_score)
         flags = numpy.full(x.shape, flags)
-        tiles = self.insert_survey_array(numpy.array((x, y, depth, uncertainty, score, flags)), path_to_survey_data,
-                                         contrib_id=contrib_id, compare_callback=compare_callback)
-        self.finished_survey_insertion(path_to_survey_data, tiles, contrib_id)
-
+        txs, tys = self.db.tile_scheme.xy_to_tile_index(x, y)
+        tile_list = numpy.unique(numpy.array((txs, tys)).T, axis=0)
+        with AreaLock(tile_list, EXCLUSIVE|NON_BLOCKING, self.db.get_history_path_by_index) as lock:
+            tiles = self.insert_survey_array(numpy.array((x, y, depth, uncertainty, score, flags)), path_to_survey_data,
+                                             contrib_id=contrib_id, compare_callback=compare_callback)
+            # fixme need to use a blocking locker on writing the metadata to the world_database
+            self.finished_survey_insertion(path_to_survey_data, tiles, contrib_id)
+    # @todo - make the survey_ids and survey_paths into properties that load from disk when called by user so that they stay in sync.
+    #    Otherwise use postgres to hold that info so queries are current.
     def finished_survey_insertion(self, path_to_survey_data, tiles, contrib_id=None):
         # store the tiles filled by this survey as a convenience lookup for the future when removing or querying.
-        self.included_surveys[path_to_survey_data] = (contrib_id, list(tiles))  # json doesn't like sets, convert to list
-        if contrib_id is not None:
-            self.included_ids[contrib_id] = (path_to_survey_data, list(tiles))
-        self.to_file()
+        with Lock(self.metadata_filename(), 'r+', EXCLUSIVE) as metadata_file:
+            backup_path1 = self.metadata_filename().parent.joinpath("wdb_metadata.bak1")
+            backup_path2 = self.metadata_filename().parent.joinpath("wdb_metadata.bak2")
+            self.to_file(backup_path1)
+            # update the metadata in case another process wrote to it since the last time we updated/loaded
+            self.update_metadata_from_disk(locked_file=metadata_file)
+            # make a backup of the metadata in case something breaks here
+            self.to_file(backup_path2)
+            # add the new survey to the metadata and store to disk
+            self.included_surveys[path_to_survey_data] = (contrib_id, list(tiles))  # json doesn't like sets, convert to list
+            if contrib_id is not None:
+                self.included_ids[contrib_id] = (path_to_survey_data, list(tiles))
+            # rather than overwrite, since we have it locked, truncate the file and then write new data to it
+            metadata_file.seek(0)
+            metadata_file.truncate(0)
+            self.to_file(locked_file=metadata_file)
 
     def insert_survey_array(self, input_survey_data, contrib_name, accumulation_db=None, contrib_id=None, compare_callback=None):
         """ Insert a numpy array (or list of lists) of data into the database.
@@ -545,11 +553,13 @@ class WorldDatabase(VABC):
         # @FIXME - confirm that points outside bounds (less than lower left and greater than upper right) don't crash this
         for i_tile, (tx, ty) in enumerate(tile_list):
             if _debug:
-                print("debug skipping tiles")
+                pass
+                # print("debug skipping tiles")
                 # if tx != 3325 or ty != 3207:  # utm 16, US5PLQII_utm, H13196 -- gaps in DB and exported enc cells
                 # if tx != 3325 or ty != 3207:  # utm 16, US5MSYAF_utm, H13193 (raw bag is in utm15 though) -- gaps in DB and exported enc cells  217849.73 (m), 3307249.86 (m)
                 # if tx != 4614 or ty != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
                 # if tx != 4615 or ty != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
+                # if tx != 3740 or ty != 4297:
                 #    continue
             print(f'processing tile {i_tile + 1} of {len(tile_list)}')
             tile_history = accumulation_db.get_tile_history_by_index(tx, ty)
@@ -643,92 +653,115 @@ class WorldDatabase(VABC):
         """
         if not isinstance(vr, bag.VRBag):
             vr = bag.VRBag(vr, mode='r')
-        refinement_list = numpy.argwhere(vr.get_valid_refinements())
-        # in order to speed up the vr processing, which would have narrow strips being processed
-        # use a morton ordering on the tile indices so they are more closely processed in geolocation
-        # and fewer loads/writes are requested of the db tiles (which are slow tiff read/writes)
-        mort = morton.interleave2d_64(refinement_list.T)
-        sorted_refinement_indices = refinement_list[numpy.lexsort([mort])]
+
         print("@todo - do transforms correctly with proj/vdatum etc")
         if override_epsg == NO_OVERRIDE:
             epsg = rasterio.crs.CRS.from_string(vr.srs.ExportToWkt()).to_epsg()
         else:
             epsg = override_epsg
-        georef_transformer = get_crs_transformer(epsg, self.db.epsg)
-        temp_path = tempfile.mkdtemp(dir=self.db.data_path)
-        storage_db = self.db.make_accumulation_db(temp_path)
-        x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum = None, None, None, None, None, None
-        max_len = 500000
-        all_tiles = set()
-        for iref, (ti, tj) in enumerate(sorted_refinement_indices):
-            # get an individual refinement and convert it to x,y from the row column system it was in.
-            refinement = vr.read_refinement(ti, tj)
-            r, c = numpy.indices(refinement.depth.shape)  # make indices into array elements that can be converted to x,y coordinates
-            pts = numpy.array([r, c, refinement.depth, refinement.uncertainty]).reshape(4, -1)
-            pts = pts[:, pts[2] != vr.fill_value]  # remove nodata points
+        crs_transformer = get_crs_transformer(epsg, self.db.epsg)
 
-            x, y = affine_center(pts[0], pts[1], *refinement.geotransform)  # refinement_llx, resolution_x, 0, refinement_lly, 0, resolution_y)
-            if _debug:
-                print("debugging")
-                # inspect_x, inspect_y = 690134.03, 3333177.81  # ti, tj = (655, 265) in H13190
-                # if min(x) <  inspect_x and max(x) >inspect_x and min(y)< inspect_y and max(y) > inspect_y:
-                #     mdata = vr.varres_metadata[ti, tj]
-                #     resolution_x = mdata["resolution_x"]
-                #     resolution_y = mdata["resolution_y"]
-                #     sw_corner_x = mdata["sw_corner_x"]
-                #     sw_corner_y = mdata["sw_corner_y"]
-                #     bag_supergrid_dy = vr.cell_size_y
-                #     bag_llx = vr.minx - bag_supergrid_dx / 2.0  # @todo seems the llx is center of the supergridd cel?????
-                #     bag_lly = vr.miny - bag_supergrid_dy / 2.0
-                #     supergrid_x = tj * bag_supergrid_dx
-                #     supergrid_y = ti * bag_supergrid_dy
-                #     refinement_llx = bag_llx + supergrid_x + sw_corner_x - resolution_x / 2.0  # @TODO implies swcorner is to the center and not the exterior
-                #     refinement_lly = bag_lly + supergrid_y + sw_corner_y - resolution_y / 2.0
-                # else:
-                #     continue
-            if georef_transformer:
-                x, y = georef_transformer.transform(x, y)
-            depth = pts[2]
-            if reverse_z:
-                depth *= -1
-            uncertainty = pts[3]
-            scores = numpy.full(x.shape, survey_score)
-            flags = numpy.full(x.shape, flag)
-            # it's really slow to add each refinement to the db, so store up points until it's bigger and write at once
-            if x_accum is None:  # initialize arrays here to get the correct types
-                x_accum = numpy.zeros([max_len], dtype=x.dtype)
-                y_accum = numpy.zeros([max_len], dtype=y.dtype)
-                depth_accum = numpy.zeros([max_len], dtype=depth.dtype)
-                uncertainty_accum = numpy.zeros([max_len], dtype=uncertainty.dtype)
-                scores_accum = numpy.zeros([max_len], dtype=scores.dtype)
-                flags_accum = numpy.zeros([max_len], dtype=flags.dtype)
-                last_index = 0
-            # dump the accumulated arrays to the database if they are about to overflow the accumulation arrays
-            if last_index + len(x) > max_len:
+        # adjust for the VR returning center of supercells and not the edge.
+        supercell_half_x = vr.cell_size_x / 2.0
+        supercell_half_y = vr.cell_size_y / 2.0
+        x1 = vr.minx - supercell_half_x
+        y1 = vr.miny - supercell_half_y
+        x2 = vr.maxx + supercell_half_x
+        y2 = vr.maxy + supercell_half_y
+        # convert to target reference system if needed
+        if crs_transformer is not None:
+            ((x1, y1), (x2, y2)) = crs_transformer.transform((x1, x2), (y1, y2))
+        tile_list = self.db.get_tiles_indices(x1, y1, x2, y2)
+        with AreaLock(tile_list, EXCLUSIVE|NON_BLOCKING, self.db.get_history_path_by_index) as lock:
+            refinement_list = numpy.argwhere(vr.get_valid_refinements())
+            # in order to speed up the vr processing, which would have narrow strips being processed
+            # use a morton ordering on the tile indices so they are more closely processed in geolocation
+            # and fewer loads/writes are requested of the db tiles (which are slow tiff read/writes)
+            mort = morton.interleave2d_64(refinement_list.T)
+            sorted_refinement_indices = refinement_list[numpy.lexsort([mort])]
+
+            temp_path = tempfile.mkdtemp(dir=self.db.data_path)
+            storage_db = self.db.make_accumulation_db(temp_path)
+            x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum = None, None, None, None, None, None
+            max_len = 500000
+            all_tiles = set()
+            for iref, (ti, tj) in enumerate(sorted_refinement_indices):
+                # get an individual refinement and convert it to x,y from the row column system it was in.
+                refinement = vr.read_refinement(ti, tj)
+                # todo replace this with
+                r, c = numpy.indices(refinement.depth.shape)  # make indices into array elements that can be converted to x,y coordinates
+                pts = numpy.array([r, c, refinement.depth, refinement.uncertainty]).reshape(4, -1)
+                pts = pts[:, pts[2] != vr.fill_value]  # remove nodata points
+
+                x, y = affine_center(pts[0], pts[1], *refinement.geotransform)  # refinement_llx, resolution_x, 0, refinement_lly, 0, resolution_y)
+                ptsnew = refinement.get_xy_pts_arrays()
+                xnew, ynew = ptsnew[:2]
+                ptsnew = ptsnew[2:]
+                if not ((x==xnew).all() and (y==ynew).all() and (pts==ptsnew).all()):
+                    raise Exception("mismatch")
+
+                if _debug:
+                    print("debugging")
+                    # inspect_x, inspect_y = 690134.03, 3333177.81  # ti, tj = (655, 265) in H13190
+                    # if min(x) <  inspect_x and max(x) >inspect_x and min(y)< inspect_y and max(y) > inspect_y:
+                    #     mdata = vr.varres_metadata[ti, tj]
+                    #     resolution_x = mdata["resolution_x"]
+                    #     resolution_y = mdata["resolution_y"]
+                    #     sw_corner_x = mdata["sw_corner_x"]
+                    #     sw_corner_y = mdata["sw_corner_y"]
+                    #     bag_supergrid_dy = vr.cell_size_y
+                    #     bag_llx = vr.minx - bag_supergrid_dx / 2.0  # @todo seems the llx is center of the supergridd cel?????
+                    #     bag_lly = vr.miny - bag_supergrid_dy / 2.0
+                    #     supergrid_x = tj * bag_supergrid_dx
+                    #     supergrid_y = ti * bag_supergrid_dy
+                    #     refinement_llx = bag_llx + supergrid_x + sw_corner_x - resolution_x / 2.0  # @TODO implies swcorner is to the center and not the exterior
+                    #     refinement_lly = bag_lly + supergrid_y + sw_corner_y - resolution_y / 2.0
+                    # else:
+                    #     continue
+                if crs_transformer:
+                    x, y = crs_transformer.transform(x, y)
+                depth = pts[2]
+                if reverse_z:
+                    depth *= -1
+                uncertainty = pts[3]
+                scores = numpy.full(x.shape, survey_score)
+                flags = numpy.full(x.shape, flag)
+                # it's really slow to add each refinement to the db, so store up points until it's bigger and write at once
+                if x_accum is None:  # initialize arrays here to get the correct types
+                    x_accum = numpy.zeros([max_len], dtype=x.dtype)
+                    y_accum = numpy.zeros([max_len], dtype=y.dtype)
+                    depth_accum = numpy.zeros([max_len], dtype=depth.dtype)
+                    uncertainty_accum = numpy.zeros([max_len], dtype=uncertainty.dtype)
+                    scores_accum = numpy.zeros([max_len], dtype=scores.dtype)
+                    flags_accum = numpy.zeros([max_len], dtype=flags.dtype)
+                    last_index = 0
+                # dump the accumulated arrays to the database if they are about to overflow the accumulation arrays
+                if last_index + len(x) > max_len:
+                    tiles = self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
+                                                          uncertainty_accum[:last_index], scores_accum[:last_index], flags_accum[:last_index])),
+                                             vr.filename, accumulation_db=storage_db, contrib_id=contrib_id, compare_callback=compare_callback)
+                    all_tiles.update(tiles)
+                    last_index = 0
+                # append the new data to the end of the accumulation arrays
+                prev_index = last_index
+                last_index += len(x)
+                x_accum[prev_index:last_index] = x
+                y_accum[prev_index:last_index] = y
+                depth_accum[prev_index:last_index] = depth
+                uncertainty_accum[prev_index:last_index] = uncertainty
+                scores_accum[prev_index:last_index] = scores
+                flags_accum[prev_index:last_index] = flags
+
+            if last_index > 0:
                 tiles = self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
                                                       uncertainty_accum[:last_index], scores_accum[:last_index], flags_accum[:last_index])),
                                          vr.filename, accumulation_db=storage_db, contrib_id=contrib_id, compare_callback=compare_callback)
                 all_tiles.update(tiles)
-                last_index = 0
-            # append the new data to the end of the accumulation arrays
-            prev_index = last_index
-            last_index += len(x)
-            x_accum[prev_index:last_index] = x
-            y_accum[prev_index:last_index] = y
-            depth_accum[prev_index:last_index] = depth
-            uncertainty_accum[prev_index:last_index] = uncertainty
-            scores_accum[prev_index:last_index] = scores
-            flags_accum[prev_index:last_index] = flags
-
-        if last_index > 0:
-            tiles = self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
-                                                  uncertainty_accum[:last_index], scores_accum[:last_index], flags_accum[:last_index])),
-                                     vr.filename, accumulation_db=storage_db, contrib_id=contrib_id, compare_callback=compare_callback)
-            all_tiles.update(tiles)
-        self.db.append_accumulation_db(storage_db)
-        shutil.rmtree(storage_db.data_path, onerror=onerr)
-        # @fixme make sure vr.name is correct for full path
-        self.finished_survey_insertion(vr.name, all_tiles, contrib_id)
+            self.db.append_accumulation_db(storage_db)
+            shutil.rmtree(storage_db.data_path, onerror=onerr)
+            # @fixme make sure vr.name is correct for full path
+            # fixme need to use a blocking locker on writing the metadata to the world_database
+            self.finished_survey_insertion(vr.name, all_tiles, contrib_id)
 
     def insert_survey_gdal(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, data_band=1, uncert_band=2,
                            contrib_id=None, compare_callback=None, reverse_z=False):
@@ -756,64 +789,89 @@ class WorldDatabase(VABC):
         ds = gdal.Open(str(path_to_survey_data))
         drv = ds.GetDriver()
         driver_name = drv.ShortName
-        x0, dxx, dyx, y0, dxy, dyy = ds.GetGeoTransform()
+        geotransform = ds.GetGeoTransform()
         if override_epsg == NO_OVERRIDE:
             epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
         else:
             epsg = override_epsg
         # fixme - do coordinate transforms correctly
         print("@todo - do transforms correctly with proj/vdatum etc")
-        georef_transformer = get_crs_transformer(epsg, self.db.epsg)
+        crs_transformer = get_crs_transformer(epsg, self.db.epsg)
 
-        temp_path = tempfile.mkdtemp(dir=self.db.data_path)
-        storage_db = self.db.make_accumulation_db(temp_path)
-        all_tiles = set()
-        # read the data array in blocks
-        # if geo_debug and False:
-        #     col_block_size = col_size
-        #     row_block_size = row_size
+        x1, y1 = affine_center(0, 0, *geotransform)
+        x2, y2 = affine_center(ds.RasterYSize, ds.RasterXSize, *geotransform)
+        if crs_transformer is not None:
+            ((x1, y1), (x2, y2)) = crs_transformer.transform((x1, x2), (y1,y2))
+        tile_list = self.db.get_tiles_indices(x1, y1, x2, y2)
+        with AreaLock(tile_list, EXCLUSIVE|NON_BLOCKING, self.db.get_history_path_by_index) as lock:
+            temp_path = tempfile.mkdtemp(dir=self.db.data_path)
+            storage_db = self.db.make_accumulation_db(temp_path)
+            all_tiles = set()
+            # read the data array in blocks
+            # if geo_debug and False:
+            #     col_block_size = col_size
+            #     row_block_size = row_size
 
-        # @fixme -- bands 1,2 means bag works but single band will fail
-        for ic, ir, nodata, (data, uncert) in iterate_gdal_image(ds, (data_band, uncert_band)):
-                # if _debug:
-                #     if ic > 1:
-                #         break
+            # @fixme -- bands 1,2 means bag works but single band will fail
+            for ic, ir, nodata, (data, uncert) in iterate_gdal_image(ds, (data_band, uncert_band)):
+                    # if _debug:
+                    #     if ic > 1:
+                    #         break
 
-                # read the uncertainty as an array (if it exists)
-                r, c = numpy.indices(data.shape)  # make indices into array elements that can be converted to x,y coordinates
-                r += ir  # adjust the block r,c to the global raster r,c
-                c += ic
-                # pts = numpy.dstack([r, c, data, uncert]).reshape((-1, 4))
-                pts = numpy.array([r, c, data, uncert]).reshape(4, -1)
-                pts = pts[:, pts[2] != nodata]  # remove nodata points
-                # pts = pts[:, pts[2] > -18.2]  # reduce points to debug
-                if pts.size > 0:
-                    # if driver_name == 'BAG':
-                    x, y = affine_center(pts[0], pts[1], x0, dxx, dyx, y0, dxy, dyy)
-                    # else:
-                    #     x, y = affine(pts[0], pts[1], x0, dxx, dyx, y0, dxy, dyy)
-                    if geo_debug and False:
-                        s_pts = numpy.array((x, y, pts[0], pts[1], pts[2]))
-                        txs, tys = storage_db.tile_scheme.xy_to_tile_index(x, y)
-                        isle_tx, isle_ty = 3532, 4141
-                        isle_pts = s_pts[:, numpy.logical_and(txs == isle_tx, tys == isle_ty)]
-                        if isle_pts.size > 0:
+                    # read the uncertainty as an array (if it exists)
+                    r, c = numpy.indices(data.shape)  # make indices into array elements that can be converted to x,y coordinates
+                    r += ir  # adjust the block r,c to the global raster r,c
+                    c += ic
+                    # pts = numpy.dstack([r, c, data, uncert]).reshape((-1, 4))
+                    pts = numpy.array([r, c, data, uncert]).reshape(4, -1)
+                    pts = pts[:, pts[2] != nodata]  # remove nodata points
+                    # pts = pts[:, pts[2] > -18.2]  # reduce points to debug
+                    if pts.size > 0:
+                        # if driver_name == 'BAG':
+                        x, y = affine_center(pts[0], pts[1], *geotransform)
+                        # else:
+                        #     x, y = affine(pts[0], pts[1], *geotransform)
+                        if _debug:
                             pass
-                    if georef_transformer:
-                        x, y = georef_transformer.transform(x, y)
-                    depth = pts[2]
-                    if reverse_z:
-                        depth *= -1
-                    uncertainty = pts[3]
-                    scores = numpy.full(x.shape, survey_score)
-                    flags = numpy.full(x.shape, flag)
-                    tiles = self.insert_survey_array(numpy.array((x, y, depth, uncertainty, scores, flags)), path_to_survey_data,
-                                                     accumulation_db=storage_db, contrib_id=contrib_id, compare_callback=compare_callback)
-                    all_tiles.update(tiles)
-        self.db.append_accumulation_db(storage_db)
-        shutil.rmtree(storage_db.data_path)
-        # @fixme -- turn all_tiles into one consistent, unique list.  Is list of lists with duplicates right now
-        self.finished_survey_insertion(path_to_survey_data, all_tiles, contrib_id)
+                            ## clip data to an area of given tolerance around a point
+                            # px, py, tol = 400200, 3347921, 8
+                            # pts = pts[:, x < px + tol]  # thing the r,c,depth, uncert array
+                            # y = y[x < px + tol]  # then thin the y to match the new r,c,depth
+                            # x = x[x < px + tol]  # finally thin the x to match y and r,c,depth arrays
+                            # pts = pts[:, x > px - tol]
+                            # y = y[x > px - tol]
+                            # x = x[x > px - tol]
+                            # pts = pts[:, y < py + tol]
+                            # x = x[y < py + tol]
+                            # y = y[y < py + tol]
+                            # pts = pts[:, y > py - tol]
+                            # x = x[y > py - tol]
+                            # y = y[y > py - tol]
+                            # if pts.size == 0:
+                            #     continue
+                        if geo_debug and False:
+                            s_pts = numpy.array((x, y, pts[0], pts[1], pts[2]))
+                            txs, tys = storage_db.tile_scheme.xy_to_tile_index(x, y)
+                            isle_tx, isle_ty = 3532, 4141
+                            isle_pts = s_pts[:, numpy.logical_and(txs == isle_tx, tys == isle_ty)]
+                            if isle_pts.size > 0:
+                                pass
+                        if crs_transformer:
+                            x, y = crs_transformer.transform(x, y)
+                        depth = pts[2]
+                        if reverse_z:
+                            depth *= -1
+                        uncertainty = pts[3]
+                        scores = numpy.full(x.shape, survey_score)
+                        flags = numpy.full(x.shape, flag)
+                        tiles = self.insert_survey_array(numpy.array((x, y, depth, uncertainty, scores, flags)), path_to_survey_data,
+                                                         accumulation_db=storage_db, contrib_id=contrib_id, compare_callback=compare_callback)
+                        all_tiles.update(tiles)
+            self.db.append_accumulation_db(storage_db)
+            shutil.rmtree(storage_db.data_path)
+            # @fixme -- turn all_tiles into one consistent, unique list.  Is list of lists with duplicates right now
+            # fixme need to use a blocking locker on writing the metadata to the world_database
+            self.finished_survey_insertion(path_to_survey_data, all_tiles, contrib_id)
 
     def export_area(self, fname, x1, y1, x2, y2, res, target_epsg=None, driver="GTiff",
                     layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),

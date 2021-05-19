@@ -23,6 +23,7 @@ from nbs.bruty.history import DiskHistory, RasterHistory, AccumulationHistory
 from nbs.bruty.world_raster_database import WorldDatabase, UTMTileBackend
 from nbs.bruty.utils import onerr
 from nbs.bruty.utils import get_crs_transformer, compute_delta_coord, transform_rect
+from nbs.bruty.nbs_locks import LockNotAcquired
 
 _debug = True
 
@@ -207,26 +208,33 @@ def process_nbs_database(world_db_path, table_name, database, username, password
         # # @FIXME is contributor an int or float -- needs to be int 32 and maybe int 64 (or two int 32s)
         print('starting', path)
         print(datetime.now().isoformat(), i, "of", len(names_list))
+        # FIXME there is the possibility that we load metadata looking for SID=xx while it is being processed.
+        #    Then it gets written to disk as we figure out what tiles to lock.
+        #    We could check in the insert function again (once locks are obtained) to make sure survey=xx is not in the already processed list.
+        db.update_metadata_from_disk()
         if sid not in db.included_ids:
-            if path.endswith(".csv.zip"):
-                csv_path = path[:-4]
-                p = subprocess.Popen(f'python -m zipfile -e "{path}" "{os.path.dirname(path)}"')
-                p.wait()
-                if os.path.exists(csv_path):
-                    try:
-                        # points are in opposite convention as BAGs and exported CSAR tiffs, so reverse the z component
-                        db.insert_txt_survey(csv_path, format=[('x', 'f8'), ('y', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')],
-                                             override_epsg=db.db.epsg, contrib_id=sid, compare_callback=comp, reverse_z=True)
-                    except ValueError:
-                        print("Value Error")
-                        print(traceback.format_exc())
-                    os.remove(f'{csv_path}')
+            try:
+                if path.endswith(".csv.zip"):
+                    csv_path = path[:-4]
+                    p = subprocess.Popen(f'python -m zipfile -e "{path}" "{os.path.dirname(path)}"')
+                    p.wait()
+                    if os.path.exists(csv_path):
+                        try:
+                            # points are in opposite convention as BAGs and exported CSAR tiffs, so reverse the z component
+                            db.insert_txt_survey(csv_path, format=[('x', 'f8'), ('y', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')],
+                                                 override_epsg=db.db.epsg, contrib_id=sid, compare_callback=comp, reverse_z=True)
+                        except ValueError:
+                            print("Value Error")
+                            print(traceback.format_exc())
+                        os.remove(f'{csv_path}')
+                    else:
+                        print("\n\nCSV was not extracted from zip\n\n\n")
                 else:
-                    print("\n\nCSV was not extracted from zip\n\n\n")
-            else:
-                db.insert_survey(path, override_epsg=db.db.epsg, contrib_id=sid, compare_callback=comp)
-            print('inserted', path)
-
+                    db.insert_survey(path, override_epsg=db.db.epsg, contrib_id=sid, compare_callback=comp)
+                print('inserted', path)
+            except LockNotAcquired:
+                print('tiles in use for ', sid, path)
+                print('skipping to next survey')
     print('data MB:', total / 1000000)
 
 def convert_csar():
@@ -275,9 +283,9 @@ if __name__ == '__main__':
             shutil.rmtree(use_dir, onerror=onerr)
         os.makedirs(use_dir)
         return use_dir
-
-    db_path = data_dir.joinpath(r"test_pbc_19_db_metacheck")
-    make_clean_dir(r"test_pbc_19_db_metacheck")
+    subdir = r"test_pbc_19_db_locks"
+    db_path = data_dir.joinpath(subdir)
+    make_clean_dir(subdir)
 
     if not os.path.exists(db_path.joinpath("wdb_metadata.json")):
         build = True
