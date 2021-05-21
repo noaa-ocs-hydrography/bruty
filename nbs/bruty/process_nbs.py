@@ -3,6 +3,7 @@
 # sys.path.append(r"C:\Git_Repos\bruty")
 import os
 import sys
+import time
 import traceback
 from datetime import datetime
 import subprocess
@@ -170,72 +171,111 @@ def process_nbs_database(world_db_path, table_name, database, username, password
     path_col = fields.index('script_to_filename')
     id_col = fields.index('sid')
     comp = partial(nbs_survey_sort, sort_dict)
-    total = 0
     print('------------   changing paths !!!!!!!!!!')
-    for i, (filename, sid, path) in enumerate(names_list):
-        copy_data = False
-        path_e = path.lower().replace('\\\\nos.noaa\\ocs\\hsd\\projects\\nbs\\nbs_data\\pbc_northeast_utm19n_mllw',
-                                      r'E:\Data\nbs\PBC_Northeast_UTM19N_MLLW')
-        path_c = path.lower().replace('\\\\nos.noaa\\ocs\\hsd\\projects\\nbs\\nbs_data\\pbc_northeast_utm19n_mllw',
-                                      r'C:\Data\nbs\PBC_Northeast_UTM19N_MLLW')
-        if copy_data:
-            try:
-                os.makedirs(os.path.dirname(path_c), exist_ok=True)
-                if not path_e.endswith("csar"):
-                    pass
-                    # shutil.copy(path_e, path_c)
-                else:
-                    for mod_fname in (f"{path_e}.elev.tif", f"{path_e}.depth.tif", f"{path_e}.csv.zip"):
-                        if os.path.exists(mod_fname):
-                            shutil.copy(mod_fname, "c"+mod_fname[1:])
+    while names_list:
+        num_names = len(names_list)
+        for i in range(num_names-1, -1, -1):
+            (filename, sid, path) = names_list[i]
+            if _debug:
+                pass
+                # if sid not in (13425, 13562, 10035):
+                #     continue
+                # if i > 2:
+                #     break
+
+            path_e = path.lower().replace('\\\\nos.noaa\\ocs\\hsd\\projects\\nbs\\nbs_data\\pbc_northeast_utm19n_mllw',
+                                          r'E:\Data\nbs\PBC_Northeast_UTM19N_MLLW')
+            path_c = path.lower().replace('\\\\nos.noaa\\ocs\\hsd\\projects\\nbs\\nbs_data\\pbc_northeast_utm19n_mllw',
+                                          r'C:\Data\nbs\PBC_Northeast_UTM19N_MLLW')
+            copy_data = False
+            if copy_data:
+                try:
+                    os.makedirs(os.path.dirname(path_c), exist_ok=True)
+                    if not path_e.endswith("csar"):
+                        pass
+                        # shutil.copy(path_e, path_c)
+                    else:
+                        for mod_fname in (f"{path_e}.elev.tif", f"{path_e}.depth.tif", f"{path_e}.csv.zip"):
+                            if os.path.exists(mod_fname):
+                                shutil.copy(mod_fname, "c"+mod_fname[1:])
+                                try:
+                                    os.remove(path_c)  # take the csar off disk
+                                    os.remove(path_c+"0")
+                                except:
+                                    pass
+                except FileNotFoundError:
+                    print("File missing", sid, path)
+            # convert csar names to exported data, 1 of 3 types
+            if path.endswith("csar"):
+                for mod_fname in (f"{path_c}.elev.tif", f"{path_c}.depth.tif", f"{path_c}.csv.zip"):
+                    if os.path.exists(mod_fname):
+                        path = mod_fname
+            else:
+                path = path_c
+            if not os.path.exists(path):
+                print(path, "didn't exist")
+                names_list.pop(i)
+                continue
+            # # @FIXME is contributor an int or float -- needs to be int 32 and maybe int 64 (or two int 32s)
+            print('starting', path)
+            print(datetime.now().isoformat(), num_names-i, "of", num_names)
+            # FIXME there is the possibility that we load metadata looking for SID=xx while it is being processed.
+            #    Then it gets written to disk as we figure out what tiles to lock.
+            #    We could check in the insert function again (once locks are obtained) to make sure survey=xx is not in the already processed list.
+            sid_in_db = True
+            if sid not in db.included_ids:
+                db.update_metadata_from_disk()  # if not in the cached list then load from disk in case another process changed it in the interim
+                if sid not in db.included_ids:
+                    sid_in_db = False
+
+            # @todo fixme - make a being processed list and check that the survey is not already being processed.
+            #   This is an issue with the zip files overwriting a file being read
+            #   but longer term in not starting to process/read the same file - especially for point data where we read the whole
+            #   dataset to figure out the tiles to lock
+
+            if not sid_in_db:
+                try:
+                    if path.endswith(".csv.zip"):
+                        csv_path = path[:-4]
+                        p = subprocess.Popen(f'python -m zipfile -e "{path}" "{os.path.dirname(path)}"')
+                        p.wait()
+                        if os.path.exists(csv_path):
                             try:
-                                os.remove(path_c)  # take the csar off disk
-                                os.remove(path_c+"0")
-                            except:
-                                pass
-            except FileNotFoundError:
-                print("File missing", sid, path)
-        # convert csar names to exported data, 1 of 3 types
-        if path.endswith("csar"):
-            for mod_fname in (f"{path_c}.elev.tif", f"{path_c}.depth.tif", f"{path_c}.csv.zip"):
-                if os.path.exists(mod_fname):
-                    path = mod_fname
-        else:
-            path = path_c
-        if not os.path.exists(path):
-            print(path, "didn't exist")
-            continue
-        # # @FIXME is contributor an int or float -- needs to be int 32 and maybe int 64 (or two int 32s)
-        print('starting', path)
-        print(datetime.now().isoformat(), i, "of", len(names_list))
-        # FIXME there is the possibility that we load metadata looking for SID=xx while it is being processed.
-        #    Then it gets written to disk as we figure out what tiles to lock.
-        #    We could check in the insert function again (once locks are obtained) to make sure survey=xx is not in the already processed list.
-        db.update_metadata_from_disk()
-        if sid not in db.included_ids:
-            try:
-                if path.endswith(".csv.zip"):
-                    csv_path = path[:-4]
-                    p = subprocess.Popen(f'python -m zipfile -e "{path}" "{os.path.dirname(path)}"')
-                    p.wait()
-                    if os.path.exists(csv_path):
+                                # points are in opposite convention as BAGs and exported CSAR tiffs, so reverse the z component
+                                db.insert_txt_survey(csv_path, format=[('x', 'f8'), ('y', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')],
+                                                     override_epsg=db.db.epsg, contrib_id=sid, compare_callback=comp, reverse_z=True)
+                            except ValueError:
+                                print("Value Error")
+                                print(traceback.format_exc())
+
+                            try:
+                                os.remove(f'{csv_path}')
+                            except FileNotFoundError:
+                                print(f'File NOT Found:  {csv_path}')
+
+                            except PermissionError:
+                                time.sleep(1)
+                                try:
+                                    os.remove(f'{csv_path}')
+                                except:
+                                    print(f"failed to remove{csv_path}")
+                        else:
+                            print("\n\nCSV was not extracted from zip\n\n\n")
+                    else:
                         try:
-                            # points are in opposite convention as BAGs and exported CSAR tiffs, so reverse the z component
-                            db.insert_txt_survey(csv_path, format=[('x', 'f8'), ('y', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')],
-                                                 override_epsg=db.db.epsg, contrib_id=sid, compare_callback=comp, reverse_z=True)
+                            db.insert_survey(path, override_epsg=db.db.epsg, contrib_id=sid, compare_callback=comp)
                         except ValueError:
                             print("Value Error")
                             print(traceback.format_exc())
-                        os.remove(f'{csv_path}')
-                    else:
-                        print("\n\nCSV was not extracted from zip\n\n\n")
-                else:
-                    db.insert_survey(path, override_epsg=db.db.epsg, contrib_id=sid, compare_callback=comp)
-                print('inserted', path)
-            except LockNotAcquired:
-                print('tiles in use for ', sid, path)
-                print('skipping to next survey')
-    print('data MB:', total / 1000000)
+                    print('inserted', path)
+                    names_list.pop(i)
+                except LockNotAcquired:
+                    print('tiles in use for ', sid, path)
+                    print('skipping to next survey')
+            else:
+                print(f"{sid} already in database")
+                names_list.pop(i)
+
 
 def convert_csar():
     cnt = 0
@@ -285,7 +325,7 @@ if __name__ == '__main__':
         return use_dir
     subdir = r"test_pbc_19_db_locks"
     db_path = data_dir.joinpath(subdir)
-    make_clean_dir(subdir)
+    # make_clean_dir(subdir)
 
     if not os.path.exists(db_path.joinpath("wdb_metadata.json")):
         build = True
@@ -318,7 +358,7 @@ if __name__ == '__main__':
         ky['file'] = f
         orig_print(*args, **ky)  # build the string
         # orig_print(f.getvalue())  # logger is printing to screen now
-        logger.info(f.getvalue())
+        logger.info(f.getvalue()[:-1])  # strip the newline at the end
 
 
     print("Using database at", db_path)
