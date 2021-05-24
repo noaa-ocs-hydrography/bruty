@@ -64,7 +64,7 @@ SE_5x5 = [r, c + 5, z + 100, uncertainty + 1, score + 1, flags]
 NW_5x5 = [r + 5, c, z + 200, uncertainty + 2, score + 2, flags]
 MID_5x5 = [r + 2, c + 2, z * 0 + 999, uncertainty + 0.75, score + 0.5, flags]
 
-""" This should have made an array like this (remember that increasing Y does down the array with increasing row)
+""" This should have made an array like this (remember that increasing Y goes down the array with increasing row)
 array([[  0,  10,  20,  30,  40, 100, 110, 120, 130, 140],
        [  1,  11,  21,  31,  41, 101, 111, 121, 131, 141],
        [  2,  12,  22,  32,  42, 102, 112, 122, 132, 142],
@@ -76,18 +76,6 @@ array([[  0,  10,  20,  30,  40, 100, 110, 120, 130, 140],
        [203, 213, 223, 233, 243, nan, nan, nan, nan, nan],
        [204, 214, 224, 234, 244, nan, nan, nan, nan, nan]],
        ])
-
-So, displayed in Arc it would look like: 
-array([[204., 214., 224., 234., 244.,  nan,  nan,  nan,  nan,  nan],
-       [203., 213., 223., 233., 243.,  nan,  nan,  nan,  nan,  nan],
-       [202., 212., 222., 232., 242.,  nan,  nan,  nan,  nan,  nan],
-       [201., 211., 221., 231., 241., 999., 999.,  nan,  nan,  nan],
-       [200., 210., 220., 230., 240., 999., 999.,  nan,  nan,  nan],
-       [  4.,  14., 999., 999., 999., 104., 114., 124., 134., 144.],
-       [  3.,  13., 999., 999., 999., 103., 113., 123., 133., 143.],
-       [  2.,  12., 999., 999., 999., 102., 112., 122., 132., 142.],
-       [  1.,  11.,  21.,  31.,  41., 101., 111., 121., 131., 141.],
-       [  0.,  10.,  20.,  30.,  40., 100., 110., 120., 130., 140.]],
 
 Then put an array in the center with all 999. 
 
@@ -110,4 +98,17 @@ array([[  0,  10,  20,  30,  40, 100, 110, 120, 130, 140],
        [203, 213, 223, 233, 243, nan, nan, nan, nan, nan],
        [204, 214, 224, 234, 244, nan, nan, nan, nan, nan]],
       dtype=float32)
+
+So, displayed in Arc it would look like: 
+array([[204., 214., 224., 234., 244.,  nan,  nan,  nan,  nan,  nan],
+       [203., 213., 223., 233., 243.,  nan,  nan,  nan,  nan,  nan],
+       [202., 212., 222., 232., 242.,  nan,  nan,  nan,  nan,  nan],
+       [201., 211., 221., 231., 241., 999., 999.,  nan,  nan,  nan],
+       [200., 210., 220., 230., 240., 999., 999.,  nan,  nan,  nan],
+       [  4.,  14., 999., 999., 999., 104., 114., 124., 134., 144.],
+       [  3.,  13., 999., 999., 999., 103., 113., 123., 133., 143.],
+       [  2.,  12., 999., 999., 999., 102., 112., 122., 132., 142.],
+       [  1.,  11.,  21.,  31.,  41., 101., 111., 121., 131., 141.],
+       [  0.,  10.,  20.,  30.,  40., 100., 110., 120., 130., 140.]],
+
 """

@@ -63,35 +63,35 @@ def get_nbs_records(table_name, database, username, password, hostname='OCS-VS-N
     return fields, records
 
 
-def nbs_survey_sort(id_to_score, pts, existing_arrays):
+def nbs_survey_sort(id_to_score, pts, existing_arrays, pts_col_offset=0, existing_col_offset=0):
+    return nbs_sort_values(id_to_score, pts[LayersEnum.CONTRIBUTOR + pts_col_offset], pts[LayersEnum.ELEVATION + pts_col_offset],
+                           existing_arrays[LayersEnum.CONTRIBUTOR+existing_col_offset], existing_arrays[LayersEnum.ELEVATION+existing_col_offset])
+
+def nbs_sort_values(id_to_score, new_contrib, new_elev, accum_contrib, accum_elev):
     # return arrays that merge_arrays will use for sorting.
     # basically the nbs sort is 4 keys: Decay Score, resolution, depth, alphabetical.
     # Decay and resolution get merged into one array since they are true for all points of the survey while depth varies with position.
     # alphabetical is a final tie breaker to make sure the same contributor is picked in the cases where the first three tie.
 
     # find all the contributors to look up
-    all_contributors = existing_arrays[LayersEnum.CONTRIBUTOR]
-    unique_contributors = numpy.unique(all_contributors[~numpy.isnan(all_contributors)])
+    unique_contributors = numpy.unique(accum_contrib[~numpy.isnan(accum_contrib)])
     # make arrays to store the integer scores in
-    existing_decay_and_res = all_contributors.copy()
-    existing_alphabetical = all_contributors.copy()
+    existing_decay_and_res = accum_contrib.copy()
+    existing_alphabetical = accum_contrib.copy()
     # for each unique contributor fill with the associated decay/resolution score and the alphabetical score
     for contrib in unique_contributors:
-        existing_decay_and_res[all_contributors == contrib] = id_to_score[contrib][0]
-        existing_alphabetical[all_contributors == contrib] = id_to_score[contrib][1]
-    existing_elevation = existing_arrays[LayersEnum.ELEVATION]
+        existing_decay_and_res[accum_contrib == contrib] = id_to_score[contrib][0]
+        existing_alphabetical[accum_contrib == contrib] = id_to_score[contrib][1]
     # @FIXME is contributor an int or float -- needs to be int 32 and maybe int 64 (or two int 32s)
-    pts_contributors = pts[LayersEnum.CONTRIBUTOR + 2]
-    unique_pts_contributors = numpy.unique(pts_contributors[~numpy.isnan(pts_contributors)])
-    decay_and_res_score = pts_contributors.copy()
-    alphabetical = pts_contributors.copy()
+    unique_pts_contributors = numpy.unique(new_contrib[~numpy.isnan(new_contrib)])
+    decay_and_res_score = new_contrib.copy()
+    alphabetical = new_contrib.copy()
     for contrib in unique_pts_contributors:
-        decay_and_res_score[pts_contributors == contrib] = id_to_score[contrib][0]
-        alphabetical[pts_contributors == contrib] = id_to_score[contrib][1]
-    elevation = pts[LayersEnum.ELEVATION + 2]
+        decay_and_res_score[new_contrib == contrib] = id_to_score[contrib][0]
+        alphabetical[new_contrib == contrib] = id_to_score[contrib][1]
 
-    return numpy.array((decay_and_res_score, elevation, alphabetical)), \
-           numpy.array((existing_decay_and_res, existing_elevation, existing_alphabetical)), \
+    return numpy.array((decay_and_res_score, new_elev, alphabetical)), \
+           numpy.array((existing_decay_and_res, accum_elev, existing_alphabetical)), \
            (False, False, False)
 
 
@@ -159,6 +159,13 @@ def id_to_scoring(fields, records):
         sort_dict[sid].append(n)
     return sorted_recs, names_list, sort_dict
 
+
+def rec_id(n):
+    for rec in records:
+        if rec[-1] == n:
+            print(rec[:2], rec[-1])
+            print(rec[2])
+            print(rec[3], rec[4])
 
 def process_nbs_database(world_db_path, table_name, database, username, password, hostname='OCS-VS-NBS01', port='5434'):
     fields, records = get_nbs_records(table_name, database, username, password, hostname=hostname, port=port)
@@ -313,6 +320,7 @@ def convert_csar():
                             break
 
 if __name__ == '__main__':
+    raise Exception("Enhance unit test to make a world database, insert txt and raster data (testing new combine logic) and then export to lower res (again testing combine during export)")
     # data_dir = pathlib.Path(__file__).parent.parent.parent.joinpath('tests').joinpath("test_data_output")
     data_dir = pathlib.Path("c:\\data\\nbs\\test_data_output")  # avoid putting in the project directory as pycharm then tries to cache everything I think
     build = True

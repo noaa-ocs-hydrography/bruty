@@ -4,8 +4,8 @@ import os
 import pytest
 import numpy
 
-from bruty.history import DiskHistory, MemoryHistory, RasterHistory
-from bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
+from nbs.bruty.history import DiskHistory, MemoryHistory, RasterHistory
+from nbs.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
 from test_data import master_data, data_dir
 
 
@@ -48,20 +48,20 @@ def test_layer_ordering(raster):
 
     data = numpy.array((elev, uncert, contr, score, flags, mask))
 
-    raster.set_arrays(data)
+    raster.set_arrays(data[:5])
     assert numpy.all(raster.get_array(LayersEnum.ELEVATION) == raster.get_array("ELEVATION"))
     assert numpy.all(raster.get_array(LayersEnum.ELEVATION) == elev)
     assert numpy.all(raster.get_array(LayersEnum.UNCERTAINTY) == uncert)
     assert numpy.all(raster.get_array(LayersEnum.CONTRIBUTOR) == contr)
     assert numpy.all(raster.get_array(LayersEnum.SCORE) == score)
 
-    raster.set_arrays(data, [3, 2, 1, 0])  # pass them in backwards and make sure they sort correctly
+    raster.set_arrays(data[:4], [3, 2, 1, 0])  # pass them in backwards and make sure they sort correctly
     assert numpy.all(raster.get_array(LayersEnum.ELEVATION) == score)
     assert numpy.all(raster.get_array(LayersEnum.UNCERTAINTY) == contr)
     assert numpy.all(raster.get_array(LayersEnum.CONTRIBUTOR) == uncert)
     assert numpy.all(raster.get_array(LayersEnum.SCORE) == elev)
 
-    raster.set_arrays(data, ["UNCERTAINTY", LayersEnum.ELEVATION, 3, "CONTRIBUTOR"])  # pass them in using strings, numbers and enum values
+    raster.set_arrays(data[:4], ["UNCERTAINTY", LayersEnum.ELEVATION, 3, "CONTRIBUTOR"])  # pass them in using strings, numbers and enum values
     assert numpy.all(raster.get_array(LayersEnum.ELEVATION) == uncert)
     assert numpy.all(raster.get_array(LayersEnum.UNCERTAINTY) == elev)
     assert numpy.all(raster.get_array(LayersEnum.CONTRIBUTOR) == score)
@@ -77,5 +77,3 @@ def test_fill(raster_history, data_rasters):
         assert raster_history[i].get_metadata() == data.get_metadata()
 
 
-def test_history(rasters):
-    RasterHistory

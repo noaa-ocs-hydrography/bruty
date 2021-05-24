@@ -409,7 +409,7 @@ def vr_triangle_closing(matrix, refinement_rcb, fill):
                         start_j = numpy.ceil(j2 - (j2 - j) * (r_i - i2) / (i3 - i2))
                     else:
                         start_j = j
-                    upsampled[r_i, int(start_j):j2 + 1] = fill
+                    matrix[r_i, int(start_j):j2 + 1] = fill
 
 
 def vr_close_neighbors(matrix, refinements, refinements_xyz, refinements_res, supercell_gap_multiplier=-1,
@@ -558,7 +558,7 @@ def vr_to_sr_points(vr, output_path, output_res, driver='GTiff'):
     except TypeError:
         resx = resy = output_res
     if not isinstance(vr, bag.VRBag):
-        vr = bag.VRBag(vr_path, mode='r')
+        vr = bag.VRBag(vr, mode='r')
     epsg = rasterio.crs.CRS.from_string(vr.horizontal_crs_wkt).to_epsg()
     db_path = pathlib.Path(output_path).parent.joinpath('custom_db')
     supercell_half_x = vr.cell_size_x / 2.0
@@ -568,10 +568,10 @@ def vr_to_sr_points(vr, output_path, output_res, driver='GTiff'):
                                                vr.maxx + supercell_half_x, vr.maxy + supercell_half_y, resx, resy, db_path)
     area_db.insert_survey_vr(vr)
     cnt, sr_ds = area_db.export(output_path, driver=driver, layers=[LayersEnum.ELEVATION])
-    if not _debug:
-        del area_db
-        if os.path.exists(db_path):
-            shutil.rmtree(db_path, onerror=onerr)
+    # if not _debug:
+    #     del area_db
+    #     if os.path.exists(db_path):
+    #         shutil.rmtree(db_path, onerror=onerr)
 
     return sr_ds, area_db, cnt
 

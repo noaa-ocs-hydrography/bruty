@@ -4,6 +4,7 @@ import pathlib
 import shutil
 import tempfile
 import time
+import gc
 from datetime import datetime
 
 import numpy
@@ -24,7 +25,7 @@ from nbs.bruty.nbs_locks import LockNotAcquired, AreaLock, Lock, EXCLUSIVE, SHAR
 
 
 geo_debug = False
-_debug = True
+_debug = False
 
 no_lock = False
 
@@ -421,7 +422,7 @@ class WorldDatabase(VABC):
         self.included_ids = {int(key): val for key, val in json_dict['survey_ids'].items()}
         self.included_surveys = json_dict['survey_paths']
 
-    def insert_survey(self, path_to_survey_data, override_epsg=NO_OVERRIDE, contrib_id=None, compare_callback=None, reverse_z=False):
+    def insert_survey(self, path_to_survey_data, override_epsg=NO_OVERRIDE, contrib_id=numpy.nan, compare_callback=None, reverse_z=False):
         done = False
         extension = pathlib.Path(str(path_to_survey_data).lower()).suffix
         if extension == '.bag':
@@ -444,7 +445,7 @@ class WorldDatabase(VABC):
                 done = True
 
     def insert_txt_survey(self, path_to_survey_data, survey_score=100, flags=0, format=None, override_epsg=NO_OVERRIDE,
-                          contrib_id=None, compare_callback=None, reverse_z=False):
+                          contrib_id=numpy.nan, compare_callback=None, reverse_z=False):
         """ Reads a text file and inserts into the tiled database.
         The format parameter is passed to numpy.loadtxt and needs to have names of x, y, depth, uncertainty.
 
@@ -497,7 +498,7 @@ class WorldDatabase(VABC):
 
     # @todo - make the survey_ids and survey_paths into properties that load from disk when called by user so that they stay in sync.
     #    Otherwise use postgres to hold that info so queries are current.
-    def finished_survey_insertion(self, path_to_survey_data, tiles, contrib_id=None):
+    def finished_survey_insertion(self, path_to_survey_data, tiles, contrib_id=numpy.nan):
         # store the tiles filled by this survey as a convenience lookup for the future when removing or querying.
         print('locking metadata for exclusive at ', datetime.now().isoformat())
         with Lock(self.metadata_filename(), 'r+', EXCLUSIVE) as metadata_file:
@@ -518,7 +519,7 @@ class WorldDatabase(VABC):
             self.to_file(locked_file=metadata_file)
             print('unlocking metadata at ', datetime.now().isoformat())
 
-    def insert_survey_array(self, input_survey_data, contrib_name, accumulation_db=None, contrib_id=None, compare_callback=None):
+    def insert_survey_array(self, input_survey_data, contrib_name, accumulation_db=None, contrib_id=numpy.nan, compare_callback=None):
         """ Insert a numpy array (or list of lists) of data into the database.
 
         Parameters
@@ -557,6 +558,8 @@ class WorldDatabase(VABC):
             contrib_name = str(contrib_name)
         if not accumulation_db:
             accumulation_db = self.db
+        if contrib_id is None:
+            contrib_id = numpy.nan
         contributor = numpy.full(input_survey_data[0].shape, contrib_id)
         survey_data = numpy.array((input_survey_data[0], input_survey_data[1], input_survey_data[2],
                                    input_survey_data[3], contributor, input_survey_data[4], input_survey_data[5]))
@@ -614,7 +617,8 @@ class WorldDatabase(VABC):
             # also allow for depth (elevation) to be placed into the comparison matrices.
             # @fixme confirm this is working
             if compare_callback is not None and contrib_id is not None:
-                sort_vals, new_sort_values, reverse = compare_callback(pts, new_arrays)
+                # pts has x,y then columns in RasterData order, so slice off the first two columns
+                sort_vals, new_sort_values, reverse = compare_callback(pts[2:], new_arrays)
             else:  # default to score, depth with no reversals
                 new_sort_values = numpy.array((new_arrays[LayersEnum.SCORE], new_arrays[LayersEnum.ELEVATION]))
                 sort_vals = (pts[LayersEnum.SCORE + 2], pts[LayersEnum.ELEVATION + 2])
@@ -659,7 +663,7 @@ class WorldDatabase(VABC):
         else:
             return 512, 512
 
-    def insert_survey_vr(self, vr, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, contrib_id=None, compare_callback=None, reverse_z=False):
+    def insert_survey_vr(self, vr, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, contrib_id=numpy.nan, compare_callback=None, reverse_z=False):
         """
         Parameters
         ----------
@@ -787,7 +791,7 @@ class WorldDatabase(VABC):
                 raise Exception(f"Survey Exists already in database {contrib_id}")
 
     def insert_survey_gdal(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, data_band=1, uncert_band=2,
-                           contrib_id=None, compare_callback=None, reverse_z=False):
+                           contrib_id=numpy.nan, compare_callback=None, reverse_z=False):
         """ Insert a gdal readable dataset into the database.
         Currently works for BAG and probably geotiff.
         Parameters
@@ -901,7 +905,7 @@ class WorldDatabase(VABC):
 
     def export_area(self, fname, x1, y1, x2, y2, res, target_epsg=None, driver="GTiff",
                     layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
-                    gdal_options=("BLOCKXSIZE=256", "BLOCKYSIZE=256", "TILED=YES", "COMPRESS=LZW", "BIGTIFF=YES")):
+                    gdal_options=("BLOCKXSIZE=256", "BLOCKYSIZE=256", "TILED=YES", "COMPRESS=LZW", "BIGTIFF=YES"), compare_callback=None):
         """ Retrieves an area from the database at the requested resolution.
 
         # 1) Create a single tif tile that covers the area desired
@@ -959,7 +963,7 @@ class WorldDatabase(VABC):
         dataset = make_gdal_dataset_area(fname, len(layers), x1, y1, x2, y2, dx, dy, target_epsg, driver, gdal_options)
         # probably won't export the score layer but we need it when combining data into the export area
 
-        dataset_score = make_gdal_dataset_area(score_name, 2, x1, y1, x2, y2, dx, dy, target_epsg, driver)
+        dataset_score = make_gdal_dataset_area(score_name, 3, x1, y1, x2, y2, dx, dy, target_epsg, driver)
 
         affine_transform = dataset.GetGeoTransform()  # x0, dxx, dyx, y0, dxy, dyy
         score_band = dataset_score.GetRasterBand(1)
@@ -1000,30 +1004,44 @@ class WorldDatabase(VABC):
             if block_rows < 1 or block_cols < 1:
                 continue
             # 4) Use the db.tile_scheme function to convert points from the tiles to x,y
-            # @fixme - score and depth have same value, read bug?
-            tile_score = raster_data.get_arrays(LayersEnum.SCORE)[0]
-            tile_depth = raster_data.get_arrays(LayersEnum.ELEVATION)[0]
             tile_layers = raster_data.get_arrays(layers)
+            if compare_callback is not None:
+                tile_scoring, new_sort_values, reverse = compare_callback(raster_data.get_arrays(), tile_layers)
+            else:  # default to score, depth with no reversals
+                # @fixme - score and depth have same value, read bug?
+                tile_score = raster_data.get_arrays(LayersEnum.SCORE)[0]
+                tile_depth = raster_data.get_arrays(LayersEnum.ELEVATION)[0]
+                tile_scoring = [tile_score, tile_depth]
+                reverse = (False, False)
             # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
-            self.merge_rasters(tile_layers, tile_score, raster_data, tile_depth,
+            self.merge_rasters(tile_layers, tile_scoring, raster_data,
                                crs_transform, affine_transform, start_col, start_row, block_cols, block_rows,
-                               dataset, layers, score_band, score_key2_band)
+                               dataset, layers, dataset_score)
             tile_count += 1
             # send the data to disk, I forget if this has any affect other than being able to look at the data in between steps to debug progress
             dataset.FlushCache()
             dataset_score.FlushCache()
         del score_key2_band, score_band, dataset_score
-        os.remove(score_name)
+        try:
+            os.remove(score_name)
+        except PermissionError:
+            gc.collect()
+            try:
+                os.remove(score_name)
+            except PermissionError:
+                print(f"Failed to remove {score_name}, permission denied (in use?)")
         return tile_count, dataset
 
     @staticmethod
-    def merge_rasters(tile_layers, tile_score, raster_data, tile_depth,
+    def merge_rasters(tile_layers, tile_scoring, raster_data,
                       crs_transform, affine_transform, start_col, start_row, block_cols, block_rows,
-                      dataset, layers, score_band, key2_band, reverse_sort=(False, False)):
-        export_sub_area_scores = score_band.ReadAsArray(start_col, start_row, block_cols, block_rows)
-        export_sub_area_key2 = key2_band.ReadAsArray(start_col, start_row, block_cols, block_rows)
-        # @todo - check the scoring, do we need arbitrary scoring like the insert_surveys can do?
-        sort_key_scores = numpy.array((export_sub_area_scores, export_sub_area_key2))
+                      dataset, layers, dataset_score, reverse_sort=(False, False, False)):
+        output_scores = []
+        for i in range(len(tile_scoring)):
+            score_band = dataset_score.GetRasterBand(i + 1)
+            output_scores.append(score_band.ReadAsArray(start_col, start_row, block_cols, block_rows))
+
+        sort_key_scores = numpy.array(output_scores)
         export_sub_area = dataset.ReadAsArray(start_col, start_row, block_cols, block_rows)
         # when only one output layer is made the ReadAsArray returns a shape like (x,y)
         # while a three layer output would return something like (3, nx, ny)
@@ -1034,11 +1052,11 @@ class WorldDatabase(VABC):
 
         tile_r, tile_c = numpy.indices(tile_layers.shape[1:])
         # treating the cells as areas means we want to export based on the center not the corner
-        tile_x, tile_y = raster_data.rc_to_xy_using_dims(tile_score.shape[0], tile_score.shape[1], tile_r, tile_c, center=True)
-        # if geotransform:  # convert to target epsg
-        #     tile_x, tile_y = geotransform.transform(tile_x, tile_y)
+        tile_x, tile_y = raster_data.rc_to_xy_using_dims(tile_layers[0].shape[0], tile_layers[0].shape[1], tile_r, tile_c, center=True)
+        # if crs_transform:  # convert to target epsg
+        #     tile_x, tile_y = crs_transform.transform(tile_x, tile_y)
 
-        merge_arrays(tile_x, tile_y, (tile_score, tile_depth), tile_layers,
+        merge_arrays(tile_x, tile_y, tile_scoring, tile_layers,
                      export_sub_area, sort_key_scores, crs_transform, affine_transform,
                      start_col, start_row, block_cols, block_rows,
                      reverse_sort=reverse_sort)
@@ -1047,8 +1065,9 @@ class WorldDatabase(VABC):
         for band_num in range(len(layers)):
             band = dataset.GetRasterBand(band_num + 1)
             band.WriteArray(export_sub_area[band_num], start_col, start_row)
-        score_band.WriteArray(sort_key_scores[0], start_col, start_row)
-        key2_band.WriteArray(sort_key_scores[1], start_col, start_row)
+        for i in range(len(tile_scoring)):
+            score_band = dataset_score.GetRasterBand(i+1)
+            score_band.WriteArray(sort_key_scores[i], start_col, start_row)
 
 
     def extract_soundings(self):

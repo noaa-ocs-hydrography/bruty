@@ -445,10 +445,10 @@ def test_upsample():
     res = 5
     t1 = time.time()
     use_dir = make_clean_dir('test_just_mask2basic')
-    vr_to_points_and_mask(vr_path, use_dir.joinpath("upsampled.tif"), use_dir.joinpath("quick_mask.tif"), res, block_size=512, nbs_mask=False)
+    vr_utils.vr_to_points_and_mask(vr_path, use_dir.joinpath("upsampled.tif"), use_dir.joinpath("quick_mask.tif"), res, block_size=512, nbs_mask=False)
     t2 = time.time()
     use_dir = make_clean_dir('test_full_nbs2basic')
-    upsample_vr(vr_path, use_dir.joinpath("interpolated.tif"), res, block_size=512)
+    vr_utils.upsample_vr(vr_path, use_dir.joinpath("interpolated.tif"), res, block_size=512)
     t3 = time.time()
     print("just mask", t2 - t1)
     print("nbs", t3 - t2)

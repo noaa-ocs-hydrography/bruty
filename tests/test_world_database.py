@@ -122,7 +122,7 @@ def test_sortkey_bounds():
     assert (numpy.isnan(output_data[2, :, 4])).all()
 
 
-def test_db_json(db):
+def test_db_json():
     use_dir = make_clean_dir("json_db")
     # @todo parameterize this
     # db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
@@ -147,24 +147,29 @@ def test_make_db():
     # NOTE: when using this coordinate tile the 0,0 position ends up in a cell that spans from -0.66 < x < 0.34 and -.72 < y < 0.27
     # so the cells will end up in the -1,-1 index on the export
 
-    db.insert_survey_array(SW_5x5, "origin")
-    db.insert_survey_array(SE_5x5, "east")
-    # this +50 array should not show up as the score is the same but depth is deeper
+    r, c, z, uncertainty, score, flags = SW_5x5  # flip the r,c order since insert wants x,y
+    db.insert_survey_array((c, r, z, uncertainty, score, flags), "origin")
     r, c, z, uncertainty, score, flags = SE_5x5
-    db.insert_survey_array((c + 5, r, z + 50, uncertainty, score, flags), "east")
-    db.insert_survey_array(NW_5x5, "north east")
+    db.insert_survey_array((c, r, z, uncertainty, score, flags), "east")
+    # this +50 array should not show up as the score is the same but depth is deeper
+    r, c, z, uncertainty, score, flags = SW_5x5
+    db.insert_survey_array((c + 5, r, z + 50, uncertainty, score, flags), "east2")
+    r, c, z, uncertainty, score, flags = NW_5x5
+    db.insert_survey_array((c, r, z, uncertainty, score, flags), "north east")
     # overwrite some of the origin grid but keep score below east and northeast
-    db.insert_survey_array(MID_5x5, "overwrite origin")
+    r, c, z, uncertainty, score, flags = MID_5x5
+    db.insert_survey_array((c, r, z, uncertainty, score, flags), "overwrite origin")
+
     tx, ty = db.db.get_tiles_indices(0, 0, 0, 0)[0]
     tile = db.db.get_tile_history_by_index(tx, ty)
     raster_data = tile[-1]
     arr = raster_data.get_arrays()
     r0, c0 = raster_data.xy_to_rc(0, 0)
-    assert numpy.all(arr[LayersEnum.ELEVATION, r0:r0 + 2, c0:c0 + 2] == z[:2, :2])
+    assert numpy.all(arr[LayersEnum.ELEVATION, r0:r0 + 2, c0:c0 + 2] == SW_5x5[2][:2, :2])
     assert numpy.all(arr[LayersEnum.ELEVATION, r0 + 2:r0 + 5, c0 + 2:c0 + 5] == 999)
     assert numpy.all(arr[LayersEnum.ELEVATION, r0 + 2:r0 + 5, c0 + 2:c0 + 5] == 999)
-    assert numpy.all(arr[0, r0:r0 + 5, c0 + 5:c0 + 10] == z + 100)
-    assert numpy.all(arr[0, r0 + 5:r0 + 10, c0:c0 + 5] == z + 200)
+    assert numpy.all(arr[0, r0:r0 + 5, c0 + 5:c0 + 10] == SE_5x5[2])
+    assert numpy.all(arr[0, r0 + 5:r0 + 10, c0:c0 + 5] == NW_5x5[2])
 
 
 def test_export_area():
@@ -186,7 +191,7 @@ def test_export_area():
     ds = gdal.Open(str(use_dir.joinpath("new1.tif")))
     b = ds.GetRasterBand(1)
     arr = b.ReadAsArray()
-    r, c, z, uncertainty, score, flags = simple_5x5
+    r, c, z, uncertainty, score, flags = SW_5x5
     # r0, c0 = (-1, -1)
     # the database holds things in a positive Y convention so rows are flipped.
     # # @todo Could account for that here by checking the geotransform for DY sign
@@ -370,47 +375,47 @@ def test_add_data(history_db):
         fill_tile_history(history)
 
 
-def test_pbc19_tile_4():
-    use_dir = make_clean_dir('tile4_metadata_utm_db')
-
-    db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
-
-    if False:
-        w, n = 288757.22, 4561186.99
-        e, s = 297025.15, 4547858.16
-        db.insert_survey_array(numpy.array(([w, e], [n, s], [45, 33], [2, 2], [10, 10], [0, 0])),
-                               r"C:\Data\nbs\PBC19_Tile4_surveys\H12700_MB_2m_MLLW_2of3.bag_corners")
-        # # should be NW in tile 3519,4141 and SE in 3541,4131 for UTM 19
-        raise Exception("stopping")
-    for bag_file in [r"C:\Data\nbs\PBC19_Tile4_surveys\H12700_MB_2m_MLLW_2of3.bag",
-                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12700_MB_4m_MLLW_3of3.bag",
-                     r"C:\Data\nbs\PBC19_Tile4_surveys\RI_16_BHR_20190417_BD_2019_023_FULL_4m_interp.bag",
-                     r"C:\Data\nbs\PBC19_Tile4_surveys\RI_17_GSP_20190418_BD_2019_022_FULL_4m_interp.bag",
-                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12009_MB_2m_MLLW_1of3.bag",
-                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12009_MB_2m_MLLW_2of3.bag",
-                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12009_MB_2m_MLLW_3of3.bag",
-                     # r"C:\Data\nbs\PBC19_Tile4_surveys\H12010_MB_VR_MLLW.bag",
-                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12023_MB_2m_MLLW_2of3.bag",
-                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12023_MB_50cm_MLLW_1of3.bag",
-                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12023_VB_4m_MLLW_3of3.bag",
-                     r"C:\Data\nbs\PBC19_Tile4_surveys\H12700_MB_1m_MLLW_1of3.bag", ]:
-        print('processsing grid', bag_file)
-        db.insert_survey_gdal(bag_file)
-
-    for txt_file in [r"C:\Data\nbs\PBC19_Tile4_surveys\D00111.csar.du.txt",
-                     r"C:\Data\nbs\PBC19_Tile4_surveys\H06443.csar.du.txt",
-                     r"C:\Data\nbs\PBC19_Tile4_surveys\H08615.csar.du.txt",
-                     r"C:\Data\nbs\PBC19_Tile4_surveys\F00363.csar.du.txt",
-                     r"C:\Data\nbs\PBC19_Tile4_surveys\H06442.csar.du.txt", ]:
-        print('processsing txt', txt_file)
-        db.insert_txt_survey(txt_file, override_epsg=4326)
-
-
-def test_pbc19_vr():
-    use_dir = make_clean_dir('tile4_VR_utm_db')
-    db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
-    db.insert_survey_vr(r"C:\Data\nbs\PBC19_Tile4_surveys\H12010_MB_VR_MLLW.bag")
-    print("processed_vr")
+# def test_pbc19_tile_4():
+#     use_dir = make_clean_dir('tile4_metadata_utm_db')
+#
+#     db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+#
+#     if False:
+#         w, n = 288757.22, 4561186.99
+#         e, s = 297025.15, 4547858.16
+#         db.insert_survey_array(numpy.array(([w, e], [n, s], [45, 33], [2, 2], [10, 10], [0, 0])),
+#                                r"C:\Data\nbs\PBC19_Tile4_surveys\H12700_MB_2m_MLLW_2of3.bag_corners")
+#         # # should be NW in tile 3519,4141 and SE in 3541,4131 for UTM 19
+#         raise Exception("stopping")
+#     for bag_file in [r"C:\Data\nbs\PBC19_Tile4_surveys\H12700_MB_2m_MLLW_2of3.bag",
+#                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12700_MB_4m_MLLW_3of3.bag",
+#                      r"C:\Data\nbs\PBC19_Tile4_surveys\RI_16_BHR_20190417_BD_2019_023_FULL_4m_interp.bag",
+#                      r"C:\Data\nbs\PBC19_Tile4_surveys\RI_17_GSP_20190418_BD_2019_022_FULL_4m_interp.bag",
+#                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12009_MB_2m_MLLW_1of3.bag",
+#                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12009_MB_2m_MLLW_2of3.bag",
+#                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12009_MB_2m_MLLW_3of3.bag",
+#                      # r"C:\Data\nbs\PBC19_Tile4_surveys\H12010_MB_VR_MLLW.bag",
+#                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12023_MB_2m_MLLW_2of3.bag",
+#                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12023_MB_50cm_MLLW_1of3.bag",
+#                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12023_VB_4m_MLLW_3of3.bag",
+#                      r"C:\Data\nbs\PBC19_Tile4_surveys\H12700_MB_1m_MLLW_1of3.bag", ]:
+#         print('processsing grid', bag_file)
+#         db.insert_survey_gdal(bag_file)
+#
+#     for txt_file in [r"C:\Data\nbs\PBC19_Tile4_surveys\D00111.csar.du.txt",
+#                      r"C:\Data\nbs\PBC19_Tile4_surveys\H06443.csar.du.txt",
+#                      r"C:\Data\nbs\PBC19_Tile4_surveys\H08615.csar.du.txt",
+#                      r"C:\Data\nbs\PBC19_Tile4_surveys\F00363.csar.du.txt",
+#                      r"C:\Data\nbs\PBC19_Tile4_surveys\H06442.csar.du.txt", ]:
+#         print('processsing txt', txt_file)
+#         db.insert_txt_survey(txt_file, override_epsg=4326)
+#
+#
+# def test_pbc19_vr():
+#     use_dir = make_clean_dir('tile4_VR_utm_db')
+#     db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+#     db.insert_survey_vr(r"C:\Data\nbs\PBC19_Tile4_surveys\H12010_MB_VR_MLLW.bag")
+#     print("processed_vr")
 
 
 def test_export_area_full_db():
