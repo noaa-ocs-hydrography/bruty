@@ -468,7 +468,7 @@ class WorldDatabase(VABC):
         None
         """
         if override_epsg == NO_OVERRIDE:
-            epsg = rasterio.crs.CRS.from_string(vr.srs.ExportToWkt()).to_epsg()
+            epsg = self.db.epsg
         else:
             epsg = override_epsg
         transformer = get_crs_transformer(epsg, self.db.epsg)
@@ -510,9 +510,10 @@ class WorldDatabase(VABC):
             # make a backup of the metadata in case something breaks here
             self.to_file(backup_path2)
             # add the new survey to the metadata and store to disk
-            self.included_surveys[path_to_survey_data] = (contrib_id, list(tiles))  # json doesn't like sets, convert to list
+            # json doesn't like pathlib.Paths to be stored -- convert to strings
+            self.included_surveys[str(path_to_survey_data)] = (contrib_id, list(tiles))  # json doesn't like sets, convert to list
             if contrib_id is not None:
-                self.included_ids[contrib_id] = (path_to_survey_data, list(tiles))
+                self.included_ids[contrib_id] = (str(path_to_survey_data), list(tiles))
             # rather than overwrite, since we have it locked, truncate the file and then write new data to it
             metadata_file.seek(0)
             metadata_file.truncate(0)
@@ -1006,7 +1007,8 @@ class WorldDatabase(VABC):
             # 4) Use the db.tile_scheme function to convert points from the tiles to x,y
             tile_layers = raster_data.get_arrays(layers)
             if compare_callback is not None:
-                tile_scoring, new_sort_values, reverse = compare_callback(raster_data.get_arrays(), tile_layers)
+                all_data = raster_data.get_arrays()
+                tile_scoring, _dup, reverse = compare_callback(all_data, all_data)
             else:  # default to score, depth with no reversals
                 # @fixme - score and depth have same value, read bug?
                 tile_score = raster_data.get_arrays(LayersEnum.SCORE)[0]
@@ -1016,7 +1018,7 @@ class WorldDatabase(VABC):
             # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
             self.merge_rasters(tile_layers, tile_scoring, raster_data,
                                crs_transform, affine_transform, start_col, start_row, block_cols, block_rows,
-                               dataset, layers, dataset_score)
+                               dataset, layers, dataset_score, reverse_sort=reverse)
             tile_count += 1
             # send the data to disk, I forget if this has any affect other than being able to look at the data in between steps to debug progress
             dataset.FlushCache()

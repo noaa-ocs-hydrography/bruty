@@ -5,7 +5,7 @@ from functools import partial
 
 import pytest
 import numpy
-from osgeo import gdal
+from osgeo import gdal, osr
 
 from nbs.bruty.history import DiskHistory, MemoryHistory, RasterHistory
 from nbs.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
@@ -31,6 +31,7 @@ def make_1m_tile(self, tx, ty, tile_history):
 
 
 simple_utm_dir = data_dir.joinpath('simple_utm3_db')
+custom_scoring_dir = data_dir.joinpath('custom_scoring_db')
 
 
 def test_merge_arrays():
@@ -136,6 +137,7 @@ def test_db_json():
     assert db2.db.tile_scheme.epsg == db.db.tile_scheme.epsg
     assert db2.db.tile_scheme.zoom == db.db.tile_scheme.zoom
 
+
 def test_make_db():
     use_dir = simple_utm_dir
     if os.path.exists(use_dir):
@@ -180,7 +182,8 @@ def test_export_area():
 
     # NOTE: when using this coordinate tile the 0,0 position ends up in a cell that spans from -0.66 < x < 0.34 and -.72 < y < 0.27
     # so the cells will end up in the -1,-1 index on the export
-    db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+    # db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
+    db = WorldDatabase.open(use_dir)
     # override the init_tile with a function to make approx 1m square resolution
     db.init_tile = partial(make_1m_tile, db)
 
@@ -430,7 +433,8 @@ def test_exact_res_db():
         shutil.rmtree(use_dir, onerror=onerr)
     db = WorldDatabase(UTMTileBackendExactRes(4, 4, 26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
     x = y = depth = uncertainty = score = flags = numpy.arange(10)
-    db.insert_survey_array((x, y*300, depth, uncertainty, score, flags), "test")
+    db.insert_survey_array((x, y * 300, depth, uncertainty, score, flags), "test")
+
 
 def test_custom_area():
     use_dir = make_clean_dir('custom_area_0.5_c')
@@ -452,3 +456,225 @@ def test_custom_area():
     cust_db.insert_survey_array(bottom_edge, "bottom")
     cust_db.export(use_dir.joinpath("export_all.tif"))
     cust_db.export(use_dir.joinpath("export_elev.tif"), layers=[LayersEnum.ELEVATION])
+
+
+def custom_scoring(pts1, pts2):
+    ret = []
+    for pts in (pts1, pts2):
+        contrib = pts[LayersEnum.CONTRIBUTOR].copy()
+        elev = pts[LayersEnum.ELEVATION].copy()
+        contrib[pts[LayersEnum.CONTRIBUTOR] == 2] = 10  # make the +50 array show up which was suppressed in the original test
+        score = numpy.array([contrib, elev])
+        ret.append(score)
+    ret.append((False, False))  # reverse the elevation comparison
+    return ret
+
+def rev_custom_scoring(pts1, pts2):
+    # flip all the flags for reverse sort
+    v1, v2, rev = custom_scoring(pts1, pts2)
+    rev = [not b for b in rev]  
+    return v1, v2, rev
+
+def test_custom_scoring():
+    """  Make a database using the custom_score for a compare function and make sure it retains the correct data
+
+        Based on original scores the following matrix was made
+       [  0,  10,  20,  30,  40, 100, 110, 120, 130, 140],
+       [  1,  11,  21,  31,  41, 101, 111, 121, 131, 141],
+       [  2,  12, 999, 999, 999, 102, 112, 122, 132, 142],
+       [  3,  13, 999, 999, 999, 103, 113, 123, 133, 143],
+       [  4,  14, 999, 999, 999, 104, 114, 124, 134, 144],
+       [200, 210, 220, 230, 240, 999, 999, nan, nan, nan],
+       [201, 211, 221, 231, 241, 999, 999, nan, nan, nan],
+       [202, 212, 222, 232, 242, nan, nan, nan, nan, nan],
+       [203, 213, 223, 233, 243, nan, nan, nan, nan, nan],
+       [204, 214, 224, 234, 244, nan, nan, nan, nan, nan],
+
+    Now revising the scoring with a custom function we should get the depths below
+      0, 10, 20, 30, 40, 50, 60, 70, 80
+      1, 11, 21, 31, 41, 51, 61, 71, 81
+      2, 12,999,999,999, 52, 62, 72, 82
+      3, 13,999,999,999, 53, 63, 73, 83
+      4, 14,999,999,999, 54, 64, 74, 84
+    200,210,220,230,240,999,999,nan,nan
+    201,211,221,231,241,999,999,nan,nan
+    202,212,222,232,242,nan,nan,nan,nan
+    203,213,223,233,243,nan,nan,nan,nan
+    204,214,224,234,244,nan,nan,nan,nan
+    nan,nan,nan,nan,nan,nan,nan,nan,nan
+    nan,nan,nan,nan,nan,nan,nan,nan,nan
+    nan,nan,nan,nan,nan,nan,nan,nan,nan
+
+    """
+    # use the SW, SE, NW, mid arrays from test data but write them to disk as a text file and a raster then insert.
+    # also change the scoring priority using a custom function so that the result is different than if the original scores were used.
+
+    use_dir = custom_scoring_dir
+    if os.path.exists(use_dir):
+        shutil.rmtree(use_dir, onerror=onerr)
+    x1, y1, x2, y2 = extents = (-.5, -.5, 11.5, 11.5)
+    resolution = 1
+    epsg = 26918
+    db = CustomArea(epsg, *extents, resolution, resolution, use_dir)
+
+    # test the insert text function by writing the data out with numpy first
+    r, c, z, uncertainty, score, flags = SW_5x5  # flip the r,c order since insert wants x,y
+    txt_filename = use_dir.joinpath("SW.txt")
+    numpy.savetxt(txt_filename, numpy.array([z.reshape(-1), c.reshape(-1), r.reshape(-1), uncertainty.reshape(-1)]).T)
+    # db.insert_survey_array((c, r, z, uncertainty, score, flags), "origin", contrib_id=1)
+    db.insert_txt_survey(txt_filename, contrib_id=1, format=[('depth', 'f4'), ('x', 'f8'), ('y', 'f8'), ('uncertainty', 'f4')],
+                         compare_callback=custom_scoring)
+
+    # this SE with values 100-140 is retained in the original test, this time it should get overwritten due to custom scoring
+    r, c, z, uncertainty, score, flags = SE_5x5
+    db.insert_survey_array((c, r, z, uncertainty, score, flags), "east", contrib_id=3, compare_callback=custom_scoring)
+
+    # this +50 array should not show up as the score is the same but depth is deeper
+    # this should overwrite the SE data with values of 50-90 based on the custom_scoring callback making the contrib==2 have a higher score
+    r, c, z, uncertainty, score, flags = SW_5x5
+    db.insert_survey_array((c + 5, r, z + 50, uncertainty, score, flags), "east2", contrib_id=2, compare_callback=custom_scoring)
+
+    # test an input geotif via the insert_gdal function
+    r, c, z, uncertainty, score, flags = NW_5x5
+    gdal_filename = use_dir.joinpath("NW.tif")
+    driver = gdal.GetDriverByName('GTiff')
+    # dataset = driver.CreateDataSource(self.path)
+    dataset = driver.Create(str(gdal_filename), xsize=z.shape[1], ysize=z.shape[0], bands=2, eType=gdal.GDT_Float32,
+                            options=['COMPRESS=LZW', "TILED=YES"])
+    gt = [-0.5, 1, 0, 4.5, 0, 1]  # note this geotransform is positive Y
+    dataset.SetGeoTransform(gt)
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(epsg)
+    dest_wkt = srs.ExportToWkt()
+    dataset.SetProjection(dest_wkt)
+    for b, val in enumerate([z, uncertainty]):
+        band = dataset.GetRasterBand(b + 1)
+        band.WriteArray(val)
+    del dataset
+
+    # db.insert_survey_array((c, r, z, uncertainty, score, flags), "north east", contrib_id=4, compare_callback=custom_scoring)
+    db.insert_survey_gdal(gdal_filename, contrib_id=5, compare_callback=custom_scoring)
+
+    # overwrite some of the origin grid but keep score (based on contrib) below NW
+    r, c, z, uncertainty, score, flags = MID_5x5
+    db.insert_survey_array((c, r, z, uncertainty, score, flags), "overwrite origin", contrib_id=4, compare_callback=custom_scoring)
+
+    # check that the data was processed correctly
+    tx, ty = db.db.get_tiles_indices(0, 0, 0, 0)[0]
+    tile = db.db.get_tile_history_by_index(tx, ty)
+    raster_data = tile[-1]
+    arr = raster_data.get_arrays()
+    r0, c0 = raster_data.xy_to_rc(0, 0)
+    assert numpy.all(arr[LayersEnum.ELEVATION, r0:r0 + 2, c0:c0 + 2] == SW_5x5[2][:2, :2])  # data from text file
+    assert numpy.all(arr[LayersEnum.ELEVATION, r0 + 2:r0 + 5, c0 + 2:c0 + 5] == 999)  # overwrite of SW data
+    assert numpy.all(arr[LayersEnum.ELEVATION, r0 + 5:r0 + 7, c0 + 5:c0 + 7] == 999)  # the overwrite of the empty space and
+    # instead of SE_5x5 this is the +50 array because of the custom scoring function
+    assert numpy.all(arr[0, r0:r0 + 5, c0 + 5:c0 + 10] == SW_5x5[2] + 50)  # data that was only retained based on the custom_scoring
+    assert numpy.all(arr[0, r0 + 5:r0 + 10, c0:c0 + 5] == NW_5x5[2])  # data from tif
+
+
+def test_export_custom_scoring():
+    """  The depths, contributors and scores from the prior test
+      0, 10, 20, 30, 40, 50, 60, 70, 80, 90
+      1, 11, 21, 31, 41, 51, 61, 71, 81, 91
+      2, 12,999,999,999, 52, 62, 72, 82, 92
+      3, 13,999,999,999, 53, 63, 73, 83, 93
+      4, 14,999,999,999, 54, 64, 74, 84, 94
+    200,210,220,230,240,999,999,nan,nan,nan
+    201,211,221,231,241,999,999,nan,nan,nan
+    202,212,222,232,242,nan,nan,nan,nan,nan
+    203,213,223,233,243,nan,nan,nan,nan,nan
+    204,214,224,234,244,nan,nan,nan,nan,nan
+
+    1,  1,  1,  1,  1,  2,  2,  2,  2,  2
+    1,  1,  1,  1,  1,  2,  2,  2,  2,  2
+    1,  1,  4,  4,  4,  2,  2,  2,  2,  2
+    1,  1,  4,  4,  4,  2,  2,  2,  2,  2
+    1,  1,  4,  4,  4,  2,  2,  2,  2,  2
+    5,  5,  5,  5,  5,  4,  4,nan,nan,nan
+    5,  5,  5,  5,  5,  4,  4,nan,nan,nan
+    5,  5,  5,  5,  5,nan,nan,nan,nan,nan
+    5,  5,  5,  5,  5,nan,nan,nan,nan,nan
+    5,  5,  5,  5,  5,nan,nan,nan,nan,nan
+
+    100,100,100,100,100,  2,  2,  2,  2,  2
+    100,100,100,100,100,  2,  2,  2,  2,  2
+    100,100,2.5,2.5,2.5,  2,  2,  2,  2,  2
+    100,100,2.5,2.5,2.5,  2,  2,  2,  2,  2
+    100,100,2.5,2.5,2.5,  2,  2,  2,  2,  2
+    100,100,100,100,100,2.5,2.5,nan,nan,nan
+    100,100,100,100,100,2.5,2.5,nan,nan,nan
+    100,100,100,100,100,nan,nan,nan,nan,nan
+    100,100,100,100,100,nan,nan,nan,nan,nan
+    100,100,100,100,100,nan,nan,nan,nan,nan
+
+    Now we will export the data at a lower res and test the combine logic.
+    a 3m export on the original data and score (highest score then largest elevation) should get
+     21  41  82  92
+    220 240 999  94
+    223 243 999 nan
+    224 244 nan nan
+
+    using the custom compare function should yield (based on highest contributor number and highest elevation)
+      - note we made the +50 (contrib=2) get a custom score higher than other contributors in the custom_score function
+    999  52  82  92
+    220  54  84  94
+    223 243 999 nan
+    224 244 nan nan
+
+    reversing the using the custom compare function should yield (based on smallest contributor number and lowest elevation)
+      0  30  60  90
+      3 999 999  93
+    201 999 999 nan
+    204 234 nan nan
+    """
+    use_dir = custom_scoring_dir
+    # create the database if not existing
+    if not os.path.exists(use_dir):
+        test_make_db()
+    db = WorldDatabase.open(use_dir)
+
+    # export at the original resolution and make sure the original data is retained in the right positions.
+    export_fname = use_dir.joinpath("export.tif")
+    db.export(export_fname)
+    ds1 = gdal.Open(str(export_fname))
+    # geotransform will have negative Y which make the indices in opposite order as the ones we passed in originally
+    assert numpy.all(ds1.GetGeoTransform() == (-0.5, 1.0, 0.0, 11.5, 0.0, -1.0))
+    arr = ds1.ReadAsArray()
+    assert numpy.all(arr[LayersEnum.ELEVATION, -1:-3:-1, 0:2:] == SW_5x5[2][:2, :2])  # last two rows, first two columns
+    assert numpy.all(arr[LayersEnum.ELEVATION, -3:-5:-1, 2:5] == 999)
+    assert numpy.all(arr[LayersEnum.ELEVATION, -6:-8:-1, 5:7] == 999)
+    # instead of SE_5x5 this is the +50 array because of the custom scoring function
+    assert numpy.all(arr[0, -1:-6:-1, 5:10] == SW_5x5[2] + 50)
+    assert numpy.all(arr[0, -6:-11:-1, 0:5] == NW_5x5[2])
+
+    # test the export of a lower resolution so export has to combine data
+    export_fname3 = use_dir.joinpath("export3.tif")
+    db.export_area(export_fname3, -0.5, 11.5, 11.5, -0.5, (3, 3))
+    ds3 = gdal.Open(str(export_fname3))
+    arr3 = ds3.ReadAsArray()
+    numpy.testing.assert_equal(arr3[0][-1], (21, 41, 82, 92))
+    numpy.testing.assert_equal(arr3[0][-2], (220, 240, 999, 94))
+    numpy.testing.assert_equal(arr3[0][-3], (223, 243, 999, numpy.nan))
+    numpy.testing.assert_equal(arr3[0][-4], (224, 244, numpy.nan, numpy.nan))
+
+    # test a custom scoring method (use contributor number instead of score)
+    export_fname3cc = use_dir.joinpath("export3cc.tif")
+    db.export_area(export_fname3cc, -0.5, 11.5, 11.5, -0.5, (3, 3), compare_callback=custom_scoring)
+    ds3cc = gdal.Open(str(export_fname3cc))
+    arr3cc = ds3cc.ReadAsArray()
+    numpy.testing.assert_equal(arr3cc[0][-1], (999, 52, 82, 92))
+    numpy.testing.assert_equal(arr3cc[0][-2], (220, 54, 84, 94))
+    numpy.testing.assert_equal(arr3cc[0][-3], (223, 243, 999, numpy.nan))
+    numpy.testing.assert_equal(arr3cc[0][-4], (224, 244, numpy.nan, numpy.nan))
+
+    # test the reverse flags of the custom scoring
+    export_fname3ccrev = use_dir.joinpath("export3cc.tif")
+    db.export_area(export_fname3ccrev, -0.5, 11.5, 11.5, -0.5, (3, 3), compare_callback=rev_custom_scoring)
+    ds3ccrev = gdal.Open(str(export_fname3cc))
+    arr3ccrev = ds3ccrev.ReadAsArray()
+    numpy.testing.assert_equal(arr3ccrev[0][-1], (0, 30, 60, 90))
+    numpy.testing.assert_equal(arr3ccrev[0][-2], (3, 999, 999, 93))
+    numpy.testing.assert_equal(arr3ccrev[0][-3], (201, 999, 999, numpy.nan))
+    numpy.testing.assert_equal(arr3ccrev[0][-4], (204, 234, numpy.nan, numpy.nan))
+
