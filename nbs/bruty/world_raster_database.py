@@ -374,7 +374,7 @@ class WorldDatabase(VABC):
             print('locking metadata (shared) at ', datetime.now().isoformat())
             local_lock = Lock(data_path, 'r', SHARED)  # this will wait for the file to be available
             local_lock.acquire()
-            infile = local_lock.openfile()
+            infile = local_lock.fh
         else:
             infile = locked_file
         data = json.load(infile)
@@ -391,7 +391,7 @@ class WorldDatabase(VABC):
             # outfile = open(data_path, 'w')
             local_lock = Lock(data_path, 'w', EXCLUSIVE)  # this will wait for the file to be available
             local_lock.acquire()
-            outfile = local_lock.openfile()
+            outfile = local_lock.fh
         else:
             outfile = locked_file
         json.dump(self.for_json(), outfile, indent=0)

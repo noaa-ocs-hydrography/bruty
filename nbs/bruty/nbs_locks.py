@@ -99,6 +99,11 @@ if use_multiprocessing:
         def openfile(self):
             return open(self.fname, self.mode)
 
+        @property
+        def fh(self):
+            # make this to mimic the portalocker implementation
+            return self.openfile()
+
         def __enter__(self):
             if self.acquire():
                 handle = self.openfile()
