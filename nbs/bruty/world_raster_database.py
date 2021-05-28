@@ -136,9 +136,6 @@ class WorldTilesBackend(VABC):
         for tx, ty, raster, meta in accumulation_db.iterate_filled_tiles():
             tile_history = self.get_tile_history_by_index(tx, ty)
             tile_history.append(raster)
-            master_meta = tile_history.get_metadata()
-            contr = master_meta.setdefault("contributors", {})
-            contr.update(meta["contributors"])
 
     def make_accumulation_db(self, data_path):
         """ Make a database that has the same layout and types, probably a temporary copy while computing tiles.
@@ -377,7 +374,7 @@ class WorldDatabase(VABC):
             print('locking metadata (shared) at ', datetime.now().isoformat())
             local_lock = Lock(data_path, 'r', SHARED)  # this will wait for the file to be available
             local_lock.acquire()
-            infile = local_lock.fh
+            infile = local_lock.openfile()
         else:
             infile = locked_file
         data = json.load(infile)
@@ -394,7 +391,7 @@ class WorldDatabase(VABC):
             # outfile = open(data_path, 'w')
             local_lock = Lock(data_path, 'w', EXCLUSIVE)  # this will wait for the file to be available
             local_lock.acquire()
-            outfile = local_lock.fh
+            outfile = local_lock.openfile()
         else:
             outfile = locked_file
         json.dump(self.for_json(), outfile, indent=0)
@@ -583,8 +580,8 @@ class WorldDatabase(VABC):
                 # if tx != 3325 or ty != 3207:  # utm 16, US5MSYAF_utm, H13193 (raw bag is in utm15 though) -- gaps in DB and exported enc cells  217849.73 (m), 3307249.86 (m)
                 # if tx != 4614 or ty != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
                 # if tx != 4615 or ty != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
-                # if tx != 3740 or ty != 4297:
-                #    continue
+                # if tx != 4148 or ty != 4370:
+                #     continue
             print(f'processing tile {i_tile + 1} of {len(tile_list)}')
             tile_history = accumulation_db.get_tile_history_by_index(tx, ty)
             try:
@@ -634,10 +631,6 @@ class WorldDatabase(VABC):
             rd.set_metadata(raster_data.get_metadata())  # copy the metadata to the new raster
             rd.set_last_contributor(contrib_id, contrib_name)
             tile_history.append(rd)
-            meta = tile_history.get_metadata()
-            meta.setdefault("contributors", {})[
-                str(contrib_id)] = contrib_name  # JSON only allows strings as keys - first tried an integer key which gets weird
-            tile_history.set_metadata(meta)
 
             # for x, y, depth, uncertainty, score, flag in sorted_pts:
             #     # fixme: score should be a lookup into the database so that data/decay is considered correctly

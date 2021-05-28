@@ -21,10 +21,10 @@ from data_management.db_connection import connect_with_retries
 from fuse_dev.fuse.meta_review.meta_review import database_has_table, split_URL_port
 from nbs.bruty.raster_data import TiffStorage, LayersEnum
 from nbs.bruty.history import DiskHistory, RasterHistory, AccumulationHistory
-from nbs.bruty.world_raster_database import WorldDatabase, UTMTileBackend
+from nbs.bruty.world_raster_database import WorldDatabase, UTMTileBackend, UTMTileBackendExactRes
 from nbs.bruty.utils import onerr
 from nbs.bruty.utils import get_crs_transformer, compute_delta_coord, transform_rect
-from nbs.bruty.nbs_locks import LockNotAcquired
+from nbs.bruty.nbs_locks import LockNotAcquired, Lock
 
 _debug = True
 
@@ -54,6 +54,14 @@ def get_nbs_records(table_name, database, username, password, hostname='OCS-VS-N
         f = open(r"C:\data\nbs\pbc19_mllw_metadata.pickle", 'rb')
         records = pickle.load(f)
         fields = pickle.load(f)
+        ## trim back the records to a few for testing
+        # filename_col = fields.index('from_filename')
+        # id_col = fields.index('sid')
+        # thinned_records = []
+        # for rec in records:
+        #     if rec[id_col] in (13586, 10220):  # (13470, 10316, 10245,  "w00546_mb_4m_mllw_1of1.bag" in rec[filename_col] or "h08177.csar.csv" in rec[filename_col]:
+        #         thinned_records.append(rec)
+        # records = thinned_records
     else:
         connection = connect_with_retries(database=database, user=username, password=password, host=hostname, port=port)
         cursor = connection.cursor()
@@ -160,13 +168,6 @@ def id_to_scoring(fields, records):
     return sorted_recs, names_list, sort_dict
 
 
-def rec_id(n):
-    for rec in records:
-        if rec[-1] == n:
-            print(rec[:2], rec[-1])
-            print(rec[2])
-            print(rec[3], rec[4])
-
 def process_nbs_database(world_db_path, table_name, database, username, password, hostname='OCS-VS-NBS01', port='5434'):
     fields, records = get_nbs_records(table_name, database, username, password, hostname=hostname, port=port)
     sorted_recs, names_list, sort_dict = id_to_scoring(fields, records)
@@ -244,30 +245,36 @@ def process_nbs_database(world_db_path, table_name, database, username, password
                 try:
                     if path.endswith(".csv.zip"):
                         csv_path = path[:-4]
-                        p = subprocess.Popen(f'python -m zipfile -e "{path}" "{os.path.dirname(path)}"')
-                        p.wait()
-                        if os.path.exists(csv_path):
-                            try:
-                                # points are in opposite convention as BAGs and exported CSAR tiffs, so reverse the z component
-                                db.insert_txt_survey(csv_path, format=[('x', 'f8'), ('y', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')],
-                                                     override_epsg=db.db.epsg, contrib_id=sid, compare_callback=comp, reverse_z=True)
-                            except ValueError:
-                                print("Value Error")
-                                print(traceback.format_exc())
+                        print(f"Extract CSV {path}")
+                        lock = Lock(path)
+                        if lock.acquire():
+                            p = subprocess.Popen(f'python -m zipfile -e "{path}" "{os.path.dirname(path)}"')
+                            p.wait()
+                            if os.path.exists(csv_path):
+                                try:
+                                    # points are in opposite convention as BAGs and exported CSAR tiffs, so reverse the z component
+                                    db.insert_txt_survey(csv_path, format=[('x', 'f8'), ('y', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')],
+                                                         override_epsg=db.db.epsg, contrib_id=sid, compare_callback=comp, reverse_z=True)
+                                except ValueError:
+                                    print("Value Error")
+                                    print(traceback.format_exc())
 
-                            try:
-                                os.remove(f'{csv_path}')
-                            except FileNotFoundError:
-                                print(f'File NOT Found:  {csv_path}')
-
-                            except PermissionError:
-                                time.sleep(1)
                                 try:
                                     os.remove(f'{csv_path}')
-                                except:
-                                    print(f"failed to remove{csv_path}")
+                                except FileNotFoundError:
+                                    print(f'File NOT Found:  {csv_path}')
+
+                                except PermissionError:
+                                    time.sleep(1)
+                                    try:
+                                        os.remove(f'{csv_path}')
+                                    except:
+                                        print(f"failed to remove{csv_path}")
+                            else:
+                                print("\n\nCSV was not extracted from zip\n\n\n")
                         else:
-                            print("\n\nCSV was not extracted from zip\n\n\n")
+                            print("CSV was locked - probably another process is extracting it")
+                            raise LockNotAcquired()
                     else:
                         try:
                             db.insert_survey(path, override_epsg=db.db.epsg, contrib_id=sid, compare_callback=comp)
@@ -277,7 +284,7 @@ def process_nbs_database(world_db_path, table_name, database, username, password
                     print('inserted', path)
                     names_list.pop(i)
                 except LockNotAcquired:
-                    print('tiles in use for ', sid, path)
+                    print('files in use for ', sid, path)
                     print('skipping to next survey')
             else:
                 print(f"{sid} already in database")
@@ -320,7 +327,6 @@ def convert_csar():
                             break
 
 if __name__ == '__main__':
-    raise Exception("Enhance unit test to make a world database, insert txt and raster data (testing new combine logic) and then export to lower res (again testing combine during export)")
     # data_dir = pathlib.Path(__file__).parent.parent.parent.joinpath('tests').joinpath("test_data_output")
     data_dir = pathlib.Path("c:\\data\\nbs\\test_data_output")  # avoid putting in the project directory as pycharm then tries to cache everything I think
     build = True
@@ -331,13 +337,13 @@ if __name__ == '__main__':
             shutil.rmtree(use_dir, onerror=onerr)
         os.makedirs(use_dir)
         return use_dir
-    subdir = r"test_pbc_19_db_locks"
+    subdir = r"test_pbc_19_exact_multi_locks"
     db_path = data_dir.joinpath(subdir)
     # make_clean_dir(subdir)
 
     if not os.path.exists(db_path.joinpath("wdb_metadata.json")):
         build = True
-        db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, db_path))  # NAD823 zone 19.  WGS84 would be 32619
+        db = WorldDatabase(UTMTileBackendExactRes(4, 4, 26919, RasterHistory, DiskHistory, TiffStorage, db_path))  # NAD823 zone 19.  WGS84 would be 32619
         del db
 
     # create logger with 'spam_application'
@@ -481,3 +487,10 @@ if __name__ == '__main__':
                         utm_dataset = None  # close the gdal file
                         os.remove(export_utm)
                     print('done', cell_name)
+
+# "V:\NBS_Data\PBA_Alaska_UTM03N_Modeling"
+# UTMN 03 through 07 folders exist
+# /metadata/pba_alaska_utm03n_modeling
+# same each utm has a table
+# \\nos.noaa\OCS\HSD\Projects\NBS\NBS_Data\PBA_Alaska_UTM03N_Modeling
+# v drive literal

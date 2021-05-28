@@ -222,9 +222,8 @@ class RasterData(VABC):
         meta = self.get_metadata()
         meta['contrib_id'] = val
         meta['contrib_path'] = path
-        all = set(self.get_all_contributor_ids())  # json won't serialize a set by default.  Could use pickle but avoiding python (and version) specific storage
-        all.add(val)
-        meta['all_ids'] = list(all)
+        # JSON only allows strings as keys - first tried an integer key which gets weird
+        meta.setdefault("contributors", {})[str(val)] = str(path)
         all_paths = set(self.get_all_contributor_paths())
         all_paths.add(path)
         meta['all_paths'] = list(all_paths)
@@ -236,17 +235,6 @@ class RasterData(VABC):
         except KeyError:
             last = None
         return last
-
-    def set_all_contributor_ids(self, val):
-        # uses a set to retain the list of all contributors that were used in creating this raster
-        self.set_metadata_element('all_ids', list(val.copy))
-
-    def get_all_contributor_ids(self):
-        try:
-            all = self.get_metadata()['all_ids'].copy()
-        except KeyError:
-            all = []
-        return all
 
     def set_all_contributor_paths(self, val):
         # uses a set to retain the list of all contributors that were used in creating this raster

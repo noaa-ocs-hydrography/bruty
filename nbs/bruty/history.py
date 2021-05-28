@@ -346,6 +346,10 @@ class RasterHistory(History):
         else:
             # if we are empty then just put the full array in
             self.history.append(raster_val)
+        meta = self.get_metadata()
+        raster_meta = raster_val.get_metadata()
+        meta.setdefault("contributors", {}).update(raster_meta.get('contributors', {}))
+        self.set_metadata(meta)
 
 class AccumulationHistory(RasterHistory):
     """ This class acts like a full history but really only keeps one raster, the current data.
@@ -357,6 +361,3 @@ class AccumulationHistory(RasterHistory):
             del self.history[0]
         super().insert(0, value)
 
-
-class PointsHistory(History):
-    pass
