@@ -117,8 +117,11 @@ class ExactTilingScheme(TilingScheme):
         # get the tiling scheme value - if we were to ignore the strict resolution edges
         tx, ty = super().xy_to_tile_index(x, y, zoom)
         # since we round each tile DOWN to the cell edge that would be lower, check if we should use the next greater tile instead
-        tx[self.edges_x[tx+1] <= x] += 1  # tx+1 is the uppder edge of the current tile == lower edge of the next tile
-        ty[self.edges_y[ty+1] <= y] += 1
+        try:
+            tx[self.edges_x[tx+1] <= x] += 1  # tx+1 is the uppder edge of the current tile == lower edge of the next tile
+            ty[self.edges_y[ty+1] <= y] += 1
+        except IndexError as e:
+            raise IndexError(str(e) + f"\nA coordinate was processed that is outside of the area contained by the tiling scheme.\nx={x},y={y} outside x range({self.edges_x[0]},{self.edges_x[-1]}) ; y range({self.edges_y[0]},{self.edges_y[-1]})")
         return tx, ty
 
     def tile_index_to_xy(self, tx, ty):
@@ -209,8 +212,8 @@ class UTMTiles(TilingScheme):
         super().__init__(min_x=-1000000, min_y=-1000000, max_x=2000000, max_y=10000000, zoom=zoom, epsg=epsg)
 
 class ExactUTMTiles(ExactTilingScheme):
-    def __init__(self, res_x, res_y, zoom=13, epsg=None):
-        super().__init__(res_x, res_y, min_x=-1000000, min_y=-1000000, max_x=2000000, max_y=10000000, zoom=zoom, epsg=epsg)
+    def __init__(self, res_x, res_y, zoom=13, epsg=None, offset_x=0, offset_y=0):
+        super().__init__(res_x, res_y, min_x=-1000000-offset_x, min_y=-1000000-offset_y, max_x=2000000, max_y=10000000, zoom=zoom, epsg=epsg)
 
 
 def test():

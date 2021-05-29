@@ -17,6 +17,25 @@ LayersEnum = enum.IntEnum('Layers', (("ELEVATION", 0), ("UNCERTAINTY", 1), ("CON
 ALL_LAYERS = tuple(range(LayersEnum.MASK+1))
 INFO_LAYERS = tuple(range(LayersEnum.MASK))
 
+# @todo  Add a TileDB backend - maybe make it the only storage type.
+# FIXME  Add TileDB storage
+# Chen investigaed TileDB and it allows "time travel" to recover the data at a certain date but
+# it doesn't allow editing or slicing of the history array.  It basically has no more function than this module.
+# also it doesn't compress using deltas like this, so each insert of a full tile would cause the full tile to be stored.
+
+# For the problem of contributor numbers needing a large range but having to store float32 in tiffs,
+# going to try storing the contributor layer as integers inside the flost area, so on read+write a conversion
+# will have to take place.
+# import numpy
+# a = numpy.array([1,3,5,1234567890], numpy.int32)
+# f = numpy.frombuffer(a.tobytes(), numpy.float32)
+# f
+# array([1.4012985e-45, 4.2038954e-45, 7.0064923e-45, 1.2288902e+06],
+#       dtype=float32)
+# numpy.frombuffer(f.tobytes(), numpy.int32)
+# array([         1,          3,          5, 1234567890])
+
+
 class Storage(VABC):
     @staticmethod
     def _layers_as_ints(layers):
@@ -57,7 +76,6 @@ class TiffStorage(Storage):
     extension = ".tif"
     def __init__(self, path, arrays=None, layers=None):
         self.path = pathlib.Path(path)
-        self.metapath = path.with_suffix('.json')
         self._version = 1
         self.metadata = {}
         self.get_metadata()  # read from disk, if applicable
@@ -65,6 +83,16 @@ class TiffStorage(Storage):
         #    Needs a way to set projection info after create
         if arrays is not None:
             self.set_arrays(arrays, layers)
+
+    @property
+    def metapath(self):
+        return self.build_metapath(self.path)
+
+    @staticmethod
+    def build_metapath(path):
+        if not isinstance(path, pathlib.Path):
+            path = pathlib.Path(path)
+        return path.with_suffix('.json')
 
     def get_arrays(self, layers=None):
         layer_nums = self._layers_as_ints(layers)
@@ -100,6 +128,7 @@ class TiffStorage(Storage):
     def _create_file(self, shape):
         driver = gdal.GetDriverByName('GTiff')
         # dataset = driver.CreateDataSource(self.path)
+        # @FIXME is float32 going to work with contributor being a large integer value?
         dataset = driver.Create(str(self.path), xsize=shape[2], ysize=shape[1], bands=len(LayersEnum), eType=gdal.GDT_Float32,
                                 options=['COMPRESS=LZW', "TILED=YES"])
         meta = self.get_metadata()
@@ -151,6 +180,17 @@ class TiffStorage(Storage):
         del dataset
 
     def set_metadata(self, metadata):
+        """ Writes a json file alongside the data tiff file.
+        _00002.json with _00002.tif for example.
+
+        Parameters
+        ----------
+        metadata
+
+        Returns
+        -------
+
+        """
         self.metadata = metadata.copy()
         f = open(self.metapath, 'w')
         json.dump(metadata, f)
@@ -298,7 +338,7 @@ class RasterData(VABC):
     def get_metadata(self):
         return self.storage.get_metadata()
     def set_metadata(self, metadata):
-        self.storage.set_metadata(metadata)
+        self.storage.set_metadata(metadata)  # writes to the json file that goes with each tiff
     def get_array(self, layer):
         return self.storage.get_arrays(layer)[0]
     def get_arrays(self, layers=None):

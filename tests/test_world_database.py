@@ -14,6 +14,9 @@ from nbs.bruty.world_raster_database import LatLonBackend, GoogleLatLonTileBacke
 from nbs.bruty.world_raster_database import WorldDatabase, onerr, get_crs_transformer, UTMTileBackendExactRes, CustomArea
 
 from test_data import master_data, make_clean_dir, data_dir, SW_5x5, NW_5x5, SE_5x5, MID_5x5
+from nbs.configs import get_logger, iter_configs, set_file_logging, log_config, parse_multiple_values
+
+LOGGER = get_logger("nbs.bruty.tests")
 
 nan = numpy.nan
 os.makedirs(data_dir, exist_ok=True)
@@ -222,7 +225,7 @@ def test_export_area():
     232  242  144
     234  244  nan
     """
-    db.export_area(use_dir.joinpath("new4.tif"), -1, -1, 11, 11, (4, 4))
+    db.export_area(use_dir.joinpath("new4.tif"), -1, -1, 11, 11, (4, 4), align=False)
     ds4 = gdal.Open(str(use_dir.joinpath("new4.tif")))
     b4 = ds4.GetRasterBand(1)
     a4 = b4.ReadAsArray()
@@ -515,24 +518,33 @@ def test_custom_scoring():
     x1, y1, x2, y2 = extents = (-.5, -.5, 11.5, 11.5)
     resolution = 1
     epsg = 26918
-    db = CustomArea(epsg, *extents, resolution, resolution, use_dir)
+    db = CustomArea(epsg, *extents, resolution, resolution, use_dir, history_class=RasterHistory)
 
     # test the insert text function by writing the data out with numpy first
     r, c, z, uncertainty, score, flags = SW_5x5  # flip the r,c order since insert wants x,y
     txt_filename = use_dir.joinpath("SW.txt")
     numpy.savetxt(txt_filename, numpy.array([z.reshape(-1), c.reshape(-1), r.reshape(-1), uncertainty.reshape(-1)]).T)
     # db.insert_survey_array((c, r, z, uncertainty, score, flags), "origin", contrib_id=1)
-    db.insert_txt_survey(txt_filename, contrib_id=1, format=[('depth', 'f4'), ('x', 'f8'), ('y', 'f8'), ('uncertainty', 'f4')],
+    db.insert_txt_survey(txt_filename, contrib_id=1, dformat=[('depth', 'f4'), ('x', 'f8'), ('y', 'f8'), ('uncertainty', 'f4')],
                          compare_callback=custom_scoring)
 
     # this SE with values 100-140 is retained in the original test, this time it should get overwritten due to custom scoring
     r, c, z, uncertainty, score, flags = SE_5x5
-    db.insert_survey_array((c, r, z, uncertainty, score, flags), "east", contrib_id=3, compare_callback=custom_scoring)
+    tiles = db.insert_survey_array((c, r, z, uncertainty, score, flags), "east", contrib_id=3, compare_callback=custom_scoring)
+    # add the metadata info so we can remove/reinsert this in other tests
+    db.finished_survey_insertion("SE orig", tiles, 3)
 
-    # this +50 array should not show up as the score is the same but depth is deeper
     # this should overwrite the SE data with values of 50-90 based on the custom_scoring callback making the contrib==2 have a higher score
     r, c, z, uncertainty, score, flags = SW_5x5
-    db.insert_survey_array((c + 5, r, z + 50, uncertainty, score, flags), "east2", contrib_id=2, compare_callback=custom_scoring)
+    tiles = db.insert_survey_array((c + 5, r, z + 50, uncertainty, score, flags), "east2", contrib_id=2, compare_callback=custom_scoring)
+    # add the metadata info so we can remove/reinsert this in other tests
+    db.finished_survey_insertion("SE+50", tiles, 2)
+
+    # this NW should be kept over the next NW, which allows to test that it disappears on reinsert since it doesn't have a filename
+    r, c, z, uncertainty, score, flags = NW_5x5
+    tiles = db.insert_survey_array((c, r, z, uncertainty, score, flags), "east", contrib_id=6, compare_callback=custom_scoring)
+    # add the metadata info so we can remove/reinsert this in other tests
+    db.finished_survey_insertion("SE orig again", tiles, 6)
 
     # test an input geotif via the insert_gdal function
     r, c, z, uncertainty, score, flags = NW_5x5
@@ -552,16 +564,21 @@ def test_custom_scoring():
         band.WriteArray(val)
     del dataset
 
-    # db.insert_survey_array((c, r, z, uncertainty, score, flags), "north east", contrib_id=4, compare_callback=custom_scoring)
     db.insert_survey_gdal(gdal_filename, contrib_id=5, compare_callback=custom_scoring)
 
     # overwrite some of the origin grid but keep score (based on contrib) below NW
+    # use a file so the reinsert after removal will work for contributor #4
     r, c, z, uncertainty, score, flags = MID_5x5
-    db.insert_survey_array((c, r, z, uncertainty, score, flags), "overwrite origin", contrib_id=4, compare_callback=custom_scoring)
+    txt_filename = use_dir.joinpath("middle.txt")
+    numpy.savetxt(txt_filename, numpy.array([z.reshape(-1), c.reshape(-1), r.reshape(-1), uncertainty.reshape(-1)]).T)
+    # db.insert_survey_array((c, r, z, uncertainty, score, flags), "overwrite origin", contrib_id=4, compare_callback=custom_scoring)
+    db.insert_txt_survey(txt_filename, contrib_id=4, dformat=[('depth', 'f4'), ('x', 'f8'), ('y', 'f8'), ('uncertainty', 'f4')],
+                         compare_callback=custom_scoring)
 
     # check that the data was processed correctly
     tx, ty = db.db.get_tiles_indices(0, 0, 0, 0)[0]
     tile = db.db.get_tile_history_by_index(tx, ty)
+    # db.db.get_tile_history_by_index(0, 0)[-1].get_array(LayersEnum.CONTRIBUTOR)
     raster_data = tile[-1]
     arr = raster_data.get_arrays()
     r0, c0 = raster_data.xy_to_rc(0, 0)
@@ -569,8 +586,9 @@ def test_custom_scoring():
     assert numpy.all(arr[LayersEnum.ELEVATION, r0 + 2:r0 + 5, c0 + 2:c0 + 5] == 999)  # overwrite of SW data
     assert numpy.all(arr[LayersEnum.ELEVATION, r0 + 5:r0 + 7, c0 + 5:c0 + 7] == 999)  # the overwrite of the empty space and
     # instead of SE_5x5 this is the +50 array because of the custom scoring function
-    assert numpy.all(arr[0, r0:r0 + 5, c0 + 5:c0 + 10] == SW_5x5[2] + 50)  # data that was only retained based on the custom_scoring
-    assert numpy.all(arr[0, r0 + 5:r0 + 10, c0:c0 + 5] == NW_5x5[2])  # data from tif
+    assert numpy.all(arr[LayersEnum.ELEVATION, r0:r0 + 5, c0 + 5:c0 + 10] == SW_5x5[2] + 50)  # data that was only retained based on the custom_scoring
+    assert numpy.all(arr[LayersEnum.ELEVATION, r0 + 5:r0 + 10, c0:c0 + 5] == NW_5x5[2])  # data from tif
+    assert numpy.all(arr[LayersEnum.CONTRIBUTOR, r0 + 5:r0 + 10, c0:c0 + 5] == 6)  # data from tif
 
 
 def test_export_custom_scoring():
@@ -591,11 +609,11 @@ def test_export_custom_scoring():
     1,  1,  4,  4,  4,  2,  2,  2,  2,  2
     1,  1,  4,  4,  4,  2,  2,  2,  2,  2
     1,  1,  4,  4,  4,  2,  2,  2,  2,  2
-    5,  5,  5,  5,  5,  4,  4,nan,nan,nan
-    5,  5,  5,  5,  5,  4,  4,nan,nan,nan
-    5,  5,  5,  5,  5,nan,nan,nan,nan,nan
-    5,  5,  5,  5,  5,nan,nan,nan,nan,nan
-    5,  5,  5,  5,  5,nan,nan,nan,nan,nan
+    6,  6,  6,  6,  6,  4,  4,nan,nan,nan
+    6,  6,  6,  6,  6,  4,  4,nan,nan,nan
+    6,  6,  6,  6,  6,nan,nan,nan,nan,nan
+    6,  6,  6,  6,  6,nan,nan,nan,nan,nan
+    6,  6,  6,  6,  6,nan,nan,nan,nan,nan
 
     100,100,100,100,100,  2,  2,  2,  2,  2
     100,100,100,100,100,  2,  2,  2,  2,  2
@@ -631,7 +649,7 @@ def test_export_custom_scoring():
     use_dir = custom_scoring_dir
     # create the database if not existing
     if not os.path.exists(use_dir):
-        test_make_db()
+        test_custom_scoring()
     db = WorldDatabase.open(use_dir)
 
     # export at the original resolution and make sure the original data is retained in the right positions.
@@ -677,4 +695,116 @@ def test_export_custom_scoring():
     numpy.testing.assert_equal(arr3ccrev[0][-2], (3, 999, 999, 93))
     numpy.testing.assert_equal(arr3ccrev[0][-3], (201, 999, 999, numpy.nan))
     numpy.testing.assert_equal(arr3ccrev[0][-4], (204, 234, numpy.nan, numpy.nan))
+
+def test_remove_survey():
+    """  The depths, contributors and scores from the prior test
+      0, 10, 20, 30, 40, 50, 60, 70, 80, 90
+      1, 11, 21, 31, 41, 51, 61, 71, 81, 91
+      2, 12,999,999,999, 52, 62, 72, 82, 92
+      3, 13,999,999,999, 53, 63, 73, 83, 93
+      4, 14,999,999,999, 54, 64, 74, 84, 94
+    200,210,220,230,240,999,999,nan,nan,nan
+    201,211,221,231,241,999,999,nan,nan,nan
+    202,212,222,232,242,nan,nan,nan,nan,nan
+    203,213,223,233,243,nan,nan,nan,nan,nan
+    204,214,224,234,244,nan,nan,nan,nan,nan
+
+    1,  1,  1,  1,  1,  2,  2,  2,  2,  2
+    1,  1,  1,  1,  1,  2,  2,  2,  2,  2
+    1,  1,  4,  4,  4,  2,  2,  2,  2,  2
+    1,  1,  4,  4,  4,  2,  2,  2,  2,  2
+    1,  1,  4,  4,  4,  2,  2,  2,  2,  2
+    6,  6,  6,  6,  6,  4,  4,nan,nan,nan
+    6,  6,  6,  6,  6,  4,  4,nan,nan,nan
+    6,  6,  6,  6,  6,nan,nan,nan,nan,nan
+    6,  6,  6,  6,  6,nan,nan,nan,nan,nan
+    6,  6,  6,  6,  6,nan,nan,nan,nan,nan
+    
+    Then we remove contributor #2 
+    which causes a remove and re-insert of contributors 4,5,6
+    but #6 was a memory insert so gets passed over so only 4,5 are restored
+    leaving the following values: 
+        1   [  0,  10,  20,  30,  40, 100, 110, 120, 130, 140],
+        1   [  1,  11,  21,  31,  41, 101, 111, 121, 131, 141],
+        1   [  2,  12, 999, 999, 999, 102, 112, 122, 132, 142],
+        1   [  3,  13, 999, 999, 999, 103, 113, 123, 133, 143],
+        2   [  4,  14, 999, 999, 999, 104, 114, 124, 134, 144],
+
+      0, 10, 20, 30, 40,100,110,120,130,140
+      1, 11, 21, 31, 41,101,111,121,131,141
+      2, 12,999,999,999,999,999,122,132,142
+      3, 13,999,999,999,999,999,123,133,143
+      4, 14,999,999,999,999,999,124,134,144
+    200,210,220,230,240,999,999,nan,nan,nan
+    201,211,221,231,241,999,999,nan,nan,nan
+    202,212,222,232,242,nan,nan,nan,nan,nan
+    203,213,223,233,243,nan,nan,nan,nan,nan
+    204,214,224,234,244,nan,nan,nan,nan,nan
+
+    1,  1,  1,  1,  1,  3,  3,  3,  3,  3
+    1,  1,  1,  1,  1,  3,  3,  3,  3,  3
+    1,  1,  4,  4,  4,  4,  4,  3,  3,  3
+    1,  1,  4,  4,  4,  4,  4,  3,  3,  3
+    1,  1,  4,  4,  4,  4,  4,  3,  3,  3
+    5,  5,  5,  5,  5,  4,  4,nan,nan,nan
+    5,  5,  5,  5,  5,  4,  4,nan,nan,nan
+    5,  5,  5,  5,  5,nan,nan,nan,nan,nan
+    5,  5,  5,  5,  5,nan,nan,nan,nan,nan
+    5,  5,  5,  5,  5,nan,nan,nan,nan,nan
+
+    """
+    use_dir = custom_scoring_dir
+    # create the database as we modify it in this function, running this test twice in a row would fail otherwise.
+    test_custom_scoring()
+    db = WorldDatabase.open(use_dir)
+    # Removing contributor #2 should cause contributors 2, 4, 5 to be removed
+    # (note that contributor insertion order was 1,3,2,6,4,5 to make sure 2 overwrote 3)
+    # The recompute should then try to re-insert contributors 4, 5, 6 but only #4+5 came from a file; reinsert of #6 should then fail gracefully
+    db.remove_and_recompute(2, compare_callback=custom_scoring)
+
+    # check that the data was processed correctly
+    tx, ty = db.db.get_tiles_indices(0, 0, 0, 0)[0]
+    tile = db.db.get_tile_history_by_index(tx, ty)
+    raster_data = tile[-1]
+    arr = raster_data.get_arrays()
+    r0, c0 = raster_data.xy_to_rc(0, 0)
+    assert numpy.all(arr[LayersEnum.ELEVATION, r0:r0 + 2, c0:c0 + 2] == SW_5x5[2][:2, :2])  # data from text file
+    assert numpy.all(arr[LayersEnum.ELEVATION, r0 + 2:r0 + 5, c0 + 2:c0 + 5] == 999)  # overwrite of SW data
+    assert numpy.all(arr[LayersEnum.ELEVATION, r0 + 5:r0 + 7, c0 + 5:c0 + 7] == 999)  # the overwrite of the empty space and
+    # no +50 anymore as that is the contributor that was removed
+    assert numpy.all(arr[LayersEnum.ELEVATION, r0:r0 + 5, c0 + 7:c0 + 10] == SE_5x5[2][:, 2:])  # the original contrib=3 data
+    assert numpy.all(arr[LayersEnum.CONTRIBUTOR, r0:r0 + 5, c0 + 7:c0 + 10] == 3)  # the original contrib=3 data
+    assert numpy.all(arr[LayersEnum.ELEVATION, r0 + 5:r0 + 10, c0:c0 + 5] == NW_5x5[2])  # data from tif
+    # data from tif replaced the memory array (contrib=6) that was put in
+    assert numpy.all(arr[LayersEnum.CONTRIBUTOR, r0 + 5:r0 + 10, c0:c0 + 5] == 5)
+
+
+def test_fast_export():
+    use_dir = data_dir.joinpath('fast_export_db')
+    if os.path.exists(use_dir):
+        shutil.rmtree(use_dir, onerror=onerr)
+    resolution = 1
+    epsg = 26918
+    db = WorldDatabase(
+        UTMTileBackendExactRes(resolution, resolution, epsg, RasterHistory, DiskHistory, TiffStorage, use_dir))
+
+    # test the insert text function by writing the data out with numpy first
+    r, c, z, uncertainty, score, flags = SW_5x5  # flip the r,c order since insert wants x,y
+    db.insert_survey_array((c, r, z, uncertainty, score, flags), "origin", contrib_id=1)
+
+    # find the tile that was filled then move a copy of the data to adjacent tiles
+    tx, ty = db.db.tile_scheme.xy_to_tile_index(c[0,0], r[0,0])
+    x1, y1, x2, y2 = db.db.tile_scheme.tile_index_to_xy(tx, ty)
+
+    # add a copy of the data to the tile to the right and above the original data.  Add 20 to the the right and fifty above
+    db.insert_survey_array((c+(x2-x1), r, z+20, uncertainty, score, flags), "west", contrib_id=3)
+    db.insert_survey_array((c, r+(y2-y1), z + 50, uncertainty, score, flags), "north", contrib_id=2)
+
+    # extract the entire area that we just added data to, the original tile plus adjacent
+    # x2, y2 are the edge of the first tile which will actually return the second tile when queried for where that position would fall
+    # but we'll add one cell resolution to make sure we are in the north and east tiles
+    arr, txs, tys, indices = db.fast_extract(x1, y1, x2+resolution, y2+resolution)
+
+    assert arr
+
 

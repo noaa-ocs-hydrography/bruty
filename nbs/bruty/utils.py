@@ -1,10 +1,16 @@
 import os
+import subprocess
 import pathlib
 import time
+import msvcrt
+import re
+
 import numpy
 import rasterio.crs
 from osgeo import gdal, osr, ogr
+import pyproj.exceptions
 from pyproj import Transformer, CRS
+from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
 
 try:
     from tqdm import tqdm
@@ -12,6 +18,71 @@ except ModuleNotFoundError:
     def tqdm(iterate_stuff, *args, **kywrds):
         return iterate_stuff  # if this doesn't work, try iter(iterate_stuff)
 
+
+def get_epsg_or_wkt(srs):
+    if isinstance(srs, str):
+        srs = osr.SpatialReference(srs)
+    # epsg = rasterio.crs.CRS.from_string(vr.srs.ExportToWkt()).to_epsg()
+    if srs.IsProjected():
+        epsg = srs.GetAuthorityCode("PROJCS")
+    elif srs.IsGeographic():
+        epsg = srs.GetAuthorityCode("GEOGCS")
+    else:
+        raise TypeError("projection not understood - IsProjected and IsGeographic both False?")
+    if epsg is None:
+        epsg = srs.ExportToWkt()
+        # utm_patterns = ['UTM Zone (\d+)(N|, Northern Hemisphere)', ]
+        # for utm_pattern in utm_patterns:
+        #     m = re.search(utm_pattern, srs.GetName(), re.IGNORECASE)
+        #     if m:
+        #         zone = int(m.groups()[0])
+        #         if srs.GetAuthorityCode("GEOGCS") == 4326:  # WGS84
+        #             epsg = 32600 + zone
+        #         elif srs.GetAuthorityCode("GEOGCS") == 4269:  # NAD83
+        #             epsg = 26900 + zone
+        #         break
+    return epsg
+
+
+def user_quit():
+    user_quit = False
+    while msvcrt.kbhit():
+        print("checking keyboard input for 'qq'")
+        if b"q" == msvcrt.getch():
+            print("hit 'q' twice to quit")
+            if b"q" == msvcrt.getch():
+                user_quit = True
+                break
+    return user_quit
+
+def make_mllw_height_wkt(horz_epsg):
+    wkt = make_wkt(horz_epsg, 5866)
+    # 5866 with GDAL will not accept the Up axis, so have to strip the 5866 epsg authority
+    down_string = 'AXIS["Depth",DOWN],AUTHORITY["EPSG","5866"]'
+    if down_string not in wkt:
+        raise Exception("Down not found in VertCS, did gdal change?")
+    else:
+        # wkt = wkt.replace('AXIS["Depth",DOWN]', 'AXIS["gravity-related height",UP]')
+        # wkt = wkt.replace('AXIS["Depth",DOWN]', 'AXIS["Height",UP]')
+        wkt = wkt.replace(down_string, 'AXIS["gravity-related height",UP]').replace("MLLW depth", "MLLW")
+
+        pass
+    return wkt
+
+def make_wkt(horz_epsg, vert_epsg):
+    """ Calls gdalsrsinfo with the epsgs supplied.  MLLW (5866) is the default vertical.
+    down_to_up flag will change AXIS["Depth",DOWN] to AXIS["gravity-related height",UP]
+    see:  https://docs.opengeospatial.org/is/18-010r7/18-010r7.html#47
+    """
+    cmd = f"gdalsrsinfo EPSG:{horz_epsg}+{vert_epsg} -o WKT1 --single-line"
+    srs_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    srs_process.wait()
+    wkt = srs_process.stdout.read().decode().strip()
+    stderr = srs_process.stderr.read().decode().strip()
+    if "COMPD_CS" not in wkt:
+        raise Exception("compound CRS not found: " + stderr)
+
+    return wkt
 
 def onerr(func, path, info):
     r"""This is a helper function for shutil.rmtree to take care of something happening on (at least) my local machine.
@@ -55,10 +126,26 @@ def affine_center(r, c, x0, dxx, dyx, y0, dxy, dyy):
     return affine(r + 0.5, c + 0.5, x0, dxx, dyx, y0, dxy, dyy)
 
 
-def get_crs_transformer(epsg1, epsg2):
-    if epsg1 != epsg2:
-        input_crs = CRS.from_epsg(epsg1)
-        output_crs = CRS.from_epsg(epsg2)
+def get_crs_transformer(epsg_or_wkt1, epsg_or_wkt2):
+    # convert gdal/osr SpatialReference to WKT so pyproj will use it.
+    if isinstance(epsg_or_wkt1, osr.SpatialReference):
+        epsg_or_wkt1 = epsg_or_wkt1.ExportToWkt()
+    if isinstance(epsg_or_wkt2, osr.SpatialReference):
+        epsg_or_wkt2 = epsg_or_wkt2.ExportToWkt()
+    # pyproj will fail on CRS("32619") so make it an integer so we call CRS(32619)
+    if isinstance(epsg_or_wkt1, str):
+        if epsg_or_wkt1.isdigit():
+            epsg_or_wkt1 = int(epsg_or_wkt1)
+    if isinstance(epsg_or_wkt2, str):
+        if epsg_or_wkt2.isdigit():
+            epsg_or_wkt2 = int(epsg_or_wkt2)
+    try:
+        input_crs = CRS(epsg_or_wkt1)
+        output_crs = CRS(epsg_or_wkt2)
+    except pyproj.exceptions.CRSError as e:
+        raise BrutyUnkownCRS(str(e))
+
+    if input_crs != output_crs:
         crs_transformer = Transformer.from_crs(input_crs, output_crs, always_xy=True)
     else:
         crs_transformer = None
@@ -322,12 +409,12 @@ def iterate_gdal_image(dataset, band_nums=(1,), min_block_size=512, max_block_si
     row_size = bands[0].YSize
     nodata = bands[0].GetNoDataValue()
     # read the data array in blocks
-    for ic in tqdm(range(0, col_size, col_block_size), mininterval=.7):
+    for ic in tqdm(range(0, col_size, col_block_size), desc='column block', mininterval=.7):
         if ic + col_block_size < col_size:
             cols = col_block_size
         else:
             cols = col_size - ic
-        for ir in tqdm(range(0, row_size, row_block_size), mininterval=.7):
+        for ir in tqdm(range(0, row_size, row_block_size), desc='row block', mininterval=.7, leave=False):
             if ir + row_block_size < row_size:
                 rows = row_block_size
             else:
@@ -389,21 +476,25 @@ def iterate_gdal_buffered_image(dataset, col_buffer_size, row_buffer_size, band_
         data = list of arrays from the dataset
 
     """
+    # cast to ints since gdal will throw exception if float gets through (even if it's 1.0)
+    col_buffer_size, row_buffer_size = int(col_buffer_size), int(row_buffer_size)
+    min_block_size, max_block_size = int(min_block_size), int(max_block_size)
+
     bands = [dataset.GetRasterBand(num) for num in band_nums]
     block_sizes = bands[0].GetBlockSize()
-    row_block_size = min(max(block_sizes[1], min_block_size), max_block_size)
-    col_block_size = min(max(block_sizes[0], min_block_size), max_block_size)
     col_size = bands[0].XSize
     row_size = bands[0].YSize
+    row_block_size = min(max(block_sizes[1], min_block_size), max_block_size, row_size)  # don't let the block size be bigger than the data
+    col_block_size = min(max(block_sizes[0], min_block_size), max_block_size, col_size)  # don't let the block size be bigger than the data
     nodata = bands[0].GetNoDataValue()
-    for ic in tqdm(range(0, col_size, col_block_size), mininterval=.7):
+    for ic in tqdm(range(0, col_size, col_block_size), desc='column block', mininterval=.7):
         cols = col_block_size
         if ic + col_block_size > col_size:  # read a full set of data by offsetting the column index back a bit
             ic = col_size - cols
         col_buffer_lower = col_buffer_size if ic >= col_buffer_size else ic
         col_buffer_upper = col_buffer_size if col_size - (ic + col_block_size) >= col_buffer_size else col_size - (ic + col_block_size)
         read_cols = col_buffer_lower + cols + col_buffer_upper
-        for ir in tqdm(range(0, row_size, row_block_size), mininterval=.7):
+        for ir in tqdm(range(0, row_size, row_block_size), desc='row block', mininterval=.7, leave=False):
             rows = row_block_size
             if ir + row_block_size > row_size:
                 ir = row_size - rows
@@ -437,7 +528,7 @@ class BufferedImageOps:
         """ See iterate_gdal_buffered_image() where dataset will be automatically supplied based on the __init__() for this instance """
         self.band_nums = band_nums
         for block in iterate_gdal_buffered_image(self.ds, row_buffer_size, col_buffer_size,
-                                                 band_nums=(1,), min_block_size=min_block_size, max_block_size=max_block_size):
+                                                 band_nums=band_nums, min_block_size=min_block_size, max_block_size=max_block_size):
             self.ic, self.ir, self.data_cols, self.data_rows, self.col_buffer_lower, self.row_buffer_lower, nodata, data = block
             self.read_shape = data[0].shape
             yield block
@@ -563,7 +654,7 @@ def save_soundings_from_image(inputname, outputname, res, flip_depth=True):
     ogr.GetDriverByName('GPKG').CopyDataSource(dst_ds, dst_ds.GetName())
 
 
-def calc_area_array_params(x1, y1, x2, y2, res_x, res_y):
+def calc_area_array_params(x1, y1, x2, y2, res_x, res_y, align_x=None, align_y=None):
     """ Compute a coherent min and max position and shape given a resolution.
     Basically we may know the desired corners but they won't fit perfectly based on the resolution.
     So we will compute what the adjusted corners would be and number of cells needed based on the resolution provided.
@@ -586,7 +677,10 @@ def calc_area_array_params(x1, y1, x2, y2, res_x, res_y):
         pixel size in x direction
     res_y
         pixel size in y direction
-
+    align_x
+        if supplied the min_x will be shifted to align to an integer cell offset from the align_x, if None then no effect
+    align_y
+        if supplied the min_y will be shifted to align to an integer cell offset from the align_y, if None then no effect
     Returns
     -------
     min_x, min_y, max_x, max_y, cols (shape_x), rows (shape_y)
@@ -596,6 +690,10 @@ def calc_area_array_params(x1, y1, x2, y2, res_x, res_y):
     min_y = min(y1, y2)
     max_x = max(x1, x2)
     max_y = max(y1, y2)
+    if align_x:
+        min_x -= (min_x - align_x) % res_x
+    if align_y:
+        min_y -= (min_y - align_y) % res_y
     shape_x = int(numpy.ceil((max_x - min_x) / res_x))
     shape_y = int(numpy.ceil((max_y - min_y) / res_y))
     max_x = shape_x * res_x + min_x
@@ -702,11 +800,13 @@ def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, sh
     dataset.SetGeoTransform(gt)
 
     if epsg is not None:
-        # Get raster projection
-        srs = osr.SpatialReference()
-        srs.ImportFromEPSG(epsg)
-        dest_wkt = srs.ExportToWkt()
-
+        if isinstance(epsg, (float, int)):
+            # Get raster projection
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(epsg)
+            dest_wkt = srs.ExportToWkt()
+        elif isinstance(epsg, str):
+            dest_wkt = epsg
         # Set projection
         dataset.SetProjection(dest_wkt)
     for b in range(dataset.RasterCount):
@@ -719,7 +819,8 @@ def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, sh
 
 
 def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg,
-                           driver="GTiff", options=(), nodata=numpy.nan):
+                           driver="GTiff", options=(), nodata=numpy.nan,
+                           align_x=None, align_y=None):
     """ Makes a north up gdal dataset with nodata = numpy.nan and LZW compression.
     Specifying a positive res_y will be input as a negative value into the gdal file,
     since tif/gdal likes max_y and a negative Y pixel size.
@@ -765,7 +866,7 @@ def make_gdal_dataset_area(fname, bands, x1, y1, x2, y2, res_x, res_y, epsg,
     gdal.dataset
 
     """
-    min_x, min_y, max_x, max_y, shape_x, shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
+    min_x, min_y, max_x, max_y, shape_x, shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y, align_x=align_x, align_y=align_y)
     dataset = make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, shape_y, epsg, driver, options, nodata)
     return dataset
 
@@ -800,3 +901,13 @@ def transform_rect(x1, y1, x2, y2, transform_func):
     return min(xs), min(ys), max(xs), max(ys)
 
 
+def find_overrides_in_log(log_path):
+    data = open(log_path).readlines()
+    overrides = {}
+    for line in data:
+        m = re.search("override (\d+|\w+)\swith\s(\d+)\sin\s(.*)", line)
+        if m:
+            if m.groups()[0] != m.groups()[1]:
+                overrides[m.groups()[2]] = line[m.start():-1]
+    for line in overrides.values():
+        print(line)

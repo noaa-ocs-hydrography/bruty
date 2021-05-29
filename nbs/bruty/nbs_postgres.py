@@ -1,0 +1,589 @@
+import pathlib
+import pickle
+from functools import partial
+import random
+import re
+import os
+
+from osgeo import gdal
+import numpy
+import psycopg2
+
+from nbs.bruty import nbs_locks
+from nbs.bruty.raster_data import TiffStorage, LayersEnum
+from nbs.configs import parse_multiple_values, iter_configs
+from data_management.db_connection import connect_with_retries
+from fuse_dev.fuse.meta_review.meta_review import database_has_table, split_URL_port
+
+_debug = False
+
+"""
+SELECT nbs_id, from_filename, script_to_filename, manual_to_filename, for_navigation, never_post, decay_score,script_resolution,manual_resolution,script_point_spacing,manual_point_spacing 
+FROM public.pbg_gulf_utm14n_mllw
+WHERE nbs_id = 566122
+
+SELECT nbs_id, from_filename, script_to_filename, manual_to_filename, for_navigation, never_post, decay_score,script_resolution,manual_resolution,script_point_spacing,manual_point_spacing 
+FROM public.pbc_utm19n_mllw
+WHERE from_filename like '%H12299%'
+"""
+
+def connect_params_from_config(config):
+    with open(config['URL_FILENAME']) as hostname_file:
+        url = hostname_file.readline()
+    hostname, port = split_URL_port(url)
+
+    with open(os.path.expanduser(config['CREDENTIALS_FILENAME'])) as database_credentials_file:
+        username, password = [line.strip() for line in database_credentials_file][:2]
+    tablenames, database = config['tablenames'], config['database']
+    tablename_list = parse_multiple_values(tablenames)
+    return tablename_list, database, hostname, port, username, password
+
+# switched to Identity column - also made values as one million * utm zone and add 800k or 900k for the prereview and sensitive tables.
+# since the tiffs are floats, we only have 7 digits of precision for the identity so make them 40k * utm zone instead of a million
+# can fix this later by storing a local translation of contributor to unique number in the database but trying to keep a direct lookup for now.
+# *update - made a hack to store int32 in the tiff float32 so full range of int32 available
+#   (except for 1232348160 which maps to the 1000000 bag nodata)
+# So use UTM * 10000000 + product branch letter (A-G at least) * 1000000 + datum shift (mllw=0, prereview=200000, sensitive=300000, enc=400000)
+#   ex: PBG18_prereview = [18680000 : 18688999]
+def start_integer(table_name):
+    exp = r"pb(?P<pb>\w)_(?P<name>.*)utm(?P<utm>\d+)(?P<hemi>\w)_(?P<datum>\w+)_(?P<type>\w+)"
+    m = re.match(exp, table_name, re.IGNORECASE)
+    if m:
+        zone_size = 1e7
+        utm = int(m.group('utm'))
+        utm_offset = utm * zone_size
+        if m.group('hemi').lower() == 's':
+            utm_offset += zone_size * 60
+        product_branch_offset = (ord(m.group('pb').lower()) - ord('a')) * 1e6
+        datum = m.group('datum').lower()
+        dtype = m.group('type').lower()
+        if datum == "mllw" and dtype == "qualified":
+            type_offset = 0
+        elif datum in ('hrd', 'mld', 'lwrp') and dtype == "qualified":
+            type_offset = 600000
+        elif datum == "mllw" and dtype == "sensitive":
+            type_offset = 200000
+        elif datum == "mllw" and dtype == "unqualified":
+            type_offset = 300000
+        elif datum == "mllw" and dtype == "enc":
+            type_offset = 400000
+        elif datum == "mllw" and dtype == "gmrt":
+            type_offset = 450000
+        elif dtype == "modeling":
+            type_offset = 500000
+        else:
+            raise ValueError(f"no offset found for {datum}_{dtype}")
+
+        start_val = int(utm_offset + product_branch_offset + type_offset)
+    else:
+        raise ValueError("Didn't parse tablename to standard nbs naming of pbX_name_utmXX_TYPE")
+    return start_val
+
+NBS_ID_STR = "nbs_id"
+def create_identity_column(table_name, start_val, database, username, password,
+                           hostname='OCS-VS-NBS01', port='5434', col_name=NBS_ID_STR, force_restart=False):
+    connection = connect_with_retries(database=database, user=username, password=password, host=hostname, port=port)
+    cursor = connection.cursor()
+    # used admin credentials for this
+    # cursor.execute("create table serial_19n_mllw as (select * from pbc_utm19n_mllw)")
+    # connection.commit()
+    needs_id_column = False
+    cursor.execute(
+        f"""select * from 
+            (SELECT column_name, is_identity FROM information_schema.columns WHERE table_name = '{table_name}') as t1 
+            WHERE column_name='{col_name}';""")
+    ret = cursor.fetchone()
+    if ret is None:  # no column named 'col_name' in the table
+        needs_id_column = True
+    else:
+        nm, is_ident = ret
+        if is_ident.upper() == "NO":
+            cursor.execute(f"ALTER TABLE {table_name} DROP COLUMN {col_name}")
+            connection.commit()
+            needs_id_column = True
+
+    if needs_id_column:
+        # create nbs_id if doesn't exist
+        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} bigint GENERATED BY DEFAULT AS IDENTITY")
+        connection.commit()
+        force_restart = True
+
+    if force_restart:
+        cursor.execute(f"ALTER TABLE {table_name} ALTER COLUMN {col_name} RESTART WITH {start_val}")
+        connection.commit()
+        cursor.execute(f"UPDATE {table_name} SET {col_name} = DEFAULT")
+        connection.commit()
+        # cursor.execute(f"update {table_name} set sid=sid+{start_val}")
+
+def make_all_serial_columns(print_results=False):
+    """ to run:
+
+    from nbs.bruty import nbs_postgres
+    nbs_postgres.make_all_serial_columns(True)
+
+    or to revise a table:
+
+    from nbs.bruty import nbs_postgres
+    from nbs.configs import parse_multiple_values, iter_configs
+    for config_filename, config_file in iter_configs([r'C:\git_repos\bruty\nbs\scripts\debug.config']):
+        config = config_file['DEFAULT']
+    _t, database, hostname, port, username, password = nbs_postgres.connect_params_from_config(config)
+    for update_table in ('pbd_california_utm11n_mllw_qualified', 'pbd_california_utm11n_mllw_unqualified'):
+        start = nbs_postgres.start_integer(update_table)
+        nbs_postgres.create_identity_column(update_table, start, database, username, password, hostname, port, force_restart=True)
+    """
+    for config_filename, config_file in iter_configs([r'C:\git_repos\bruty\nbs\scripts\debug.config']):
+        config = config_file['DEFAULT']
+        _t, database, hostname, port, username, password = connect_params_from_config(config)
+        connection = connect_with_retries(database=database, user=username, password=password, host=hostname, port=port)
+        cursor = connection.cursor()
+        cursor.execute("""SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';""")
+        tablenames = list(cursor.fetchall())
+        for (tablename,) in tablenames:
+            try:
+                start = start_integer(tablename)
+            except ValueError as e:
+                print(f'{tablename} was not recognized as an nbs_id capable table\n    {str(e)}')
+            else:
+                create_identity_column(tablename, start, database, username, password, hostname, port)
+    if print_results:
+        for (tablename,) in tablenames:
+            cursor.execute(
+                f"""select * from 
+                    (SELECT column_name, is_identity FROM information_schema.columns WHERE table_name = '{tablename}') as t1 
+                    WHERE column_name='{NBS_ID_STR}';""")
+            ret = cursor.fetchone()
+            if ret is not None:
+                cursor.execute(f"""SELECT nbs_id FROM {tablename}""")
+                print(tablename, cursor.fetchone())
+            else:
+                print(tablename, "doesn't have nbs_id")
+
+    """
+    spatial_ref_sys doesn't have nbs_id
+    pbg_missrvr_utm15n_lwrp (156600000,)
+    pbg_missrvr_utm16n_lwrp (166600000,)
+    pbg_navassa_utm18n_mllw (186000000,)
+    pbc_utm19n_mllw (192003461,)
+    pbg_puertorico_utm19n_mllw_sensitive (196200000,)
+    pbc_utm19n_mllw_prereview (192300000,)
+    pbg_gulf_utm14n_mllw_prereview (146300000,)
+    pbc_utm19n_mllw_sensitive (192200000,)
+    pbg_puertorico_utm20n_mllw (206000160,)
+    pbg_puertorico_utm20n_mllw_sensitive (206200000,)
+    pbc_utm20n_mllw (202000000,)
+    pbg_utm15n_mllw_prereview (156300000,)
+    pbc_utm20n_mllw_prereview (202300000,)
+    pbg_gulf_utm16n_mllw_sensitive (166200000,)
+    pbd_utm11n_mllw_lalb (113600017,)
+    pbg_utm16n_mllw_prereview (166300000,)
+    pbc_utm18n_mllw_sensitive (182200001,)
+    pbd_utm11n_mllw_lalb_manual None
+    scrape_tracking_pbc doesn't have nbs_id
+    scrape_tracking_pbg doesn't have nbs_id
+    scrape_tracking_pba_modeling doesn't have nbs_id
+    scrape_tracking_pbb doesn't have nbs_id
+    scrape_tracking_pbe doesn't have nbs_id
+    scrape_tracking_lalb doesn't have nbs_id
+    pbd_utm11n_mllw_lalb_prereview (113800000,)
+    pbe_midatlantic_utm17n_mllw (174000000,)
+    pbc_utm19n_mld (192600000,)
+    pbe_midatlantic_utm18n_mllw (184000239,)
+    pbe_midatlantic_utm19n_mllw (194000000,)
+    pbg_puertorico_utm19n_mllw (196000291,)
+    pbg_gulf_utm14n_mllw (146002787,)
+    pbc_utm18n_mllw_enc (182400008,)
+    pbg_gulf_utm14n_mllw_sensitive None
+    pbb_southeast_utm16n_mllw (161000051,)
+    pbg_gulf_utm15n_mllw (156008550,)
+    pbg_gulf_utm15n_mllw_prereview (156300000,)
+    pbb_southeast_utm17n_mllw (171000004,)
+    pbb_southeast_utm18n_mllw (181000044,)
+    pbg_gulf_utm15n_mllw_sensitive (156200000,)
+    pbc_utm18n_hrd (182600003,)
+    pbg_gulf_utm16n_mllw (166026137,)
+    pbc_utm18n_mllw (182000233,)
+    pbg_gulf_utm16n_mllw_prereview (166300000,)
+    pbc_utm18n_mllw_prereview (182300002,)
+    """
+    #
+    # for utm in (18, 19):
+    #    for offset, extension in ([0,''], [800000, '_prereview'], [900000, '_sensitive']):
+    #       tablename = f"pbc_utm{utm}n_mllw{extension}"
+    #       cursor.execute(f"ALTER TABLE {tablename} ADD COLUMN {col_name} bigint GENERATED BY DEFAULT AS IDENTITY")
+    #       cursor.execute(f"ALTER TABLE {tablename} ALTER COLUMN {col_name} RESTART WITH {1000000*utm + offset}")
+    #       cursor.execute(f"UPDATE {tablename} SET {col_name} = DEFAULT")
+    # for utm in (14, 15, 16):
+    #     for offset, extension in ([0, ''], [35000, '_prereview'], [38000, '_sensitive']):
+    #         tablename = f"pbg_gulf_utm{utm}n_mllw{extension}"
+    #         print(tablename)
+    #         cursor.execute(f"create table preserial_{tablename} as (select * from {tablename})")
+    #         connection.commit()
+    #         try:
+    #             cursor.execute(f"ALTER TABLE {tablename} ALTER COLUMN {col_name} DROP IDENTITY IF EXISTS")
+    #             cursor.execute(f"ALTER TABLE {tablename} DROP COLUMN {col_name}")
+    #         except psycopg2.errors.UndefinedColumn:
+    #             print("no pre-existing nbs_id column")
+    #         cursor.execute(f"ALTER TABLE {tablename} ADD COLUMN {col_name} bigint GENERATED BY DEFAULT AS IDENTITY")
+    #         cursor.execute(f"ALTER TABLE {tablename} ALTER COLUMN {col_name} RESTART WITH {40000 * utm + offset}")
+    #         cursor.execute(f"UPDATE {tablename} SET {col_name} = DEFAULT")
+    #         connection.commit()
+    #
+    #
+    # for utm in (15, 16):
+    #     for offset, extension in ([34000, ''],):
+    #         tablename = f"pbg_missrvr_utm{utm}n_lwrp{extension}"
+    #         cursor.execute(f"create table preserial_{tablename} as (select * from {tablename})")
+    #         connection.commit()
+    #         try:
+    #             cursor.execute(f"ALTER TABLE {tablename} ALTER COLUMN {col_name} DROP IDENTITY IF EXISTS")
+    #             cursor.execute(f"ALTER TABLE {tablename} DROP COLUMN {col_name}")
+    #         except psycopg2.errors.UndefinedColumn:
+    #             print("no pre-existing nbs_id column")
+    #         cursor.execute(f"ALTER TABLE {tablename} ADD COLUMN {col_name} bigint GENERATED BY DEFAULT AS IDENTITY")
+    #         cursor.execute(f"ALTER TABLE {tablename} ALTER COLUMN {col_name} RESTART WITH {40000 * utm + offset}")
+    #         cursor.execute(f"UPDATE {tablename} SET {col_name} = DEFAULT")
+    #         connection.commit()
+
+# Note - if column is already made and has NULL values, must set all data to non-null before modifying the column definition
+# in psql of pgadmin -- "update pbd_utm11n_mllw_lalb set nbs_id =  0;"
+
+# connection = connect_with_retries(database=database, user=username, password=password, host=hostname, port=port)
+# cursor = connection.cursor()
+# utm = 18
+# col_name = 'nbs_id'
+# for offset, extension in ([0, ''], [35000, '_prereview'], [38000, '_sensitive']):
+#     tablename = f"pbc_utm{utm}n_mllw{extension}"
+#     cursor.execute(f"ALTER TABLE {tablename} ALTER COLUMN {col_name} RESTART WITH {40000 * utm + offset}")
+#     cursor.execute(f"UPDATE {tablename} SET {col_name} = DEFAULT")
+#     connection.commit()
+
+def get_nbs_records(table_name, database, username, password, hostname='OCS-VS-NBS01', port='5434'):
+    if _debug and hostname is None:
+        import pickle
+        f = open(fr"C:\data\nbs\{table_name}.pickle", 'rb')
+        records = pickle.load(f)
+        fields = pickle.load(f)
+        ## trim back the records to a few for testing
+        # print("Thinning survey records for debugging!!!!")
+        # filename_col = fields.index('from_filename')
+        # id_col = fields.index('nbs_id')
+        # thinned_records = []
+        # for rec in records:
+        #     if rec[id_col] in (12657, 12203, 12772, 10470, 10390):
+        #         thinned_records.append(rec)
+        # records = thinned_records
+    else:
+        connection = connect_with_retries(database=database, user=username, password=password, host=hostname, port=port)
+        cursor = connection.cursor()
+        cursor.execute(f'SELECT * FROM {table_name}')
+        records = cursor.fetchall()
+        fields = [desc[0] for desc in cursor.description]
+    return fields, records
+
+
+
+def id_to_scoring(fields_lists, records_lists, for_navigation_flag=(True, True), never_post_flag=(True, False)):
+    # @todo finish docs and change fields/records into class instances
+    """
+    Parameters
+    ----------
+    fields : list of lists
+        list of list of field names in each respective field, record pair
+    records : list of lists
+        list of record lists -- matched to the fields lists
+    for_navigation_flag
+        tuple of two booleans, first is if navigation_flag should be checked and second is the value that is desired to be processed.
+        default is (True, True) meaning use the navigation flag and only process surveys that are "for navigation"
+    never_post_flag
+        tuple of two booleans, first is if never_post should be checked and second is the value that is desired to be processed.
+        default is (True, False) meaning use the never_post flag and only process surveys that have False (meaning yes, post)
+
+    Returns
+    -------
+    (list, list, dict)
+        sorted_recs, names_list, sort_dict
+    """
+    rec_list = []
+    names_list = []
+    use_for_navigation_flag, require_navigation_flag_value = for_navigation_flag
+    use_never_post_flag, require_never_post_flag_value = never_post_flag
+    for fields, records in zip(fields_lists, records_lists):
+        # Create a dictionary that converts from the unique database ID to an ordering score
+        # Basically the standings of the surveys,
+        # First place is the highest decay score with a tie breaker of lowest resolution.  If both are the same they will have the same score
+        # Alphabetical will have no duplicate standings (unless there is duplicate names) and first place is A (ascending alphabetical)
+        # get the columns that have the important data
+        decay_col = fields.index("decay_score")
+        script_res_col = fields.index('script_resolution')
+        manual_res_col = fields.index('manual_resolution')
+        script_point_res_col = fields.index('script_point_spacing')
+        manual_point_res_col = fields.index('manual_point_spacing')
+
+        filename_col = fields.index('from_filename')
+        path_col = fields.index('script_to_filename')
+        manual_path_col = fields.index('manual_to_filename')
+        for_navigation_col = fields.index('for_navigation')
+        never_post_col = fields.index('never_post')
+        id_col = fields.index('nbs_id')
+        # make lists of the dacay/res with survey if and also one for name vs survey id
+        for rec in records:
+            if use_for_navigation_flag and bool(rec[for_navigation_col]) != require_navigation_flag_value:
+                continue
+            if use_never_post_flag and bool(rec[never_post_col]) != require_never_post_flag_value:
+                continue
+            decay = rec[decay_col]
+            sid = rec[id_col]
+            if decay is not None:
+                res = rec[manual_res_col]
+                if res is None:
+                    res = rec[script_res_col]
+                    if res is None:
+                        res = rec[manual_point_res_col]
+                        if res is None:
+                            res = rec[script_point_res_col]
+                            if res is None:
+                                print("missing res on record:", sid, rec[filename_col])
+                                continue
+                path = rec[manual_path_col]
+                # A manual string can be an empty string (not Null) and also protect against it looking empty (just a space " ")
+                if path is None or not path.strip():
+                    path = rec[path_col]
+                    if path is None or not path.strip():
+                        print("skipping missing to_path", sid, rec[filename_col])
+                        continue
+                rec_list.append((sid, res, decay))
+                # Switch to lower case, these were from filenames that I'm not sure are case sensitive
+                names_list.append((rec[filename_col].lower(), sid, path))  # sid would be the next thing sorted if the names match
+    if names_list:
+        # sort the names so we can use an integer to use for sorting by name
+        names_list.sort()
+        # do an ordered 2 key sort on decay then res (lexsort likes them backwards)
+        rec_array = numpy.array(rec_list, dtype=numpy.float64)  # use double so not to lose precision on SID
+        sorted_indices = numpy.lexsort([-rec_array[:, 1], rec_array[:, 2]])  # resolution, decay (flip the res so lowest score and largest res is first)
+        sorted_recs = rec_array[sorted_indices]
+        sort_val = 0
+        prev_res, prev_decay = None, None
+        sort_dict = {}
+        # set up a dictionary that has the sorted value of the decay followed by resolution
+        for n, (sid, res, decay) in enumerate(sorted_recs):
+            # don't incremenet when there was a tie, this allows the next sort criteria to be checked
+            if res != prev_res or decay != prev_decay:
+                sort_val += 1
+            prev_res = res
+            prev_decay = decay
+            sort_dict[int(sid)] = [sort_val]
+        # the NBS sort order then uses depth after decay but before alphabetical, so we can't merge the name sort with the decay+res
+        # add a second value for the alphabetical naming which is the last resort to maintain constistency of selection
+        for n, (filename, sid, path) in enumerate(names_list):
+            sort_dict[int(sid)].append(n)
+    else:
+        sorted_recs, names_list, sort_dict = [], [], {}
+    return sorted_recs, names_list, sort_dict
+
+
+def nbs_survey_sort(id_to_score, pts, existing_arrays, pts_col_offset=0, existing_col_offset=0):
+    return nbs_sort_values(id_to_score, pts[LayersEnum.CONTRIBUTOR + pts_col_offset], pts[LayersEnum.ELEVATION + pts_col_offset],
+                           existing_arrays[LayersEnum.CONTRIBUTOR+existing_col_offset], existing_arrays[LayersEnum.ELEVATION+existing_col_offset])
+
+
+def nbs_sort_values(id_to_score, new_contrib, new_elev, accum_contrib, accum_elev):
+    # return arrays that merge_arrays will use for sorting.
+    # basically the nbs sort is 4 keys: Decay Score, resolution, depth, alphabetical.
+    # Decay and resolution get merged into one array since they are true for all points of the survey while depth varies with position.
+    # alphabetical is a final tie breaker to make sure the same contributor is picked in the cases where the first three tie.
+
+    # print('convert the contributor integer to store inside a float buffer')
+    # a = numpy.array([1, 3, 5, 1234567890], numpy.int32)
+    # f = numpy.frombuffer(a.tobytes(), numpy.float32)
+    # b = numpy.frombuffer(f.tobytes(), numpy.int32)
+    # b
+    # array([1, 3, 5, 1234567890])
+    # Test that float 32 doesn't get truncated weirdly when taken to float64 and back
+    # i32 = numpy.arange(0, 100000000).astype(numpy.int32)
+    # f32 = numpy.frombuffer(i32.tobytes(), numpy.float32)
+    # f32.shape
+    # (100000000,)
+    # f64 = f32.astype(numpy.float64)
+    # i = numpy.frombuffer(f64.astype(numpy.float32).tobytes(), numpy.int32)
+    # numpy.all(i == i32)
+    # True
+    # FIXME - HACK -- encoding integer contributor number as float to fit in the tiff which is float32.
+    #  The raster_data classes should return recarrays (structured arrays) but
+    #  that will require some rework on the slicing and concatenation elsewhere.
+    #  Due to this, the export routine should convert the float back to int and also get fixed later.
+    #  Also have to modify the sorting routine to accommodate the difference
+    #  (translate the ints to floats there too)
+
+    # find all the contributors to look up
+    unique_contributors = numpy.unique(accum_contrib[~numpy.isnan(accum_contrib)])
+    # make arrays to store the integer scores in
+    existing_decay_and_res = accum_contrib.copy()
+    existing_alphabetical = accum_contrib.copy()
+    # for each unique contributor fill with the associated decay/resolution score and the alphabetical score
+    for contrib in unique_contributors:
+        int_contrib = numpy.frombuffer(numpy.array(contrib, dtype=numpy.float32).tobytes(), dtype=numpy.int32)[0]
+        existing_decay_and_res[accum_contrib == contrib] = id_to_score[int_contrib][0]
+        existing_alphabetical[accum_contrib == contrib] = id_to_score[int_contrib][1]
+    # @FIXME is contributor an int or float -- needs to be int 32 and maybe int 64 (or two int 32s)
+    unique_pts_contributors = numpy.unique(new_contrib[~numpy.isnan(new_contrib)])
+    decay_and_res_score = new_contrib.copy()
+    alphabetical = new_contrib.copy()
+    for contrib in unique_pts_contributors:
+        int_contrib = numpy.frombuffer(numpy.array(contrib, dtype=numpy.float32).tobytes(), dtype=numpy.int32)[0]
+        decay_and_res_score[new_contrib == contrib] = id_to_score[int_contrib][0]
+        alphabetical[new_contrib == contrib] = id_to_score[int_contrib][1]
+
+    return numpy.array((decay_and_res_score, new_elev, alphabetical)), \
+           numpy.array((existing_decay_and_res, accum_elev, existing_alphabetical)), \
+           (False, False, False)
+
+
+def make_contributor_csv(filename, band_num, table_names, database, username, password, hostname='OCS-VS-NBS01', port='5434'):
+    # nbs_postgres.make_contributor_csv(pathlib.Path(root).joinpath("4_utm.tif"), 3, "pbc19_mllw_metadata", 'metadata', None, None, None, None)
+    # tile_name = r"C:\data\nbs\test_data_output\test_pbc_19_exact_multiprocesing_locks\exports\4m\4_utm.tif"
+    # fields, records = get_nbs_records("pbc19_mllw_metadata", 'metadata', None, None, None, None)
+    filename = pathlib.Path(filename)
+    all_fields = []
+    all_records = []
+    # FIXME -- this will fail if fields is not the same for all record groups, make a class that encapsulates a record
+    for table_name in table_names:
+        fields, records = get_nbs_records(table_name, database, username, password, hostname=hostname, port=port)
+        all_records.append(records)
+        all_fields.append(fields)
+    sorted_recs, names_list, sort_dict = id_to_scoring(all_fields, all_records)
+
+    ds = gdal.Open(str(filename))
+    cb = ds.GetRasterBand(band_num)
+    contributors = cb.ReadAsArray()
+    unique_contributors = numpy.unique(contributors[~numpy.isnan(contributors)])
+    records_dict = {}
+    for records in all_records:
+        records_dict.update({rec[-1]: rec for rec in records})
+    res_decay_dict = {sid: (res, decay) for sid, res, decay in sorted_recs}
+
+    manual_date_col = fields.index("manual_start_date")
+    script_date_col = fields.index("script_start_date")
+    manual_catzoc_col = fields.index("manual_catzoc")
+    script_catzoc_col = fields.index("script_catzoc")
+    filename_col = fields.index('from_filename')
+    csv = open(filename.with_name(filename.stem+"_contrib.csv"), "w")
+    for n, contrib_number in enumerate(unique_contributors):
+        rec = records_dict[int(contrib_number)]
+        man_date = rec[manual_date_col]
+        if man_date is not None:
+            survey_date = man_date
+        else:
+            survey_date = rec[script_date_col]
+        man_catzoc = rec[manual_catzoc_col]
+        if man_catzoc is not None and man_catzoc.strip():
+            survey_catzoc = man_catzoc
+        else:
+            survey_catzoc = rec[script_catzoc_col]
+        res, decay = res_decay_dict[int(contrib_number)]
+        score_pos, alpha_pos = sort_dict[int(contrib_number)]
+        s = f'{int(contrib_number)},res:{res};sort:{score_pos};alpha:{alpha_pos},{rec[filename_col]},{survey_date.strftime("%Y%m%d")},{decay},{survey_catzoc}\n'
+        csv.write(s)
+
+
+def choose_record_value(rec, indices):
+    val = None
+    for index in indices:
+        temp = rec[index]
+        if temp is None:
+            continue
+        if isinstance(temp, str):
+            if not temp.strip():
+                continue
+        val = temp
+        break
+    return val
+
+
+def get_transform_metadata(fields_lists, records_lists):
+    transform_metadata = {}
+
+    for fields, records in zip(fields_lists, records_lists):
+        if fields:
+            # Create a dictionary that converts from the unique database ID to an ordering score
+            id_col = fields.index('nbs_id')
+            manual_to_horiz_frame = fields.index('manual_to_horiz_frame')
+            script_to_horiz_frame = fields.index('script_to_horiz_frame')
+            script_to_horiz_type = fields.index('script_to_horiz_type')
+            manual_to_horiz_type = fields.index('manual_to_horiz_type')
+            script_to_horiz_key = fields.index('script_to_horiz_key')
+            manual_to_horiz_key = fields.index('manual_to_horiz_key')
+            script_vert_uncert_fixed = fields.index('script_vert_uncert_fixed')
+            manual_vert_uncert_fixed = fields.index('manual_vert_uncert_fixed')
+            script_vert_uncert_vari = fields.index('script_vert_uncert_vari')
+            manual_vert_uncert_vari = fields.index('manual_vert_uncert_vari')
+
+
+            # make lists of the dacay/res with survey if and also one for name vs survey id
+            for rec in records:
+                metadata = {
+                    'to_horiz_frame': choose_record_value(rec, (manual_to_horiz_frame, script_to_horiz_frame)),
+                    'to_horiz_type': choose_record_value(rec, (manual_to_horiz_type, script_to_horiz_type)),
+                    'to_horiz_key': choose_record_value(rec, (manual_to_horiz_key, script_to_horiz_key)),
+                    'vert_uncert_fixed': choose_record_value(rec, (manual_vert_uncert_fixed, script_vert_uncert_fixed)),
+                    'vert_uncert_vari': choose_record_value(rec, (manual_vert_uncert_vari, script_vert_uncert_vari)),
+                }
+                transform_metadata[rec[id_col]] = metadata
+    return transform_metadata
+
+def get_records(table_names, database, username, password, hostname='OCS-VS-NBS01', port='5434', cache_dir=None):
+    """ Open multiple NBS metadata tables and return combined lists/dictionaries of records and a scoring compare_callback function
+    to be used with WorldDatabase insert functions.
+
+    Parameters
+    ----------
+    table_names
+    database
+    username
+    password
+    hostname
+    port
+    cache_dir
+
+    Returns
+    -------
+    sorted_recs, names_list, sort_dict, comp
+    """
+    all_fields = []
+    all_records = []
+    for table_name in table_names:
+        try:
+            fields, records = get_nbs_records(table_name, database, username, password, hostname=hostname, port=port)
+            if cache_dir:
+                cache_fname = pathlib.Path(cache_dir).joinpath(f"last_used_{database}_{table_name}.pickle")
+                try:
+                    lock = nbs_locks.Lock(cache_fname, mode="wb", timeout=180, fail_when_locked=False, flags=nbs_locks.LockFlags.EXCLUSIVE)
+                    outfile = lock.acquire(check_interval=1 + random.randrange(0, 100) / 100.0)
+                    pickle.dump(fields, outfile)
+                    pickle.dump(records, outfile)
+                    lock.release()
+                except nbs_locks.AlreadyLocked:
+                    print("failed to cache the metadata table")
+        except psycopg2.errors.UndefinedTable:
+            print(f"table {table_name} not found")
+            records, fields = [], []
+        all_records.append(records)
+        all_fields.append(fields)
+    return all_fields, all_records
+
+
+def get_sorting_records(table_names, database, username, password, hostname='OCS-VS-NBS01', port='5434', for_navigation_flag=(True, True), cache_dir=None):
+    all_fields, all_records = get_records(table_names, database, username, password, hostname, port, cache_dir=cache_dir)
+    return get_sorting_info(all_fields, all_records, for_navigation_flag=for_navigation_flag)
+
+
+def get_sorting_info(all_fields, all_records, for_navigation_flag=(True, True)):
+    if any([bool(table_recs) for table_recs in all_records]):
+        sorted_recs, names_list, sort_dict = id_to_scoring(all_fields, all_records, for_navigation_flag=for_navigation_flag)
+        comp = partial(nbs_survey_sort, sort_dict)
+    else:
+        sorted_recs, names_list, sort_dict, comp = [], [], {}, None
+    return sorted_recs, names_list, sort_dict, comp
+
+
+
