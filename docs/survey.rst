@@ -1,1 +1,1 @@
-..  automodapi:: bruty.survey
+..  automodapi:: nbs.bruty.survey

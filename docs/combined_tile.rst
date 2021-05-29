@@ -1,1 +1,1 @@
-..  automodapi:: bruty.combined_tile
+..  automodapi:: nbs.bruty.combined_tile

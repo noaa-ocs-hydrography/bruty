@@ -1,1 +1,1 @@
-..  automodapi:: bruty.abstract
+..  automodapi:: nbs.bruty.abstract

@@ -1,1 +1,1 @@
-..  automodapi:: bruty.raster_data
+..  automodapi:: nbs.bruty.raster_data

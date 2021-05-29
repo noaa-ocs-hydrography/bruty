@@ -1,2 +1,2 @@
 
-..  automodapi:: bruty.history
+..  automodapi:: nbs.bruty.history

@@ -4,30 +4,76 @@ Later we can move to a postgres or redis more robust locking system.  portalocke
 import os
 import pathlib
 import random
+import functools
+import sys
 import time
-
-use_multiprocessing = True
-use_portalocker = False
+import win32con
+import win32file
+import pywintypes
+import winerror
+import msvcrt
+import enum
+from multiprocessing.managers import SyncManager
 
 
 class LockNotAcquired(Exception):
     pass
 
+class SqlLock:
+    """
+    """
+    def __init__(self, conn):
+        """
+        Parameters
+        ----------
+        conn
+        """
+        self.conn = conn
 
-if use_multiprocessing:
-    from multiprocessing.managers import SyncManager
+    def __enter__(self):
+        self.conn.isolation_level = 'EXCLUSIVE'
+        self.conn.execute('BEGIN EXCLUSIVE')
+        return True
 
-    EXCLUSIVE = 1
-    SHARED = 2
-    NON_BLOCKING = 4
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.conn.commit()
+        self.conn.isolation_level = 'DEFERRED'
+
+
+class UninitializedManager:
+    def __init__(self):
+        pass
+
+    def __getattr__(self, item):
+        raise RuntimeError("SyncManager not started, you must call start_server(port) before trying to use locks")
+
+
+manager = UninitializedManager()
+
+EXCLUSIVE = 1
+SHARED = 2
+NON_BLOCKING = 4
+
+
+def start_server(port=5000):
+    """
+    Parameters
+    ----------
+    port
+
+    Returns
+    -------
+
+    """
+    global manager
 
     try:
-        manager = SyncManager(address=('localhost', 5000), authkey=b'nbslocking')
+        manager = SyncManager(address=('localhost', port), authkey=b'nbslocking')
         while 1:
             try:
                 manager.connect()
                 break
-            except OSError as e:  # the connection may not be finished closing?
+            except OSError:  # the connection may not be finished closing?
                 print("oserr - retrying")
                 time.sleep(.5)
     except ConnectionRefusedError as e:
@@ -35,259 +81,503 @@ if use_multiprocessing:
         raise e
     manager.register('get_lock')
     manager.register("MultiLock")
+    manager.register('info')
+    manager.register("force_unlock")
 
-    class BaseLock:  # this is an abstract class -- need to derive and get your own lock
-        def __init__(self, flags=EXCLUSIVE|NON_BLOCKING, timeout=-1):
-            self.exclusive = not (flags & SHARED)
-            self.block = not (flags & NON_BLOCKING)
-            self.timeout = timeout
+
+def patient_lock(func):
+    """ There is a windows limit for the number of connections and how fast they open/close.
+    If this limit is exceeded then an OSError is raised.
+    This decorator will wait up to ~4 minutes to connect and otherwise raise an OSError
+    """
+    @functools.wraps(func)
+    def wrap(*args, **kywrds):
+        for delay in range(-3, 9):
+            try:
+                if delay > -3:
+                    time.sleep(2**delay)
+                lock = func(*args, **kywrds)
+                break
+            except TypeError as e:
+                print(f"TypeError in communication - normally this is a closed handle, retying in {2 ** (delay + 1)} seconds")
+            except OSError as e:  # the connection may not be finished closing?
+                print(f"OSError - delaying to let socket server catch up then retrying in {2 ** (delay + 1)} seconds")
+        try:
+            return lock
+        except NameError:
+            raise OSError("couldn't connect to lock server")
+    return wrap
+
+if True:
+    @patient_lock
+    def get_lock(*args, **kywrds):
+        lock = manager.get_lock(*args, **kywrds)
+        lock.acquire = patient_lock(lock.acquire)
+        lock.release = patient_lock(lock.release)
+        return lock
+
+
+    @patient_lock
+    def get_multilock(*args, **kywrds):
+        lock = manager.MultiLock(*args, **kywrds)
+        lock.acquire = patient_lock(lock.acquire)
+        lock.release = patient_lock(lock.release)
+        return lock
+else:
+    def get_lock(*args, **kywrds):
+        lock = manager.get_lock(*args, **kywrds)
+        return lock
+
+
+    def get_multilock(*args, **kywrds):
+        lock = manager.MultiLock(*args, **kywrds)
+        return lock
+
+
+def current_address():
+    return manager.address
+
+def get_info():
+    return manager.info()
+
+def force_unlock(key):
+    return manager.force_unlock(key)
+
+class BaseLock:  # this is an abstract class -- need to derive and get your own lock
+    def __init__(self, flags=EXCLUSIVE|NON_BLOCKING, timeout=-1):
+        """
+        Parameters
+        ----------
+        flags
+        timeout
+        """
+        self.exclusive = not (flags & SHARED)
+        self.block = not (flags & NON_BLOCKING)
+        self.timeout = timeout
+        self.acquired = False
+
+    def acquire(self):
+        """
+        Returns
+        -------
+
+        """
+        # randomize the check interval to keep two processes from checking at the same time.
+        if not self.acquired:
+            ret = self.lock.acquire(self.exclusive, self.block, self.timeout)
+            self.acquired = ret
+        if not self.acquired:
+            raise LockNotAcquired(f"Failed to acuire")
+        return self.acquired
+
+    def release(self):
+        if self.acquired:
+            self.lock.release()
             self.acquired = False
 
+    def __del__(self):
+        self.release()
 
-        def acquire(self):
-            # randomize the check interval to keep two processes from checking at the same time.
-            if not self.acquired:
-                while 1:
-                    try:
-                        ret = self.lock.acquire(self.exclusive, self.block, self.timeout)
-                        break
-                    except OSError as e:  # the connection may not be finished closing?
-                        print("oserr - retrying")
-                        time.sleep(.5)
-                self.acquired = ret
-            if not self.acquired:
-                raise LockNotAcquired(f"Failed to acuire")
-            return self.acquired
+    def notify(self):
+        pass
 
-        def release(self):
-            if self.acquired:
-                while 1:
-                    try:
-                        self.lock.release()
-                        break
-                    except OSError as e:  # the connection may not be finished closing?
-                        print("oserr - retrying")
-                        time.sleep(.5)
-                self.acquired = False
+    def __enter__(self):
+        self.acquire()
+        return self
 
-        def __del__(self):
-            self.release()
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
 
-        def notify(self):
-            pass
 
-        def __enter__(self):
-            self.acquire()
-            return self
+class FileLock(BaseLock):
+    def __init__(self, fname, mode='r+', flags=EXCLUSIVE|NON_BLOCKING, timeout=-1):
+        """
+        Parameters
+        ----------
+        fname
+        mode
+        flags
+        timeout
+        """
+        super().__init__(flags=flags, timeout=timeout)
+        self.mode = mode
+        self.fname = fname
+        self.lock = get_lock(self.fname)
+        self._fh = None
 
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            self.release()
+    def openfile(self):
+        return open(self.fname, self.mode)
 
-    class Lock(BaseLock):
-        def __init__(self, fname, mode='r+', flags=EXCLUSIVE|NON_BLOCKING, timeout=-1):
-            super().__init__(flags=flags, timeout=timeout)
-            self.mode = mode
-            self.fname = fname
-            while 1:
-                try:
-                    self.lock = manager.get_lock(self.fname)
-                    break
-                except OSError as e:  # the connection may not be finished closing?
-                    print("oserr - retrying")
-                    time.sleep(.5)
+    @property
+    def fh(self):
+        # make this to mimic the portalocker implementation
+        if self._fh is None:
+            self._fh = self.openfile()
+        return self._fh
 
-        def openfile(self):
-            return open(self.fname, self.mode)
-
-        @property
-        def fh(self):
-            # make this to mimic the portalocker implementation
-            return self.openfile()
-
-        def __enter__(self):
-            if self.acquire():
+    def __enter__(self):
+        if self.acquire():
+            try:
                 handle = self.openfile()
-            else:
-                raise LockNotAcquired(f"Failed to acquire lock on {self.fname}")
-            return handle
-
-
-
-    class TileLock(Lock):
-        def __init__(self, tx, ty, idn, flags, conv_txy_to_path):
-            fname = conv_txy_to_path(tx, ty)
-            no_block_flags = flags | NON_BLOCKING
-            super().__init__(fname, 'r', no_block_flags)
-
-        def release(self):
-            try:
-                self.lock  # make sure the lock was made.  An exception in TileLock.__init__ makes .lock not exist.
-            except AttributeError:
-                pass
-            else:
-                super().release()
-
-
-    # class ReadTileLock(Lock):  # actively being read, if fails then add to the waiting to read lock
-    #     pass
-    # class WriteTileLock(Lock):  # actively being modified, if fails then add to the waiting to write lock
-    #     pass
-    # class PendingReadLock(WriteLock):  # something wants to read but there are active/pending writes
-    #     pass
-    # class PendingWriteLock(WriteLock):  # something wants to modify but there are active reads
-    #     pass
-
-
-    class AreaLock1:
-        def __init__(self, tile_list, flags, conv_txy_to_path, sid=None):
-            self.locks = []
-            self.tile_list = tile_list
-            self.sid = sid
-            self.flags = flags
-            self.conv_txy_to_path = conv_txy_to_path
-
-        def acquire(self):
-            try:
-                print(f"Trying to lock {len(self.tile_list)} tiles")
-                for tx, ty in self.tile_list:
-                    self.locks.append(TileLock(tx, ty, self.sid, self.flags, self.conv_txy_to_path))
-                    self.locks[-1].acquire()
-            except (LockNotAcquired,):
+            except (FileNotFoundError, PermissionError) as e:
                 self.release()
-                raise LockNotAcquired(f"Failed to acquire lock on {self.conv_txy_to_path}")
-            return True
-
-        def release(self):
-            # locks release automatically, but we'll force it rather than wait for garbage collection
-            for lock in self.locks:
-                lock.release()
-            self.locks = []
-
-        def __enter__(self):
-            self.acquire()
-            return self
-
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            self.release()
-
-        def __del__(self):
-            self.release()
-
-    # try this multilock idea to reduce the number of socket connections that result from calling many single lock instances
-    class AreaLock(BaseLock):
-        def __init__(self, tile_list, flags, conv_txy_to_path, sid=None, timeout=-1):
-            super().__init__(flags=flags, timeout=timeout)
-            self.tile_list = tile_list
-            keys = [conv_txy_to_path(tx, ty) for tx, ty in self.tile_list]
-            self.lock = manager.MultiLock(keys)
-            # print(self.lock.get_keys())
-            self.sid = sid
+                raise e
+        else:
+            raise LockNotAcquired(f"Failed to acquire lock on {self.fname}")
+        return handle
 
 
-elif use_portalocker:
-    import portalocker
 
-    EXCLUSIVE = portalocker.constants.LockFlags.EXCLUSIVE
-    SHARED = portalocker.constants.LockFlags.SHARED
-    NON_BLOCKING = portalocker.constants.LockFlags.NON_BLOCKING
+class TileLock(FileLock):
+    def __init__(self, tx, ty, idn, flags, conv_txy_to_path):
+        """
+        Parameters
+        ----------
+        tx
+        ty
+        idn
+        flags
+        conv_txy_to_path
+        """
+        fname = conv_txy_to_path(tx, ty)
+        no_block_flags = flags | NON_BLOCKING
+        super().__init__(fname, 'r', no_block_flags)
 
-
-    class Lock:
-        def __init__(self, fname, mode, flags, fail_when_locked=False):
-            self.lock = portalocker.Lock(fname, mode=mode, timeout=120, fail_when_locked=fail_when_locked, flags=flags)
-
-        def acquire(self):
-            # randomize the check interval to keep two processes from checking at the same time.
-            return self.lock.acquire(check_interval=1+random.randrange(0,10)/10.0)
-
-        def release(self):
-            self.lock.release()
-
-        def is_active(self):
-            return self.lock.fh is not None
-
-        def __del__(self):
-            self.release()
-
-        @property
-        def fh(self):
-            return self.lock.fh
-
-        def notify(self):
+    def release(self):
+        try:
+            self.lock  # make sure the lock was made.  An exception in TileLock.__init__ makes .lock not exist.
+        except AttributeError:
             pass
-
-        def __enter__(self):
-            return self.acquire()
-
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            self.release()
+        else:
+            super().release()
 
 
-    class TileLock(Lock):
-        def __init__(self, tx, ty, idn, flags, conv_txy_to_path):
-            parent = conv_txy_to_path(tx, ty)
-            fname = pathlib.Path(parent).joinpath('lock.in_use')
-            if not os.path.exists(fname):
-                os.makedirs(parent, exist_ok=True)
-                f = open(fname, 'w')
-                f.close()
-            super().__init__(fname, 'r', flags, fail_when_locked=True)
+# try this multilock idea to reduce the number of socket connections that result from calling many single lock instances
+class AreaLock(BaseLock):
+    def __init__(self, tile_list, flags, conv_txy_to_path, sid=None, timeout=-1):
+        """
+        Parameters
+        ----------
+        tile_list
+        flags
+        conv_txy_to_path
+        sid
+        timeout
+        """
+        super().__init__(flags=flags, timeout=timeout)
+        self.tile_list = tile_list
+        keys = [conv_txy_to_path(tx, ty) for tx, ty in self.tile_list]
+        self.lock = get_multilock(keys)
+        # print(self.lock.get_keys())
+        self.sid = sid
 
-        def release(self):
-            try:
-                self.lock.lock  # make sure the lock was made.  An exception in TileLock.__init__ makes .lock not exist.
-            except AttributeError:
-                pass
+
+# Locks based on a string, does not need to be an actual file path
+class NameLock(BaseLock):
+    def __init__(self, name, mode='r+', flags=EXCLUSIVE|NON_BLOCKING, timeout=-1):
+        """
+        Parameters
+        ----------
+        name
+        mode
+        flags
+        timeout
+        """
+        super().__init__(flags=flags, timeout=timeout)
+        self.mode = mode
+        self.name = name
+        self.lock = get_lock(self.name)
+
+
+# The code below is the equivalent of portalocker but for windows only and uses msvcrt (which might not exist in Python 3.6-3.8?)
+# basically fills the need for a os level file lock, not like the lock server being used above.
+
+LOCK_EX = 0x1  #: exclusive lock
+LOCK_SH = 0x2  #: shared lock
+LOCK_NB = 0x4  #: non-blocking
+LOCK_UN = msvcrt.LK_UNLCK  #: unlock
+
+
+class LockFlags(enum.IntFlag):
+    EXCLUSIVE = LOCK_EX  #: exclusive lock
+    SHARED = LOCK_SH  #: shared lock
+    NON_BLOCKING = LOCK_NB  #: non-blocking
+    UNBLOCK = LOCK_UN  #: unlock
+
+
+__overlapped = pywintypes.OVERLAPPED()
+lock_length = int(2**31 - 1)
+current_time = getattr(time, "monotonic", time.time)
+DEFAULT_TIMEOUT = 5
+DEFAULT_CHECK_INTERVAL = 0.25
+LOCK_METHOD = LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING
+
+
+class BaseLockException(Exception):
+    # Error codes:
+    LOCK_FAILED = 1
+
+    def __init__(self, *args, fh=None, **kwargs):
+        self.fh = fh
+        Exception.__init__(self, *args, **kwargs)
+
+
+class LockException(BaseLockException):
+    pass
+
+
+class AlreadyLocked(BaseLockException):
+    pass
+
+
+class FileToLarge(BaseLockException):
+    pass
+
+
+def file_lock(file_, flags: LockFlags):
+    if flags & LockFlags.SHARED:
+        if flags & LockFlags.NON_BLOCKING:
+            mode = win32con.LOCKFILE_FAIL_IMMEDIATELY
+        else:
+            mode = 0
+        # is there any reason not to reuse the following structure?
+        hfile = win32file._get_osfhandle(file_.fileno())
+        try:
+            win32file.LockFileEx(hfile, mode, 0, -0x10000, __overlapped)
+        except pywintypes.error as exc_value:
+            # error: (33, 'LockFileEx', 'The process cannot access the file
+            # because another process has locked a portion of the file.')
+            if exc_value.winerror == winerror.ERROR_LOCK_VIOLATION:
+                raise LockException(
+                    LockException.LOCK_FAILED,
+                    exc_value.strerror,
+                    fh=file_)
             else:
-                super().release()
+                # Q:  Are there exceptions/codes we should be dealing with
+                # here?
+                raise
+    else:
+        if flags & LockFlags.NON_BLOCKING:
+            mode = msvcrt.LK_NBLCK
+        else:
+            mode = msvcrt.LK_LOCK
 
+        # windows locks byte ranges, so make sure to lock from file start
+        try:
+            savepos = file_.tell()
+            if savepos:
+                # [ ] test exclusive lock fails on seek here
+                # [ ] test if shared lock passes this point
+                file_.seek(0)
+                # [x] check if 0 param locks entire file (not documented in
+                #     Python)
+                # [x] fails with "IOError: [Errno 13] Permission denied",
+                #     but -1 seems to do the trick
 
-    # class ReadTileLock(Lock):  # actively being read, if fails then add to the waiting to read lock
-    #     pass
-    # class WriteTileLock(Lock):  # actively being modified, if fails then add to the waiting to write lock
-    #     pass
-    # class PendingReadLock(WriteLock):  # something wants to read but there are active/pending writes
-    #     pass
-    # class PendingWriteLock(WriteLock):  # something wants to modify but there are active reads
-    #     pass
-
-
-    class AreaLock:
-        def __init__(self, tile_list, flags, conv_txy_to_path, sid=None):
-            self.locks = []
-            self.tile_list = tile_list
-            self.sid = sid
-            self.flags = flags
-            self.conv_txy_to_path = conv_txy_to_path
-
-        def acquire(self):
             try:
-                print(f"Trying to lock {len(self.tile_list)} tiles")
-                for tx, ty in self.tile_list:
-                    self.locks.append(TileLock(tx, ty, self.sid, self.flags, self.conv_txy_to_path))
-                    self.locks[-1].acquire()
-            except (portalocker.exceptions.LockException, portalocker.exceptions.AlreadyLocked):
-                self.release()
-                raise LockNotAcquired(f"Failed to acquire lock on {self.conv_txy_to_path}")
-            except OSError:
-                self.release()
-                raise LockNotAcquired(f"Trying to lock too many files, need to migrate to postgres")
-            return True
+                msvcrt.locking(file_.fileno(), mode, lock_length)
+            except IOError as exc_value:
+                # [ ] be more specific here
+                raise LockException(
+                    LockException.LOCK_FAILED,
+                    exc_value.strerror,
+                    fh=file_)
+            finally:
+                if savepos:
+                    file_.seek(savepos)
+        except IOError as exc_value:
+            raise LockException(
+                LockException.LOCK_FAILED, exc_value.strerror,
+                fh=file_)
 
-        def release(self):
-            # locks release automatically, but we'll force it rather than wait for garbage collection
-            for lock in self.locks:
-                lock.release()
-            self.locks = []
+def file_unlock(file_):
+    try:
+        savepos = file_.tell()
+        if savepos:
+            file_.seek(0)
 
-        def __enter__(self):
-            self.acquire()
-            return self
+        try:
+            msvcrt.locking(file_.fileno(), LockFlags.UNBLOCK,
+                           lock_length)
+        except IOError as exc:
+            exception = exc
+            if exc.strerror == 'Permission denied':
+                hfile = win32file._get_osfhandle(file_.fileno())
+                try:
+                    win32file.UnlockFileEx(
+                        hfile, 0, -0x10000, __overlapped)
+                except pywintypes.error as exc:
+                    exception = exc
+                    if exc.winerror == winerror.ERROR_NOT_LOCKED:
+                        # error: (158, 'UnlockFileEx',
+                        #         'The segment is already unlocked.')
+                        # To match the 'posix' implementation, silently
+                        # ignore this error
+                        pass
+                    else:
+                        # Q:  Are there exceptions/codes we should be
+                        # dealing with here?
+                        raise
+            else:
+                raise LockException(
+                    LockException.LOCK_FAILED,
+                    exception.strerror,
+                    fh=file_)
+        finally:
+            if savepos:
+                file_.seek(savepos)
+    except IOError as exc:
+        raise LockException(
+            LockException.LOCK_FAILED, exc.strerror,
+            fh=file_)
 
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            self.release()
 
-        def __del__(self):
-            self.release()
 
+class Lock:
+    def __init__(
+            self,
+            filename,
+            mode: str = 'a',
+            timeout: float = DEFAULT_TIMEOUT,
+            check_interval: float = DEFAULT_CHECK_INTERVAL,
+            fail_when_locked: bool = False,
+            flags: LockFlags = LOCK_METHOD, **file_open_kwargs):
+        """Lock manager with build-in timeout
+        filename -- filename
+        mode -- the open mode - use "r", "a", "w" where "w" will truncate an existing file
+        timeout -- timeout when trying to acquire a lock
+        check_interval -- check interval while waiting
+        fail_when_locked -- after the initial lock failed, return an error
+            or lock the file
+        **file_open_kwargs -- The kwargs for the `open(...)` call
+        fail_when_locked is useful when multiple threads/processes can race
+        when creating a file. If set to true then the system will wait till
+        the lock was acquired and then return an AlreadyLocked exception.
+        """
+
+        if 'w' in mode:
+            truncate = True
+            mode = mode.replace('w', 'a')
+        else:
+            truncate = False
+
+        self.fh = None
+        self.filename: str = str(filename)
+        self.mode: str = mode
+        self.truncate: bool = truncate
+        self.timeout: float = timeout
+        self.check_interval: float = check_interval
+        self.fail_when_locked: bool = fail_when_locked
+        self.flags: LockFlags = flags
+        self.file_open_kwargs = file_open_kwargs
+
+    def acquire(
+            self, timeout: float = None, check_interval: float = None,
+            fail_when_locked: bool = None):
+        """Acquire the locked filehandle.
+        Will raise AlreadyLocked if a previous incompatible file lock is found.
+        Will raise OSError if too many files are opened at once (this is a system limit)."""
+        if timeout is None:
+            timeout = self.timeout
+        if timeout is None:
+            timeout = 0
+
+        if check_interval is None:
+            check_interval = self.check_interval
+
+        if fail_when_locked is None:
+            fail_when_locked = self.fail_when_locked
+
+        # If we already have a filehandle, return it
+        fh = self.fh
+        if fh:
+            return fh
+
+        # Get a new filehandler
+        fh = self._get_fh()
+
+        def try_close():  # pragma: no cover
+            # Silently try to close the handle if possible, ignore all issues
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+        # Try till the timeout has passed
+        timeout_end = current_time() + timeout
+        exception = None
+        while timeout_end > current_time():
+            try:
+                # Try to lock
+                fh = self._get_lock(fh)
+                break
+            except LockException as exc:
+                # Python will automatically remove the variable from memory
+                # unless you save it in a different location
+                exception = exc
+
+                # We already tried to the get the lock
+                # If fail_when_locked is True, stop trying
+                if fail_when_locked:
+                    try_close()
+                    raise AlreadyLocked(exception)
+
+                # Wait a bit
+                time.sleep(check_interval)
+
+        else:
+            try_close()
+            # We got a timeout... reraising
+            raise LockException(exception)
+
+        # Prepare the filehandle (truncate if needed)
+        fh = self._prepare_fh(fh)
+
+        self.fh = fh
+        return fh
+
+    def release(self):
+        """Releases the currently locked file handle"""
+        if self.fh:
+            file_unlock(self.fh)
+            self.fh.close()
+            self.fh = None
+
+    def _get_fh(self):
+        """Get a new filehandle"""
+        return open(self.filename, self.mode, **self.file_open_kwargs)
+
+    def _get_lock(self, fh):
+        """
+        Try to lock the given filehandle
+        returns LockException if it fails"""
+        file_lock(fh, self.flags)
+        return fh
+
+    def _prepare_fh(self, fh):
+        """
+        Prepare the filehandle for usage
+        If truncate is a number, the file will be truncated to that amount of
+        bytes
+        """
+        if self.truncate:
+            fh.seek(0)
+            fh.truncate(0)
+
+        return fh
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, type_, value, tb):
+        # this is called when a Lock is used in a 'with' statement
+        self.release()
+
+    def __delete__(self, instance):
+        # this is called when some other class has a Lock as a class attribute and explicitly deletes it
+        self.release()
+
+    def __del__(self):
+        # this is called when Lock is assigned to a variable and is deleted
+        self.release()
 

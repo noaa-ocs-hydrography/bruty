@@ -3,43 +3,505 @@ import os
 import pathlib
 import shutil
 import tempfile
+import pickle
+import logging
+import sqlite3
 import time
+import multiprocessing
+import importlib
+from functools import partial
+# import logging
 import gc
 from datetime import datetime
+from collections.abc import MutableMapping
 
 import numpy
 
-import rasterio.crs
-from osgeo import gdal, osr, ogr
+try:
+    import fiona
+except ModuleNotFoundError:
+    fiona = None
+
+from osgeo import gdal, ogr  # , osr
 
 from HSTB.drivers import bag
-from nbs.bruty.utils import merge_arrays, merge_array, get_crs_transformer, onerr, tqdm, make_gdal_dataset_size, make_gdal_dataset_area, \
-            calc_area_array_params, compute_delta_coord, iterate_gdal_image, add_uncertainty_layer, transform_rect
-from nbs.bruty.raster_data import TiffStorage, LayersEnum, RasterData, affine, inv_affine, affine_center, arrays_dont_match
-from nbs.bruty.history import DiskHistory, RasterHistory, AccumulationHistory
-from nbs.bruty.abstract import VABC, abstractmethod
+from nbs_utils.points_utils import mmap_from_npz, iterate_points_file
+from nbs.bruty.utils import merge_arrays, get_crs_transformer, onerr, tqdm, make_gdal_dataset_area, get_epsg_or_wkt, \
+    calc_area_array_params, iterate_gdal_image, transform_rect  # , add_uncertainty_layer, compute_delta_coord, merge_array, make_gdal_dataset_size
+from nbs.bruty.raster_data import TiffStorage, LayersEnum, affine, inv_affine, affine_center, RasterData  # , arrays_dont_match
+# noinspection PyUnresolvedReferences
+from nbs.bruty.history import DiskHistory, AccumulationHistory, RasterHistory
+from nbs.bruty.abstract import VABC  # , abstractmethod
 from nbs.bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator, GoogleTilesLatLon, UTMTiles, LatLonTiles, TilingScheme, \
-            ExactUTMTiles, ExactTilingScheme
+    ExactUTMTiles, ExactTilingScheme
 from nbs.bruty import morton
-from nbs.bruty.nbs_locks import LockNotAcquired, AreaLock, Lock, EXCLUSIVE, SHARED, NON_BLOCKING
-
+from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
+from nbs.configs import get_logger, set_file_logging, make_family_of_logs  # , iter_configs, log_config, parse_multiple_values
 
 geo_debug = False
 _debug = False
-
-no_lock = False
-
-if no_lock:  # too many file locks for windows is preventing some surveys from processing.  Use this when I know only one process is running.
-    class AreaLock(AreaLock):
-        def __init__(self, *args, **kywds):
-            pass
-        def acquire(self):
-            return True
-        def release(self):
-            pass
-
-
 NO_OVERRIDE = -1
+
+NO_LOCK = True
+VERSION = (1, 0, 0)
+__version__ = '.'.join(map(str, VERSION))
+
+# Use this when I know only one process is running.
+from nbs.bruty.nbs_no_locks import LockNotAcquired, BaseLockException, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, current_address, Lock
+"""
+#----------------------------------------------------
+from sqlalchemy.ext.automap import automap_base
+from sqlalchemy.orm import Session
+from sqlalchemy import Table, Column, Integer, String, MetaData, ForeignKey, Binary
+import sqlalchemy
+
+engine = sqlalchemy.create_engine(r'sqlite+pysqlite:///C:\Data\nbs\wdb_metadata.sqlite')
+Base = automap_base()
+Base.prepare(engine, reflect=True)
+session = Session(engine)
+included = Base.classes.reinserts
+res = session.query(included).first()
+
+metadata_three = MetaData();
+my_reflected_table = Table("reinserts", metadata_three, Column("tiles", sqlalchemy.PickleType), autoload_with=engine)
+with engine.begin() as conn:
+    res= conn.execute(my_reflected_table.select())
+    for row in res:
+        print(row.nbs_id, row.tiles)
+#----------------------------------------------------
+from sqlalchemy import create_engine
+engine = create_engine('sqlite:///:memory:', echo=True)
+from sqlalchemy import Table, Column, Integer, String, MetaData, ForeignKey, Binary
+metadata_obj = MetaData()
+users = Table('users', metadata_obj,
+    Column('id', Integer, primary_key=True),
+    Column('name', String),
+    Column('fullname', String),
+    Column('test', Binary),
+)
+metadata_obj.create_all(engine)
+#----------------------------------------------------
+from sqlalchemy.ext.automap import automap_base
+from sqlalchemy.orm import Session
+import sqlalchemy
+
+engine = sqlalchemy.create_engine(f'postgresql+psycopg2://{user}:{password}!@{hostname}:{port}/metadata')
+Base = automap_base()
+Base.prepare(engine, reflect=True)
+
+pbc19 = Base.classes.pbc_utm19n_mllw
+session = Session(engine)
+
+res = session.query(pbc19).first()
+res.decay_score
+res.script_to_filename
+res.from_filename
+"""
+
+
+def use_locks(port):
+    global LockNotAcquired, BaseLockException, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, NO_LOCK, current_address, Lock
+    if port is None or port == "":
+        from nbs.bruty.nbs_no_locks import LockNotAcquired, BaseLockException, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, \
+            SqlLock, NameLock, current_address, Lock
+        NO_LOCK = True
+    else:
+        from nbs.bruty.nbs_locks import LockNotAcquired, BaseLockException, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, \
+            SqlLock, NameLock, start_server, current_address, Lock
+        start_server(int(port))
+        NO_LOCK = False
+
+
+class SQLDataField:
+    def __init__(self, name, sql_type, conv_to_python=None, conv_to_sql=None):
+        self.name = name
+        self.sql_type = sql_type
+        self.conv_to_python = conv_to_python
+        self.conv_to_sql = conv_to_sql
+
+    def to_python(self, val):
+        return val if self.conv_to_python is None else self.conv_to_python(val)
+
+    def to_sql(self, val):
+        return val if self.conv_to_sql is None else self.conv_to_sql(val)
+
+    def sql_create_str(self):
+        return self.name + " " + self.sql_type
+
+
+class SQLDataRecord:
+    pass
+
+
+def make_data_class(fields):
+    class SQLDataRecordType(SQLDataRecord):
+        """ This class allows accessing a list of data from an sql call by attribute notation.
+        So instead of rec[1] you would use rec.tiles or rec._data['tiles']
+        """
+        _fields = fields
+        _name_to_index = {fld.name: ind for ind, fld in enumerate(fields)}
+        _index_to_name = {ind: fld.name for ind, fld in enumerate(fields)}
+
+        def __init__(self, data=None):
+            if data:
+                self._data = data
+            else:
+                self._data = [None] * len(self._fields)
+
+        def __getattr__(self, key):
+            if key in self.__dict__:
+                return self.__dict__[key]
+            else:
+                try:
+                    index = self._name_to_index[key]
+                    val = self._data[index]
+                except KeyError as e:
+                    raise AttributeError(str(e))
+                except IndexError as e:
+                    raise AttributeError(str(e))
+                return val
+
+        def __setattr__(self, key, value):
+            # translate self.whatever to self['whatever'], if it's not already an attribute (like self.data needs to be)
+            if key[0] != "_" and key in self._name_to_index:
+                self._data[self._name_to_index[key]] = value
+            else:
+                return super().__setattr__(key, value)
+
+        def to_python(self):
+            data = [sql_data_field.to_python(v) for v, sql_data_field in zip(self._data, self._fields)]
+            return self.__class__(data)
+
+        def to_sql(self):
+            return [sql_data_field.to_sql(v) for v, sql_data_field in zip(self._data, self._fields)]
+    return SQLDataRecordType
+
+
+class SqliteSurveyMetadata(MutableMapping):
+    """ Class to store survey metadata into an sqlite3 database.  This is to replace the pickle file that replaced the json.
+    The file will have two tables to store the dictionaries from included_ids, started_ids, included_surveys, started_surveys
+    """
+    fields = tuple()  # override this with data structures, probably using the SQLDataField class
+
+    def __init__(self, path_to_sqlite_db, tablename, primary_key, timeout=120):
+        self.tablename = tablename
+        if primary_key.lower() in ("rowid", "oid", "_rowid_"):
+            self._uses_oid = True
+            self._primary_index = 0
+        else:
+            self._uses_oid = False
+            for idx, fld in enumerate(self.fields):
+                if fld.name == primary_key:
+                    self._primary_index = idx
+                    break
+        try:
+            self._primary_index
+        except AttributeError:
+            raise NameError(f"{primary_key} not found in field names")
+        self.field_str = ", ".join([f"{fld.name}" for fld in self.fields])
+        self.question_mark_str = ",".join(["?" for fld in self.fields])
+        self.primary_key = primary_key
+        self.path_to_sqlite_db = path_to_sqlite_db
+        # Connection to a SQLite database
+        self.conn = sqlite3.connect(path_to_sqlite_db, timeout=timeout)
+        # Cursor object
+        self.cur = self.conn.cursor()
+        # sqliteDropTable = "DROP TABLE IF EXISTS parts"
+        if not self.cur.execute(f'''SELECT count(name) FROM sqlite_master WHERE type='table' AND name='{self.tablename}' ''').fetchone()[0]:
+            self.create_table()
+        self.data_class = make_data_class(self.fields)
+
+    def create_table(self):
+        # Create a SQLite table with primary key
+        # sqlite_create_table = "CREATE TABLE included(nbs_id integer PRIMARY KEY, survey_path text, tiles bytes, epsg integer, reverse_z integer, "\
+        # "survey_score float, flag integer, dformat bytes, mtime real)"
+        sqlite_create_table = ", ".join([f"{fld.name} {fld.sql_type}" for fld in self.fields])
+        # Execute the create table statement
+        self.cur.execute(f"CREATE TABLE {self.tablename} ({sqlite_create_table})")
+
+    def to_python(self, rec):
+        if not isinstance(rec, SQLDataRecord):
+            rec = self.data_class(rec)
+        converted = rec.to_python()
+        # data = [sql_data_field.to_python(v) for v, sql_data_field in zip(rec, self.fields)]
+        return converted
+        # return (rec[0], rec[1], pickle.loads(rec[2]), rec[3], bool(rec[4]), rec[5], rec[])
+
+    def to_sql(self, rec):
+        if not isinstance(rec, SQLDataRecord):
+            rec = self.data_class(rec)
+        return rec.to_sql()
+        # return [sql_data_field.to_sql(v) for v, sql_data_field in zip(rec, self.fields)]
+
+    def get_records(self, field, val):
+        if self._uses_oid:
+            raw_records = self.cur.execute(f"select oid, * from {self.tablename} where {field} = (?)", [val]).fetchall()
+            proc_records = []
+            for record in raw_records:
+                val = self.to_python(record[1:])
+                val.oid = record[0]
+                proc_records.append(val)
+        else:
+            raw_records = self.cur.execute(f"select * from {self.tablename} where {field} = (?)", [val]).fetchall()
+            proc_records = [self.to_python(record) for record in raw_records]
+        return proc_records
+
+    def __getitem__(self, key):
+        recs = self.cur.execute(f"select * from {self.tablename} where {self.primary_key} = (?)", [key]).fetchall()
+        if len(recs) > 1:
+            raise IndexError(f"More than one value found for {key} in sqlite metadata")
+        elif len(recs) == 0:
+            raise KeyError(f"No key {key}")
+        else:
+            rec = self.to_python(recs[0])
+            # @TODO return the whole thing?  why remvoe the primary key unless it's a hidden (implicit) oid
+            # if not self._uses_oid:
+            #     retval = (*rec[:self._primary_index], *rec[self._primary_index + 1:])  # remove the key from the record
+            # else:
+            #     retval = tuple(rec)
+            # return retval
+            return rec
+
+    def __setitem__(self, key, val):
+        # self.conn.isolation_level = 'EXCLUSIVE'
+        # self.conn.execute('BEGIN EXCLUSIVE')
+        with SqlLock(self.conn):
+            record = self.to_sql(val)  # converts to list from SQLDataRecord class
+            if not self._uses_oid:
+                # replace the key in the data with the passed in key
+                record[self._primary_index] = key
+                # @todo - see if there is a significant performance penalty to doing update and insert if that fails,
+                #   if not then switch to always doing that
+                # insert first and update if it fails
+                try:
+                    # cur.execute("insert into included values (?, ?, ?, ?, ?, ?, ?, ?, ?)", rec)
+                    self.cur.execute(f"insert into {self.tablename} values ({self.question_mark_str})", record)
+                except sqlite3.IntegrityError:
+                    # update
+                    record.append(key)
+                    # cur.execute("""update included set (survey_path, tiles, epsg, reverse_z, survey_score, flag, dformat, mtime)=(?,?,?,?,?,?,?,?) where nbs_id=(?)""",
+                    self.cur.execute(
+                        f"""update {self.tablename} set ({self.field_str})=({self.question_mark_str}) where {self.primary_key}=(?)""",
+                        record)
+            else:
+                # update first and insert if the update fails.  Insert would always succeed and make new IDs
+                uprecord = record + [key]
+                # cur.execute("""update included set (survey_path, tiles, epsg, reverse_z, survey_score, flag, dformat, mtime)=(?,?,?,?,?,?,?,?) where nbs_id=(?)""",
+                worked = self.cur.execute(
+                    f"""update {self.tablename} set ({self.field_str})=({self.question_mark_str}) where {self.primary_key}=(?)""",
+                    uprecord).rowcount
+                if worked < 1:
+                    # cur.execute("insert into included values (?, ?, ?, ?, ?, ?, ?, ?, ?)", rec)
+                    self.cur.execute(f"insert into {self.tablename} values ({self.question_mark_str})", record)
+            # self.conn.commit()
+            # self.conn.isolation_level = 'DEFERRED'
+
+    def add_oid_record(self, val):
+        self.__setitem__(None, val)
+        return self.cur.lastrowid
+
+    def __delitem__(self, key):
+        # self.conn.isolation_level = 'EXCLUSIVE'
+        # self.conn.execute('BEGIN EXCLUSIVE')
+        with SqlLock(self.conn):
+            self.cur.execute(f"""delete from {self.tablename} where {self.primary_key}=(?)""", [key])
+        # self.conn.commit()
+        # self.conn.isolation_level = 'DEFERRED'
+
+    def __iter__(self):
+        for key in self.cur.execute(f"""select {self.primary_key} from {self.tablename}""").fetchall():
+            yield key[0]
+
+    def __len__(self):
+        return self.cur.execute(f"""SELECT COUNT(*) from {self.tablename}""").fetchone()[0]
+
+
+class IncludedMetadata(SqliteSurveyMetadata):
+    """ Class to store survey metadata into an sqlite3 database.  This is to replace the pickle file that replaced the json.
+    The file will have two tables to store the dictionaries from included_ids, started_ids, included_surveys, started_surveys
+    """
+    fields = (SQLDataField('nbs_id', 'integer PRIMARY KEY'),
+              SQLDataField('survey_path', 'text', conv_to_sql=str),  # pathlib.Path needs conversion to str
+              SQLDataField('tiles', 'BLOB', pickle.loads, pickle.dumps),  # sqlalchemy doesn't accept 'bytes' so use SQL type of BLOB
+              SQLDataField('sorting_metadata', 'BLOB', pickle.loads, pickle.dumps),  # sqlalchemy doesn't accept 'bytes' so use SQL type of BLOB
+              SQLDataField('epsg', 'integer'),
+              SQLDataField('reverse_z', 'integer', bool, int),
+              SQLDataField('survey_score', 'real'),
+              SQLDataField('flag', 'integer'),
+              SQLDataField('dformat', 'BLOB', pickle.loads, pickle.dumps),  # sqlalchemy doesn't accept 'bytes' so use SQL type of BLOB
+              SQLDataField('mtime', 'real'),
+              SQLDataField('transaction_id', 'integer'),
+              )
+
+    def __init__(self, path_to_sqlite_db, tablename, *args, **kwargs):
+        super().__init__(path_to_sqlite_db, tablename, *args, **kwargs)
+        if not self.cur.execute(f"SELECT COUNT(*) AS CNTREC FROM pragma_table_info('{tablename}') WHERE name='transaction_id'").fetchone()[0]:
+            self.cur.execute(f'ALTER TABLE {tablename} ADD column transaction_id integer;')
+
+    def create_table(self):
+        super().create_table()
+        # Create a secondary key on the name column
+        create_secondary_index = f"CREATE INDEX index_{self.tablename}_survey_path ON {self.tablename}(survey_path)"
+        self.cur.execute(create_secondary_index)
+
+
+class IncludedIds(IncludedMetadata):
+    def __init__(self, path_to_sqlite_db):
+        super().__init__(path_to_sqlite_db, "included", "nbs_id")
+
+
+class IncludedSurveys(IncludedMetadata):
+    def __init__(self, path_to_sqlite_db):
+        super().__init__(path_to_sqlite_db, "included", "survey_path")
+
+
+class StartedMetadata(SqliteSurveyMetadata):
+    """ Class to store survey metadata into an sqlite3 database.  This is to replace the pickle file that replaced the json.
+    The file will have two tables to store the dictionaries from included_ids, started_ids, included_surveys, started_surveys
+    """
+    fields = (SQLDataField('nbs_id', 'integer PRIMARY KEY'),
+              SQLDataField('survey_path', 'text', conv_to_sql=str),  # converts pathlib.Path to str
+              SQLDataField('tiles', 'BLOB', pickle.loads, pickle.dumps),  # sqlalchemy doesn't accept 'bytes' so use SQL type of BLOB
+              SQLDataField('mtime', 'real'),
+              SQLDataField('transaction_id', 'integer'),
+              )
+
+    def __init__(self, path_to_sqlite_db, tablename, *args, **kwargs):
+        super().__init__(path_to_sqlite_db, tablename, *args, **kwargs)
+        # update the table structure if an old schema is found
+        if not self.cur.execute(f"SELECT COUNT(*) AS CNTREC FROM pragma_table_info('{tablename}') WHERE name='transaction_id'").fetchone()[0]:
+            self.cur.execute(f'ALTER TABLE {tablename} ADD column transaction_id integer;')
+
+
+class StartedIds(StartedMetadata):
+    def __init__(self, path_to_sqlite_db):
+        super().__init__(path_to_sqlite_db, "started", "nbs_id")
+
+
+class StartedSurveys(StartedMetadata):
+    def __init__(self, path_to_sqlite_db):
+        super().__init__(path_to_sqlite_db, "started", "survey_path")
+
+
+class TransactionGroups(SqliteSurveyMetadata):
+    """ Class to store survey metadata into an sqlite3 database.  This is to replace the pickle file that replaced the json.
+    The file will have two tables to store the dictionaries from included_ids, started_ids, included_surveys, started_surveys
+    """
+    # use the sqlite built in oid
+    fields = (
+        # SQLDataField('oid', 'int PRIMARY KEY'),  # this would actually be auto-supplied by sqlite but sqlalchemy needs an explicit alias
+        SQLDataField('ttype', 'TEXT'),
+        SQLDataField('ttime', 'TEXT', datetime.fromisoformat, datetime.isoformat),
+        SQLDataField('process_id', 'integer'),
+        SQLDataField('finished', 'integer'),
+        SQLDataField('user_quit', 'integer'),
+    )
+
+    def __init__(self, path_to_sqlite_db):
+        super().__init__(path_to_sqlite_db, "transaction_groups", "oid")
+        # update the table structure if an old schema is found
+        if not self.cur.execute(f"SELECT COUNT(*) AS CNTREC FROM pragma_table_info('transaction_groups') WHERE name='process_id'").fetchone()[0]:
+            self.cur.execute(f'ALTER TABLE transaction_groups ADD column process_id integer;')
+            self.cur.execute(f'ALTER TABLE transaction_groups ADD column finished integer;')
+            self.cur.execute(f'ALTER TABLE transaction_groups ADD column user_quit integer;')
+            self.cur.execute("update transaction_groups set process_id =  0;")
+            self.cur.execute("update transaction_groups set finished =  0;")
+            self.cur.execute("update transaction_groups set user_quit =  0;")
+
+    def set_finished(self, oid):
+        with SqlLock(self.conn):
+            self.cur.execute(f"""update {self.tablename} set (finished)=(1) where {self.primary_key}=(?)""", [oid])
+
+    def set_quit(self, oid):
+        with SqlLock(self.conn):
+            self.cur.execute(f"""update {self.tablename} set (user_quit)=(1) where {self.primary_key}=(?)""", [oid])
+
+
+class CompletionCodes(SqliteSurveyMetadata):
+    """ Class to store survey metadata into an sqlite3 database.  This is to replace the pickle file that replaced the json.
+    The file will have two tables to store the dictionaries from included_ids, started_ids, included_surveys, started_surveys
+    """
+    # use the sqlite built in oid
+    fields = (
+        SQLDataField('fingerprint', 'TEXT PRIMARY KEY'),
+        SQLDataField('ttime', 'TEXT', datetime.fromisoformat, datetime.isoformat),
+        SQLDataField('code', 'integer'),
+    )
+
+    def __init__(self, path_to_sqlite_db):
+        super().__init__(path_to_sqlite_db, "completion_codes", "fingerprint")
+
+
+class StartFinishRecords(SqliteSurveyMetadata):  # fixme - rename one of these transaction classes so it's clearer
+    def unfinished_records(self):
+        return self.get_records("finished", 0)
+
+    def finished_records(self):
+        return self.get_records("finished", 1)
+
+    def is_finished(self, oid):
+        return self.cur.execute(f"select finished from {self.tablename} where oid = (?)", [oid]).fetchone()[0]
+
+    def set_finished(self, oid):
+        with SqlLock(self.conn):
+            self.cur.execute(f"""update {self.tablename} set (finished)=(1) where {self.primary_key}=(?)""", [oid])
+
+    def set_started(self, oid):
+        with SqlLock(self.conn):
+            self.cur.execute(f"""update {self.tablename} set (started)=(1) where {self.primary_key}=(?)""", [oid])
+
+
+class ReinsertInstructions(StartFinishRecords):
+    """ Class to store survey metadata into an sqlite3 database.  This is to replace the pickle file that replaced the json.
+    The file will have two tables to store the dictionaries from included_ids, started_ids, included_surveys, started_surveys
+    """
+    # use the sqlite built in oid
+    fields = (
+        # SQLDataField('oid', 'int PRIMARY KEY'),  # this would actually be auto-supplied by sqlite byt sqlalchemy needs an explicit alias
+        SQLDataField('nbs_id', 'integer'),
+        SQLDataField('tiles', 'BLOB', pickle.loads, pickle.dumps),  # sqlalchemy doesn't accept 'bytes' so use SQL type of BLOB
+        SQLDataField('started', 'integer'),
+        SQLDataField('finished', 'integer'),
+    )
+
+    def __init__(self, path_to_sqlite_db):
+        super().__init__(path_to_sqlite_db, "reinserts", "oid")
+
+
+class AreaOfInterest(StartFinishRecords):
+    """ Class to store survey metadata into an sqlite3 database.  This is to replace the pickle file that replaced the json.
+    The file will have two tables to store the dictionaries from included_ids, started_ids, included_surveys, started_surveys
+    """
+    # use the sqlite built in oid
+    fields = (
+        # SQLDataField('oid', 'int PRIMARY KEY'),  # this would actually be auto-supplied by sqlite byt sqlalchemy needs an explicit alias
+        SQLDataField('x', 'real'),
+        SQLDataField('y', 'real'),
+        SQLDataField('poly', 'integer'),
+    )
+
+    def __init__(self, path_to_sqlite_db):
+        super().__init__(path_to_sqlite_db, "aoi", "oid")
+
+
+class SurveyRemovals(StartFinishRecords):
+    """ Class to store survey metadata into an sqlite3 database.  This is to replace the pickle file that replaced the json.
+    The file will have two tables to store the dictionaries from included_ids, started_ids, included_surveys, started_surveys
+    """
+    # use the sqlite built in oid
+    fields = (
+        # SQLDataField('oid', 'int PRIMARY KEY'),  # this would actually be auto-supplied by sqlite byt sqlalchemy needs an explicit alias
+        SQLDataField('nbs_id', 'integer'),
+        SQLDataField('tiles', 'BLOB', pickle.loads, pickle.dumps),  # sqlalchemy doesn't accept 'bytes' so use SQL type of BLOB
+        SQLDataField('affects', 'text'),
+        SQLDataField('transaction_id', 'integer'),
+        SQLDataField('started', 'integer'),
+        SQLDataField('finished', 'integer'),
+    )
+
+    def __init__(self, path_to_sqlite_db):
+        super().__init__(path_to_sqlite_db, "removals", "oid")
+
 
 class WorldTilesBackend(VABC):
     """ Class to control Tile addressing.
@@ -72,7 +534,14 @@ class WorldTilesBackend(VABC):
         self.storage_class = storage_class
         if data_path:
             os.makedirs(self.data_path, exist_ok=True)
+            self._make_logger()
         self.to_file()  # store parameters so it can be loaded back from disk
+
+    def _make_logger(self):
+        log_name = __name__ + "." + self.data_path.name
+        self.LOGGER = get_logger(log_name)
+        make_family_of_logs(log_name, self.data_path.joinpath("log"), remove_other_file_loggers=False,
+                            log_format=f'[%(asctime)s] {__name__} %(levelname)-8s: %(message)s')
 
     @staticmethod
     def from_file(data_dir, filename="backend_metadata.json"):
@@ -114,22 +583,27 @@ class WorldTilesBackend(VABC):
         self.history_class = eval(json_dict['history_class'])
         self.storage_class = eval(json_dict['storage_class'])
         self.data_path = pathlib.Path(json_dict['data_path'])
+        self._make_logger()
         # do any version updates here
         self._loaded_from_version = json_dict['version']
         self._version = json_dict['version']
 
     def iterate_filled_tiles(self):
-        for tx_dir in os.scandir(self.data_path):
+        for tx_dir in tqdm(list(os.scandir(self.data_path)), desc='X directories', mininterval=.7, leave=False):
             if tx_dir.is_dir():
-                for ty_dir in os.scandir(tx_dir):
+                for ty_dir in tqdm(list(os.scandir(tx_dir)), desc='Y directories', mininterval=.7, leave=False):
                     if ty_dir.is_dir():
-                        tx, ty = self.str_to_tile_index(tx_dir.name, ty_dir.name)
-                        tile_history = self.get_tile_history_by_index(tx, ty)
                         try:
-                            raster = tile_history[-1]
-                            yield tx, ty, raster, tile_history.get_metadata()
-                        except IndexError:
-                            print("accumulation db made directory but not filled?", ty_dir.path)
+                            tx, ty = self.str_to_tile_index(tx_dir.name, ty_dir.name)
+                        except ValueError:
+                            print(f"non-tile directory in the database {tx_dir.name}, {ty_dir.name}")
+                        else:
+                            tile_history = self.get_tile_history_by_index(tx, ty)
+                            try:
+                                raster = tile_history[-1]
+                                yield tx, ty, raster, tile_history.get_metadata()
+                            except IndexError:
+                                print("accumulation db made directory but not filled?", ty_dir.path)
 
     def append_accumulation_db(self, accumulation_db):
         # iterate the acculation_db and append the last rasters from that into this db
@@ -150,10 +624,19 @@ class WorldTilesBackend(VABC):
             WorldTilesBackend instance
 
         """
-        # Use the same tile_scheme (which is just geographic parameters) with an AccumulationHistory to allow multiple passes on the same dataset to be added to the main database at one time
+        # Use the same tile_scheme (which is just geographic parameters) with an AccumulationHistory to allow multiple passes
+        # on the same dataset to be added to the main database at one time
         use_history = AccumulationHistory
         new_db = WorldTilesBackend(self.tile_scheme, use_history, self.storage_class, self.data_class, data_path)
         return new_db
+
+    def remove_accumulation_db(self, storage_db):
+        path_to_del = storage_db.data_path
+        # need to release the logger that writes into the accumulation db before deleting the files
+        for h in storage_db.LOGGER.handlers:
+            if isinstance(h, logging.FileHandler):
+                h.close()
+        shutil.rmtree(path_to_del, onerror=onerr)
 
     @property
     def __version__(self) -> int:
@@ -196,17 +679,26 @@ class WorldTilesBackend(VABC):
         tx_str, ty_str = self.tile_index_to_str(tx, ty)
         return self.data_path.joinpath(tx_str).joinpath(ty_str)
 
-    def get_tile_history_by_index(self, tx, ty):
+    def get_tile_history_by_index(self, tx, ty, no_create=False):
         hist_path = self.get_history_path_by_index(tx, ty)
-        history = self.history_class(self.storage_class(self.data_class, hist_path))
-        lx, ly, ux, uy = self.tile_scheme.tile_index_to_xy(tx, ty)
-        history.set_corners(lx, ly, ux, uy)
-        history.set_epsg(self.epsg)
+        if no_create and not self.storage_class.exists(hist_path):
+            # raise FileNotFoundError(f"{hist_path} was not found")
+            history = None
+        else:
+            history = self.history_class(self.storage_class(self.data_class, hist_path))
+            if history.min_x is None:  # "min_x" not in history.get_metadata():
+                lx, ly, ux, uy = self.tile_scheme.tile_index_to_xy(tx, ty)
+                history.set_corners(lx, ly, ux, uy)
+            # @ todo remove this after rebuild/check of existing PBG14,15,16 data
+            if "epsg" not in history.get_metadata():
+                history.set_epsg(self.epsg)
         return history
 
-    def iter_tiles(self, x, y, x2, y2):
+    def iter_tiles(self, x, y, x2, y2, no_create=False):
         for tx, ty in self.get_tiles_indices(x, y, x2, y2):
-            yield tx, ty, self.get_tile_history_by_index(tx, ty)
+            history = self.get_tile_history_by_index(tx, ty, no_create=no_create)
+            if history is not None:
+                yield tx, ty, history
 
     def get_tiles_indices(self, x, y, x2, y2):
         """ Get the indices of tiles that fall within rectangle specified by x,y to x2,y2 as a numpy array of tuples.
@@ -302,8 +794,8 @@ class UTMTileBackend(WorldTilesBackend):
 
 
 class UTMTileBackendExactRes(WorldTilesBackend):
-    def __init__(self, res_x, res_y, utm_epsg, history_class, storage_class, data_class, data_path, zoom_level=13):
-        tile_scheme = ExactUTMTiles(res_x, res_y, zoom=zoom_level, epsg=utm_epsg)
+    def __init__(self, res_x, res_y, utm_epsg, history_class, storage_class, data_class, data_path, zoom_level=13, offset_x=0, offset_y=0):
+        tile_scheme = ExactUTMTiles(res_x, res_y, zoom=zoom_level, epsg=utm_epsg, offset_x=offset_x, offset_y=offset_y)
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
 
 
@@ -319,9 +811,34 @@ class TMSMercatorTileBackend(WorldTilesBackend):
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
 
 
-class WMTileBackend(WorldTilesBackend):
-    def __init__(self, storage, zoom_level=13):
-        super().__init__(storage)
+def poly_from_pts(area_of_interest, transformer=None):
+    """ Pass a list or array of points in order to create a polygon OR two points representing two corners of a rectangle.
+    returns an ogr.Geometry
+    """
+    if len(area_of_interest) == 2:  # two corners
+        # build corners from the provided bounds
+        x1, y1 = area_of_interest[0][:2]
+        x2, y2 = area_of_interest[1][:2]
+        ul = (x1, y1)
+        ur = (x2, y1)
+        lr = (x2, y2)
+        ll = (x1, y2)
+        area_of_interest = [ul, ur, lr, ll]
+    ring = ogr.Geometry(ogr.wkbLinearRing)
+    for pt in area_of_interest:
+        x, y = pt[:2]
+        if transformer:
+            x, y = transformer.transform(x, y)
+        ring.AddPoint(float(x), float(y))  # float conversion to prevent type error if numpy int is passed in.
+    # list() used to make list, tuple or numpy.array compares all work
+    if list(area_of_interest[0][:2]) != list(area_of_interest[-1][:2]):  # connect the last point to the first to have a completed polygon
+        x, y = area_of_interest[0][:2]
+        if transformer:
+            x, y = transformer.transform(x, y)
+        ring.AddPoint(float(x), float(y))
+    geom = ogr.Geometry(ogr.wkbPolygon)
+    geom.AddGeometry(ring)
+    return geom
 
 
 class WorldDatabase(VABC):
@@ -337,112 +854,405 @@ class WorldDatabase(VABC):
     A survey being inserted must have all its write requests accepted before writing to any of the Tiles.
     Otherwise a read could get an inconsistent state of some tiles having a survey applied and some not.
     """
+    METACLASS_NAME = "wdb_metadata.class"
 
-    def __init__(self, backend):
+    def __init__(self, backend, area_of_interest: (ogr.Geometry, list, numpy.array)=None):
+        """
+        Parameters
+        ----------
+        backend
+            The desired storage and coordinate system backend, example:
+            UTMTileBackendExactRes(resx, resy, epsg, RasterHistory, DiskHistory, TiffStorage, db_path, offset_x=offset_x, offset_y=offset_y, zoom_level=zoom)
+        area_of_interest
+            If not None, then incoming data will be checked against the area_of_interest and skipped if its bounding rectangle
+            does not intersect the area_of_interest.
+
+            Pass in: the two corners of a rectangle OR a list of points to make a polygon OR a premade ogr.Geometry
+        """
         self.db = backend
-        # @todo, should the survey lists be stored in a sqlite database?
-        self.included_surveys = {}
-        self.included_ids = {}
+        self.area_of_interest = area_of_interest
+        pth = self.metadata_filename().with_suffix(".sqlite")
+        self.write_aoi(pth)
+        self.included_surveys = IncludedSurveys(pth)
+        self.included_ids = IncludedIds(pth)
+        self.started_surveys = StartedSurveys(pth)
+        self.started_ids = StartedIds(pth)
+        self.transaction_groups = TransactionGroups(pth)
+        self.removed_ids = SurveyRemovals(pth)
+        self.reinserts = ReinsertInstructions(pth)
+        self.completion_codes = CompletionCodes(pth)
         self.to_file()
+
+    @property
+    def res_x(self):
+        return self.db.tile_scheme.res_x
+
+    @property
+    def res_y(self):
+        return self.db.tile_scheme.res_y
+
+    @property
+    def area_of_interest(self):
+        return self._aoi
+
+    @area_of_interest.setter
+    def area_of_interest(self, val):
+        if isinstance(val, ogr.Geometry):
+            self._aoi = val
+        elif not val:
+            self._aoi = None
+        else:
+            self._aoi = poly_from_pts(val)
+        if self._aoi:
+            x1, x2, y1, y2 = self._aoi.GetEnvelope()
+            self.tiles_of_interest = self.db.get_tiles_indices(x1, y1, x2, y2)
+        else:
+            self.tiles_of_interest = None
 
     @staticmethod
     def open(data_dir):
+        """
+        Parameters
+        ----------
+        data_dir
+
+        Returns
+        -------
+
+        """
         data_path = WorldDatabase.metadata_filename_in_dir(data_dir)
-        with Lock(data_path, 'r', SHARED) as infile:  # this will wait for the file to be available
-            data = json.load(infile)
-        data['data_path'] = pathlib.Path(data_dir)  # overridde in case the user copied the data to a different path
+        mode = 'rb'
+
+        with FileLock(data_path, mode, SHARED) as infile:  # this will wait for the file to be available
+            data = pickle.load(infile)
+        data['data_path'] = pathlib.Path(data_dir)  # override in case the user copied the data to a different path
         cls = eval(data['class'])
         obj = cls.__new__(cls)
-        obj.from_json(data)
+        obj.from_dict(data)
         return obj
 
-    @staticmethod
-    def metadata_filename_in_dir(data_dir):
-        filename = "wdb_metadata.json"
-        data_path = pathlib.Path(data_dir).joinpath(filename)
+    def search_for_accum_db(self):
+        possible_accum = []
+        for tx_dir in tqdm(list(os.scandir(self.db.data_path)), desc='accum directories', mininterval=.7, leave=False):
+            if tx_dir.is_dir():
+                if "_accum" in str(tx_dir):
+                    print("accumulation directory found at", tx_dir)
+                    possible_accum.append(tx_dir)
+        return possible_accum
+
+    def search_for_bad_positioning(self, tolerance=50):
+        possible_errors = {}
+        for sid, val in tqdm(self.included_ids.items(), total=len(self.included_ids), desc='Surveys', mininterval=.7, leave=False):
+            tiles = numpy.array(val.tiles)
+            if len(tiles) > 1:
+                xs = tiles[:, 0]
+                xs.sort()
+                max_x = numpy.diff(xs).max()
+                ys = tiles[:, 1]
+                ys.sort()
+                max_y = numpy.diff(ys).max()
+                if max_y > tolerance or max_x > tolerance:
+                    possible_errors[sid] = (max_x, max_y, val.survey_path, val.tiles)
+            elif not self.area_of_interest and len(tiles) == 0:  # if there is an area of interest then many surveys won't list tiles.
+                print("survey had no tiles listed (no data)?", sid)
+        for sid, (max_x, max_y, pth, tiles) in possible_errors.items():
+            print("Tolerance exceeded", sid, max_x, max_y)  # , val[1])
+            print("    " + pth)
+        return possible_errors
+
+    def validate(self):
+        """
+        Returns
+        -------
+
+        """
+        # check each tile history for internal consistency - overall metadata vs the individual deltas
+        tile_missing = {}
+        tile_extra = {}
+        contributor_missing = {}
+        per_tile_contributors = {}
+        for tx, ty, raster, meta in self.db.iterate_filled_tiles():
+            tile_history = self.db.get_tile_history_by_index(tx, ty)
+            missing, extra, duplicates, expected, actual = tile_history.validate()
+            if missing:
+                tile_missing[(tx, ty)] = missing
+            if extra:
+                tile_extra[(tx, ty)] = extra
+            per_tile_contributors[(tx, ty)] = expected
+        # check each survey in the included list against the tiles that are listed to make sure they not are missing
+        for contrib in tqdm(self.included_ids.keys(), desc='Surveys', mininterval=.7, leave=False):
+            for tx, ty in self.included_ids[contrib].tiles:
+                try:
+                    if str(contrib) not in per_tile_contributors[(tx, ty)]:  # use str since tiles are using json and keys come back as strings
+                        contributor_missing.setdefault((tx, ty), [])
+                        contributor_missing[(tx, ty)].append(contrib)
+                except KeyError as e:
+                    if not self.area_of_interest:  # if area of interest there are still some tiles being listed that are not in the AOI
+                        raise e
+        if tile_missing:
+            print("The following contributors are listed in the tile's metadata but don't have a delta in the commit history"
+                  "So they were added but and are in metadata.json but have no _00000_.tif data in the directory")
+            for tile_xy, missing in tile_missing.items():
+                print(f"Tile {tile_xy} was missing contributors from the history which were listed in that tile metadata {missing}")
+        if tile_extra:
+            print("The following contributors have _00000_.tif data in the directory but are NOT listed in the tile's metadata.json")
+            for tile_xy, extra in tile_extra.items():
+                print(f"Tile {tile_xy} had extra contributors in the history {extra}")
+        if contributor_missing:
+            print("The following contributors are listed in the world database metadata as being applied to a tile "
+                  "but don't appear in that Tile's metadata.json, most likely a remove happened and they were not reinserted correctly.")
+            for tile_xy, missing in contributor_missing.items():
+                print(f"Based on the global insertion metadata, Tile {tile_xy} was missing contributors from the history {missing}")
+        if not tile_missing and not tile_extra and not contributor_missing:
+            print("Global contributors match individual tiles and tiles are internally consistent too")
+        return tile_missing, tile_extra, contributor_missing
+
+    @classmethod
+    def metadata_filename_in_dir(cls, data_dir):
+        data_path = pathlib.Path(data_dir).joinpath(cls.METACLASS_NAME)
         return data_path
 
     def metadata_filename(self):
-        return WorldDatabase.metadata_filename_in_dir(self.db.data_path)
+        return self.metadata_filename_in_dir(self.db.data_path)
 
-    def update_metadata_from_disk(self, data_path=None, locked_file=None):
-        local_lock = None
-        if data_path is None:
-            data_path = self.metadata_filename()
-        # Lock the file so no other processes change it at the same time as reading
-        if locked_file is None:
-            print('locking metadata (shared) at ', datetime.now().isoformat())
-            local_lock = Lock(data_path, 'r', SHARED)  # this will wait for the file to be available
-            local_lock.acquire()
-            infile = local_lock.fh
-        else:
-            infile = locked_file
-        data = json.load(infile)
-        self.update_metadata_from_json(data)
-        if local_lock is not None:
-            local_lock.release()
-            print('UNlocking metadata at ', datetime.now().isoformat())
+    def metadata_mode(self):
+        return 'rb+'
+
+    def add_transaction_group(self, ttype, ttime):
+        with FileLock(self.metadata_filename(), self.metadata_mode(), EXCLUSIVE) as metadata_file:
+            new_id = self.transaction_groups.add_oid_record((ttype, ttime))
+        return new_id
 
     def to_file(self, data_path=None, locked_file=None):
         local_lock = None
         if locked_file is None:
             if not data_path:
-                data_path = self.db.data_path.joinpath("wdb_metadata.json")
+                data_path = self.metadata_filename()
             # outfile = open(data_path, 'w')
-            local_lock = Lock(data_path, 'w', EXCLUSIVE)  # this will wait for the file to be available
+            mode = 'wb'
+            print('locking metadata for exclusive at ', datetime.now().isoformat())
+            local_lock = FileLock(data_path, mode, EXCLUSIVE)  # this will wait for the file to be available
             local_lock.acquire()
             outfile = local_lock.fh
         else:
             outfile = locked_file
-        json.dump(self.for_json(), outfile, indent=0)
+        pickle.dump(self.for_json(), outfile)
         if local_lock is not None:
+            print('unlocking metadata ', datetime.now().isoformat())
             local_lock.release()
 
     def for_json(self):
         # @todo make a base class or mixin that auto converts to json,
         #    maybe list the attributes desired with a callback that handles anything not auto converted to json
+
+        # for all formats save the type of class and module path
         json_dict = {'class': self.__class__.__name__,
                      'module': self.__class__.__module__,
-                     'survey_paths': self.included_surveys,
-                     'survey_ids': self.included_ids,
                      }
         return json_dict
 
-    def from_json(self, json_dict):
+    def from_dict(self, json_dict):
         """Build the entire object from json"""
         self.db = WorldTilesBackend.from_file(json_dict['data_path'])
-        self.update_metadata_from_json(json_dict)
+        self.update_metadata_from_dict(json_dict)
 
-    def update_metadata_from_json(self, json_dict):
-        """Just build the survey metadata lists (another process may have written) rather than all objects"""
-        # json stores all dictionary keys as strings, so have to convert back to integers
-        self.included_ids = {int(key): val for key, val in json_dict['survey_ids'].items()}
-        self.included_surveys = json_dict['survey_paths']
+    def write_aoi(self, pth=None):
+        if not pth:
+            pth = self.metadata_filename().with_suffix(".sqlite")
+        aoi = AreaOfInterest(pth)
+        for j in aoi:
+            del aoi[j]
+        if self.area_of_interest:
+            for npoly in range(self.area_of_interest.GetGeometryCount()):
+                poly = self.area_of_interest.GetGeometryRef(npoly)
+                for pt in poly.GetPoints():
+                    aoi.add_oid_record([*pt[:2], npoly])
 
-    def insert_survey(self, path_to_survey_data, override_epsg=NO_OVERRIDE, contrib_id=numpy.nan, compare_callback=None, reverse_z=False):
+    def update_metadata_from_dict(self, json_dict):
+        update = False
+        try:
+            if str(self.included_surveys.path_to_sqlite_db) != str(json_dict['data_path']):
+                update = True
+        except AttributeError:
+            update = True
+        if update:
+            pth = self.metadata_filename().with_suffix(".sqlite")
+            aoi = AreaOfInterest(pth)
+            pts = numpy.array([(pt.x, pt.y, pt.poly) for pt in aoi.values()])
+            if len(pts) > 0:
+                if len(numpy.unique(pts[:, 2])) > 1:
+                    raise ValueError("Multiple polygon areas are not supported yet")
+                self.area_of_interest = poly_from_pts(pts)
+            else:
+                self.area_of_interest = None
+            self.included_surveys = IncludedSurveys(pth)
+            self.included_ids = IncludedIds(pth)
+            self.started_surveys = StartedSurveys(pth)
+            self.started_ids = StartedIds(pth)
+            self.removed_ids = SurveyRemovals(pth)
+            self.reinserts = ReinsertInstructions(pth)
+            self.transaction_groups = TransactionGroups(pth)
+            self.completion_codes = CompletionCodes(pth)
+
+    def insert_survey(self, path_to_survey_data, override_epsg=NO_OVERRIDE, contrib_id=numpy.nan, compare_callback=None, reverse_z=False,
+                      limit_to_tiles=None, force=False, survey_score=100, flag=0, dformat=None, transaction_id=-1, sorting_metadata=None, crop=False):
+        """
+        Parameters
+        ----------
+        path_to_survey_data
+        override_epsg
+        contrib_id
+        compare_callback
+        reverse_z
+        limit_to_tiles
+        force
+        survey_score
+        flag
+        dformat
+        transaction_id
+        sorting_metadata
+
+        Returns
+        -------
+
+        """
+        self.db.LOGGER.debug(f"attempt to insert {path_to_survey_data}")
         done = False
         extension = pathlib.Path(str(path_to_survey_data).lower()).suffix
         if extension == '.bag':
             try:
                 vr = bag.VRBag(path_to_survey_data, mode='r')
             except (bag.BAGError, ValueError):  # value error for single res of version < 1.6.  Maybe should change to BAGError in bag.py
-                pass
+                pass  # allow gdal to read single res
             else:
-                self.insert_survey_vr(vr, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback, reverse_z=reverse_z)
+                self.insert_survey_vr(vr, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback, reverse_z=reverse_z,
+                                      limit_to_tiles=limit_to_tiles, force=force, survey_score=survey_score, flag=flag,
+                                      transaction_id=transaction_id, sorting_metadata=sorting_metadata)
                 done = True
         if not done:
             if extension in ['.bag', '.tif', '.tiff']:
-                self.insert_survey_gdal(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback, reverse_z=reverse_z)
+                self.insert_survey_gdal(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback,
+                                        reverse_z=reverse_z, limit_to_tiles=limit_to_tiles, force=force, survey_score=survey_score, flag=flag,
+                                        transaction_id=transaction_id, sorting_metadata=sorting_metadata)
                 done = True
         if not done:
-            if extension in ['.csar',]:
+            if extension in ['.gpkg']:
+                self.insert_survey_gpkg(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback,
+                                        reverse_z=reverse_z, limit_to_tiles=limit_to_tiles, force=force, survey_score=survey_score, flag=flag,
+                                        transaction_id=transaction_id, sorting_metadata=sorting_metadata)
+                done = True
+        if not done:
+            if extension in ['.txt', '.npy', '.csv', '.npz']:
+                self.insert_txt_survey(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback,
+                                       reverse_z=reverse_z, limit_to_tiles=limit_to_tiles, force=force, survey_score=survey_score, flag=flag,
+                                       dformat=dformat, transaction_id=transaction_id, sorting_metadata=sorting_metadata, crop=crop)
+                done = True
+        if not done:
+            if extension in ['.csar', ]:
                 # export to xyz
                 # FIXME -- export points from csar and support LAS or whatever points file is decided on.
-                # self.insert_txt_survey(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback, reverse_z=reverse_z)
+                # self.insert_txt_survey(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id,
+                # compare_callback=compare_callback, reverse_z=reverse_z)
                 done = True
+                raise ValueError("Filename ends in csar which needs to be eported to a different format first")
 
-    def insert_txt_survey(self, path_to_survey_data, survey_score=100, flags=0, format=None, override_epsg=NO_OVERRIDE,
-                          contrib_id=numpy.nan, compare_callback=None, reverse_z=False):
+    def _get_transformer(self, srs, override_epsg, path_to_survey_data, inv=False):
+        try:
+            epsg = get_epsg_or_wkt(srs)
+        except Exception as e:
+            if override_epsg == NO_OVERRIDE:
+                raise e
+            else:
+                epsg = None
+
+        if override_epsg != NO_OVERRIDE:
+            if str(epsg) != str(override_epsg):
+                self.db.LOGGER.warning(f"override {epsg} with {override_epsg} in {path_to_survey_data}")
+                epsg = override_epsg
+        # fixme - do coordinate transforms correctly
+        if inv:
+            transformer = get_crs_transformer(self.db.epsg, epsg)
+        else:
+            transformer = get_crs_transformer(epsg, self.db.epsg)
+        if transformer:
+            print("@todo - do transforms correctly with proj/vdatum etc")
+        return transformer
+
+    def insert_survey_gpkg(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE,
+                           contrib_id=numpy.nan, compare_callback=None, reverse_z=False, limit_to_tiles=None, force=False,
+                           transaction_id=-1, sorting_metadata=None):
+        """ Reads a geopackage for layers that are point data (currently ignores rasters or other geometries) with an uncertainty field per point.
+        Inserts the point data into current WorldDatabase object.
+
+        Parameters
+        ----------
+        path_to_survey_data
+        survey_score
+        flag
+        override_epsg
+        contrib_id
+        compare_callback
+        reverse_z
+        limit_to_tiles
+        force
+        transaction_id
+        sorting_metadata
+
+        Returns
+        -------
+
+        """
+        self.db.LOGGER.debug(f"insert geopackage {path_to_survey_data}")
+        raise Exception("Need to add an overview/area_of_interest check to insert geopackage")
+        gpkg = gdal.OpenEx(path_to_survey_data)
+        # geopackages can have both raster and vector layers, so we will iterate through them but currently only supporting point data from a gpkg
+        for ilyr in range(gpkg.GetLayerCount()):
+            lyr = gpkg.GetLayer(ilyr)
+            if lyr.GetGeomType() == ogr.wkbPoint:
+                srs = lyr.GetSpatialRef()
+                transformer = self._get_transformer(srs, override_epsg, path_to_survey_data)
+
+                if fiona:
+                    fi_file = fiona.open(path_to_survey_data, layer=ilyr)
+                    npts = len(fi_file)
+                    x = numpy.zeros(npts, dtype=numpy.float64)
+                    y = numpy.zeros(npts, dtype=numpy.float64)
+                    depth = numpy.zeros(npts, dtype=numpy.float32)
+                    uncertainty = numpy.zeros(npts, dtype=numpy.float32)
+                    for i, feat in enumerate(fi_file):
+                        x[i], y[i] = feat['geometry']['coordinates']
+                        depth[i] = feat['properties']['elevation']
+                        uncertainty[i] = feat['properties']['uncertainty']
+                else:  # gdal - slower
+                    npts = lyr.GetFeatureCount()
+                    x = numpy.zeros(npts, dtype=numpy.float64)
+                    y = numpy.zeros(npts, dtype=numpy.float64)
+                    depth = numpy.zeros(npts, dtype=numpy.float64)
+                    uncertainty = numpy.zeros(npts, dtype=numpy.float64)
+                    for i, feat in enumerate(lyr):
+                        x[i], y[i], depth[i] = feat.GetGeometryRef().GetPoint()
+                        uncertainty[i] = feat['uncertainty']
+                if transformer:
+                    x, y = transformer.transform(x, y)
+                if reverse_z:
+                    depth *= -1
+                self._insert_xyz(x, y, depth, uncertainty, survey_score, flag, contrib_id, path_to_survey_data, compare_callback,
+                                 override_epsg, reverse_z, limit_to_tiles=limit_to_tiles, force=force, dformat="gpkg",
+                                 transaction_id=transaction_id, sorting_metadata=sorting_metadata)
+
+    def insert_survey_as_outside_area_of_interest(self, path_to_survey_data, survey_score=100, flag=0, dformat=None, override_epsg: int = NO_OVERRIDE,
+                                                  contrib_id=numpy.nan, reverse_z: bool = False, transaction_id=-1, sorting_metadata=None):
+        """ Insert a survey into the metadata so it is known to have been evaluated but had no data of interest.
+        Tiles will be stored as an empty list.
+        """
+        self.start_survey_insertion(path_to_survey_data, [], contrib_id, transaction_id)
+        self.finished_survey_insertion(path_to_survey_data, [], contrib_id, override_epsg, reverse_z, survey_score, flag,
+                                       dformat, transaction_id, sorting_metadata=sorting_metadata)
+
+    # noinspection PyUnboundLocalVariable
+    def insert_txt_survey(self, path_to_survey_data, survey_score=100, flag=0, dformat=None, override_epsg: int = NO_OVERRIDE,
+                          contrib_id=numpy.nan, compare_callback=None, reverse_z: bool = False, limit_to_tiles=None, force=False, transaction_id=-1,
+                          sorting_metadata=None, block_size=30000000, crop=False):
         """ Reads a text file and inserts into the tiled database.
         The format parameter is passed to numpy.loadtxt and needs to have names of x, y, depth, uncertainty.
 
@@ -452,73 +1262,298 @@ class WorldDatabase(VABC):
             full path filename to read using numpy
         survey_score
             score to apply to data, if not a column in the data
-        flags
+        flag
             flags to apply to data, if not a column in the data
-        format
+        dformat
             numpy dtype format to pass to numpy.loadtxt, default is [('y', 'f8'), ('x', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')]
-        transformer
-            Optional function used to transform from x,y in the file to the coordinate system of the database.
-            It will be called as new_x, new_y = func( x, y ).
+        override_epsg
+            epsg to use instead of what is in the file, use default of NO_OVERRIDE to use the file SpatialReferenceSystem
+        contrib_id
+            an integer of the contributor_id to store or numpy.nan if contributor is not being used
+        compare_callback
+            function to call for scoring or None to use the default comparison
+        reverse_z
+            will multiply the depth values by -1 before combining
+        limit_to_tiles
+        force
+        transaction_id
+        sorting_metadata
+        block_size
+        crop
+            forces any tile indices that would be greater than the extents to fall on the edges
+            aded so ENCs with too large an area will not raise an error, assuming an area of interest has been specified which will crop the data.
 
         Returns
         -------
         None
         """
-        if override_epsg == NO_OVERRIDE:
-            epsg = self.db.epsg
-        else:
-            epsg = override_epsg
-        transformer = get_crs_transformer(epsg, self.db.epsg)
-
-        if not format:
-            format = [('y', 'f8'), ('x', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')]
-        data = numpy.loadtxt(path_to_survey_data, dtype=format)
-        x = data['x']
-        y = data['y']
-        if transformer:
-            x, y = transformer.transform(x, y)
-        depth = data['depth']
-        if reverse_z:
-            depth *= -1
-        uncertainty = data['uncertainty']
-        score = numpy.full(x.shape, survey_score)
-        flags = numpy.full(x.shape, flags)
-        txs, tys = self.db.tile_scheme.xy_to_tile_index(x, y)
-        tile_list = numpy.unique(numpy.array((txs, tys)).T, axis=0)
-        with AreaLock(tile_list, EXCLUSIVE|NON_BLOCKING, self.db.get_history_path_by_index) as lock:
-            if contrib_id is None or contrib_id not in self.included_ids:
-                tiles = self.insert_survey_array(numpy.array((x, y, depth, uncertainty, score, flags)), path_to_survey_data,
-                                                 contrib_id=contrib_id, compare_callback=compare_callback)
-                self.finished_survey_insertion(path_to_survey_data, tiles, contrib_id)
+        has_out_of_bounds_points = False
+        self.db.LOGGER.debug(f"insert survey points {path_to_survey_data}")
+        if force or contrib_id is None or contrib_id not in self.included_ids:
+            skip_as_disjoint = False
+            if str(path_to_survey_data).lower().endswith(".npz"):
+                data = numpy.load(path_to_survey_data)
+                wkt = str(data['wkt'])
+                if wkt is not None and override_epsg == NO_OVERRIDE:
+                    epsg = wkt
+                    transformer = get_crs_transformer(epsg, self.db.epsg)
+                else:
+                    transformer = None
+                try:
+                    corners = data['minmax']
+                except KeyError:
+                    pass
+                else:
+                    bounds = poly_from_pts(corners, transformer)
+                    if self.area_of_interest and not self.area_of_interest.Intersects(bounds):
+                        skip_as_disjoint = True
+            if skip_as_disjoint:
+                self.insert_survey_as_outside_area_of_interest(path_to_survey_data, survey_score, flag, dformat, override_epsg,
+                                                               contrib_id, reverse_z, transaction_id, sorting_metadata)
             else:
-                raise Exception(f"Survey Exists already in database {contrib_id}")
+                if limit_to_tiles is None and self.area_of_interest:
+                    limit_to_tiles = self.tiles_of_interest
+                # npy and csv don't have coordinate system, so set up a default.  npz will set this later if needed
+                if override_epsg == NO_OVERRIDE:
+                    epsg = self.db.epsg
+                else:
+                    epsg = override_epsg
+                transformer = get_crs_transformer(epsg, self.db.epsg)
+
+                if not dformat:
+                    dformat = [('x', 'f8'), ('y', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')]
+                start = 0
+                done = False
+                tile_list = numpy.zeros([0,2], dtype=numpy.int32)  # make an empty list to start
+                # find the tiles to lock
+                with tqdm(desc="geocode/process points", total=2) as top_progress_bar:
+                    with tqdm(desc="geocode+split", total=0, leave=False) as progress_bar:
+                        for wkt, x, y, depth, uncertainty in iterate_points_file(path_to_survey_data, dformat=dformat, block_size=block_size):
+                            # this shold only need to happen once but we can reset the transformer on each loop as it's cheap to do
+                            progress_bar.reset(progress_bar.total + 1)
+                            progress_bar.refresh()
+                            progress_bar.update(progress_bar.total - 1)
+                            progress_bar.refresh()
+                            if wkt is not None and override_epsg == NO_OVERRIDE:
+                                epsg = wkt
+                                transformer = get_crs_transformer(epsg, self.db.epsg)
+                            # transformer
+                            #     Optional function used to transform from x,y in the file to the coordinate system of the database.
+                            #     It will be called as new_x, new_y = func( x, y ).
+                            if transformer:
+                                x, y = transformer.transform(x, y)
+                            try:
+                                txs, tys = self.db.tile_scheme.xy_to_tile_index(x, y)
+                            except IndexError as e:
+                                if crop:
+                                    self.db.LOGGER.warning(f"Points out of range for insertion, cropping data {path_to_survey_data}\n{str(e)}")
+                                    has_out_of_bounds_points = True
+                                    too_big = numpy.logical_or(x > self.db.tile_scheme.max_x, y > self.db.tile_scheme.max_y)
+                                    too_small = numpy.logical_or(x < self.db.tile_scheme.min_x, y < self.db.tile_scheme.min_y)
+                                    bad_indices = numpy.logical_or(too_big, too_small)
+                                    x = x[~bad_indices]
+                                    y = y[~bad_indices]
+                                    txs, tys = self.db.tile_scheme.xy_to_tile_index(x, y)
+                                else:
+                                    raise e
+                            new_tile_list = numpy.unique(numpy.array((txs, tys)).T, axis=0)
+                            tile_list = numpy.unique(numpy.vstack([tile_list, new_tile_list]), axis=0)
+
+                        # process the data into an accumulation db then insert into the main db
+                        top_progress_bar.update(1)
+                        progress_bar.set_description("processing")
+                        progress_bar.reset()
+                        with AreaLock(tile_list, EXCLUSIVE | NON_BLOCKING, self.db.get_history_path_by_index) as lock:
+                            self.start_survey_insertion(path_to_survey_data, tile_list, contrib_id, transaction_id)
+                            temp_path = tempfile.mkdtemp(suffix="_accum", dir=self.db.data_path)
+                            storage_db = self.db.make_accumulation_db(temp_path)
+                            for wkt, x, y, depth, uncertainty in iterate_points_file(path_to_survey_data, dformat=dformat, block_size=block_size):
+                                progress_bar.update(1)
+                                if has_out_of_bounds_points:  # must have specified crop and failed the tile computation, so remove the data
+                                    too_big = numpy.logical_or(x > self.db.tile_scheme.max_x, y > self.db.tile_scheme.max_y)
+                                    too_small = numpy.logical_or(x < self.db.tile_scheme.min_x, y < self.db.tile_scheme.min_y)
+                                    bad_indices = numpy.logical_or(too_big, too_small)
+                                    x = x[~bad_indices]
+                                    y = y[~bad_indices]
+                                    depth = depth[~bad_indices]
+                                    uncertainty = uncertainty[~bad_indices]
+                                # transformer
+                                #     Optional function used to transform from x,y in the file to the coordinate system of the database.
+                                #     It will be called as new_x, new_y = func( x, y ).
+                                if transformer:
+                                    x, y = transformer.transform(x, y)
+                                if reverse_z:
+                                    depth = depth * -1
+                                score = numpy.full(x.shape, survey_score)
+                                flags = numpy.full(x.shape, flag)
+                                # we already computed all tiles that should be filled, so we can ignore this
+                                tiles = self.insert_survey_array(numpy.array((x, y, depth, uncertainty, score, flags)), path_to_survey_data,
+                                                                 contrib_id=contrib_id, compare_callback=compare_callback, limit_to_tiles=limit_to_tiles,
+                                                                 accumulation_db=storage_db)
+                            self.db.append_accumulation_db(storage_db)
+                            self.finished_survey_insertion(path_to_survey_data, tile_list, contrib_id, override_epsg, reverse_z, survey_score, flag,
+                                                           dformat, transaction_id, sorting_metadata=sorting_metadata)
+                            self.db.remove_accumulation_db(storage_db)
+                            del storage_db
+        else:
+            raise Exception(f"Survey Exists already in database {contrib_id}")
+
+    def _insert_xyz(self, x, y, depth, uncertainty, survey_score, flag, contrib_id, path_to_survey_data, compare_callback, override_epsg, reverse,
+                    limit_to_tiles=None, force=False, dformat=None, transaction_id=-1, sorting_metadata=None):
+        """Convenience function to handle locking tiles and making flag/score arrays for readers that make arrays of points"""
+        if force or contrib_id is None or contrib_id not in self.included_ids:
+            score = numpy.full(x.shape, survey_score)
+            flags = numpy.full(x.shape, flag)
+            txs, tys = self.db.tile_scheme.xy_to_tile_index(x, y)
+            tile_list = numpy.unique(numpy.array((txs, tys)).T, axis=0)
+            with AreaLock(tile_list, EXCLUSIVE | NON_BLOCKING, self.db.get_history_path_by_index) as lock:
+                self.start_survey_insertion(path_to_survey_data, tile_list, contrib_id, transaction_id)
+                tiles = self.insert_survey_array(numpy.array((x, y, depth, uncertainty, score, flags)), path_to_survey_data,
+                                                 contrib_id=contrib_id, compare_callback=compare_callback, limit_to_tiles=limit_to_tiles)
+                self.finished_survey_insertion(path_to_survey_data, tiles, contrib_id, override_epsg, reverse, survey_score, flag, dformat,
+                                               transaction_id, sorting_metadata)
+        else:
+            raise Exception(f"Survey Exists already in database {contrib_id}")
 
     # @todo - make the survey_ids and survey_paths into properties that load from disk when called by user so that they stay in sync.
     #    Otherwise use postgres to hold that info so queries are current.
-    def finished_survey_insertion(self, path_to_survey_data, tiles, contrib_id=numpy.nan):
+    def finished_survey_insertion(self, path_to_survey_data, tiles, contrib_id=numpy.nan,
+                                  override_epsg=NO_OVERRIDE, reverse_z=False, survey_score=100,
+                                  flag=0, dformat=None, transaction_id=-1, sorting_metadata=None,
+                                  override_time = None):
+        """ Stores all the information needed to reinsert or tell how a survey was inserted EXCEPT for the comparison callback which is a function.
+        Two dictionaries are made, self.included_ids keyed on the IDs and self.included_surveys keys on the file paths.
+
+        Parameters
+        ----------
+        transaction_id
+        dformat
+        path_to_survey_data
+        tiles
+        contrib_id
+        override_epsg
+        reverse_z
+        survey_score
+        flag
+        sorting_metadata
+
+        Returns
+        -------
+
+        """
         # store the tiles filled by this survey as a convenience lookup for the future when removing or querying.
-        print('locking metadata for exclusive at ', datetime.now().isoformat())
-        with Lock(self.metadata_filename(), 'r+', EXCLUSIVE) as metadata_file:
-            backup_path1 = self.metadata_filename().parent.joinpath("wdb_metadata.bak1")
-            backup_path2 = self.metadata_filename().parent.joinpath("wdb_metadata.bak2")
-            self.to_file(backup_path1)
+        # print('locking metadata for exclusive at ', datetime.now().isoformat())
+        with FileLock(self.metadata_filename(), self.metadata_mode(), EXCLUSIVE) as metadata_file:
+            self.db.LOGGER.debug(f"finishing {path_to_survey_data}")
+            # backup_path1 = self.metadata_filename().parent.joinpath("wdb_metadata.bak1")
+            # self.to_file(backup_path1)
+
             # update the metadata in case another process wrote to it since the last time we updated/loaded
-            self.update_metadata_from_disk(locked_file=metadata_file)
-            # make a backup of the metadata in case something breaks here
-            self.to_file(backup_path2)
+            # self.update_metadata_from_disk(locked_file=metadata_file)  # removed with switch to sqlite
+
             # add the new survey to the metadata and store to disk
             # json doesn't like pathlib.Paths to be stored -- convert to strings
-            self.included_surveys[str(path_to_survey_data)] = (contrib_id, list(tiles))  # json doesn't like sets, convert to list
-            if contrib_id is not None:
-                self.included_ids[contrib_id] = (str(path_to_survey_data), list(tiles))
-            # rather than overwrite, since we have it locked, truncate the file and then write new data to it
-            metadata_file.seek(0)
-            metadata_file.truncate(0)
-            self.to_file(locked_file=metadata_file)
-            print('unlocking metadata at ', datetime.now().isoformat())
+            if override_time is None:
+                mtime = pathlib.Path(path_to_survey_data).stat().st_mtime
+            else:
+                mtime = override_time
 
-    def insert_survey_array(self, input_survey_data, contrib_name, accumulation_db=None, contrib_id=numpy.nan, compare_callback=None):
+            # fixme probably should Get the union of existing tiles plus whatever is passed in.  What cases should we overwrite if ever?
+            #    in the meantime we'll assume the data is from full insert and not let a re-insert on limited tiles overwrite the data
+            if str(path_to_survey_data) not in self.included_surveys:
+                data = self.included_surveys.data_class()
+                data.survey_path = path_to_survey_data
+                data.nbs_id = contrib_id
+                data.tiles = [(tx, ty) for tx, ty in tiles]  # json doesn't like sets, convert to list
+                data.sorting_metadata = sorting_metadata
+                data.epsg = override_epsg
+                data.reverse_z = reverse_z
+                data.survey_score = survey_score
+                data.flag = flag
+                data.dformat = dformat
+                data.mtime = mtime
+                data.transaction_id = transaction_id
+                self.included_surveys[str(path_to_survey_data)] = data
+                # (contrib_id, [(tx, ty) for tx, ty in tiles], sorting_metadata, override_epsg, reverse_z, survey_score, flag, dformat, mtime,
+                # transaction_id)
+                if contrib_id is not None:
+                    self.included_ids[contrib_id] = data
+                    # (str(path_to_survey_data), [(tx, ty) for tx, ty in tiles], sorting_metadata, override_epsg, reverse_z, survey_score, flag, dformat, mtime,
+                    # transaction_id)
+            # Sqlite file updates immediately, so no longer need to call to_file() which only stores the class setup.
+            # # rather than overwrite, since we have it locked, truncate the file and then write new data to it
+            # metadata_file.seek(0)
+            # metadata_file.truncate(0)
+            # self.to_file(locked_file=metadata_file)
+            # print('unlocking metadata at ', datetime.now().isoformat())
+
+    def start_survey_insertion(self, path_to_survey_data, tiles, contrib_id=numpy.nan, transaction_id=-1):
+        """
+        Parameters
+        ----------
+        path_to_survey_data
+        tiles
+        contrib_id
+        transaction_id
+
+        Returns
+        -------
+
+        """
+        # store the tiles filled by this survey as a convenience lookup for the future when removing or querying.
+        # print('locking metadata for exclusive at ', datetime.now().isoformat())
+        with FileLock(self.metadata_filename(), self.metadata_mode(), EXCLUSIVE) as metadata_file:
+            self.db.LOGGER.info(f"starting {contrib_id} {path_to_survey_data}")
+            # update the metadata in case another process wrote to it since the last time we updated/loaded
+            # self.update_metadata_from_disk(locked_file=metadata_file)  # removed with switch to sqlite
+
+            # add the new survey to the metadata and store to disk
+            # json doesn't like pathlib.Paths to be stored -- convert to strings
+            mtime = pathlib.Path(path_to_survey_data).stat().st_mtime
+            # if a survey was started but not finished it will be listed here, make sure the modtime or hash matches or else the
+            # already inserted data could be erroneous and should be removed first
+            if str(path_to_survey_data) in self.started_surveys:
+                existing_mtime = self.started_surveys[path_to_survey_data].mtime
+            elif contrib_id in self.started_ids:
+                existing_mtime = self.started_ids[contrib_id].mtime
+            else:
+                existing_mtime = mtime
+            if mtime != existing_mtime:
+                # @todo To remove a survey from here we would need to call remove_and_recompute and make sure we don't have the tiles locked?
+                #   but we must have the tiles locked or another process could start operating in the same area
+                raise ValueError("There was a mismatched mod time already listed in the world DB, need to remove it first(?)")
+            # fixme probably should Get the union of existing tiles plus whatever is passed in.  What cases should we overwrite if ever?
+            #    in the meantime we'll assume the data is from full insert and not let a re-insert on limited tiles overwrite the data
+            if str(path_to_survey_data) not in self.started_surveys:
+                data = self.started_surveys.data_class()
+                data.nbs_id = contrib_id
+                data.survey_path = path_to_survey_data
+                data.tiles = [(tx, ty) for tx, ty in tiles]  # json doesn't like sets, convert to list
+                data.mtime = mtime
+                data.transaction_id = transaction_id
+                self.started_surveys[str(path_to_survey_data)] = data
+                # (contrib_id, [(tx, ty) for tx, ty in tiles], mtime, transaction_id)  # json doesn't like sets, convert to list
+                if contrib_id is not None:
+                    self.started_ids[contrib_id] = data
+                    # (str(path_to_survey_data), [(tx, ty) for tx, ty in tiles], mtime, transaction_id)
+            # Sqlite file updates immediately, so no longer need to call to_file() which only stores the class setup.
+            # # rather than overwrite, since we have it locked, truncate the file and then write new data to it
+            # metadata_file.seek(0)
+            # metadata_file.truncate(0)
+            # self.to_file(locked_file=metadata_file)
+            # print('unlocking metadata at ', datetime.now().isoformat())
+
+    def insert_survey_array(self, input_survey_data, contrib_name, accumulation_db=None, contrib_id=numpy.nan, compare_callback=None,
+                            limit_to_tiles=None):
         """ Insert a numpy array (or list of lists) of data into the database.
+
+        This function is typically used by other methods that are inserting data from a file.
+        If data is directly inserted via insert_survey_array then you must call finished_survey_insertion or
+        the contributor will not be removable later using the remove/recompute functions.
+        The remove functions depend on the tile lists to avoid having to read/search the entire dataset.
+        They might call this function multiple times in order to not load all the data at one time,
+        which is why the finished_survey_insertion is called separately.
+
 
         Parameters
         ----------
@@ -547,18 +1582,46 @@ class WorldDatabase(VABC):
 
         Returns
         -------
-        None
+        list
+            tiles indices that data was added to
         """
         # fixme for survey_data - use pandas?  structured arrays?
 
-        # @todo Allow for pixel sizes, right now treating as point rather than say 8m or 4m coverages
+        # @todo Allow for pixel sizes?  right now treating as point rather than say 8m or 4m coverages
         if not isinstance(contrib_name, str):
             contrib_name = str(contrib_name)
         if not accumulation_db:
             accumulation_db = self.db
         if contrib_id is None:
             contrib_id = numpy.nan
-        contributor = numpy.full(input_survey_data[0].shape, contrib_id)
+        # print('convert the contributor integer to store inside a float buffer')
+        # a = numpy.array([1, 3, 5, 1234567890], numpy.int32)
+        # f = numpy.frombuffer(a.tobytes(), numpy.float32)
+        # b = numpy.frombuffer(f.tobytes(), numpy.int32)
+        # b
+        # array([1, 3, 5, 1234567890])
+        # Test that float 32 doesn't get truncated weirdly when taken to float64 and back
+        # i32 = numpy.arange(0, 100000000).astype(numpy.int32)
+        # f32 = numpy.frombuffer(i32.tobytes(), numpy.float32)
+        # f32.shape
+        # (100000000,)
+        # f64 = f32.astype(numpy.float64)
+        # i = numpy.frombuffer(f64.astype(numpy.float32).tobytes(), numpy.int32)
+        # numpy.all(i == i32)
+        # True
+        # FIXME - HACK -- encoding integer contributor number as float to fit in the tiff which is float32.
+        #  The raster_data classes should return recarrays (structured arrays) but
+        #  that will require some rework on the slicing and concatenation elsewhere.
+        #  Due to this, the export routine should convert the float back to int and also get fixed later.
+        #  Also have to modify the sorting routine to accommodate the difference
+        #  (translate the ints to floats there too)
+        try:
+            float_contributor = numpy.frombuffer(numpy.int32(contrib_id).tobytes(), numpy.float32)[0]
+        except ValueError:
+            float_contributor = numpy.float32(numpy.nan)
+
+        contributor = numpy.full(input_survey_data[0].shape, float_contributor)
+
         survey_data = numpy.array((input_survey_data[0], input_survey_data[1], input_survey_data[2],
                                    input_survey_data[3], contributor, input_survey_data[4], input_survey_data[5]))
         # if a multidemensional array was passed in then reshape it to be one dimenion.
@@ -569,10 +1632,63 @@ class WorldDatabase(VABC):
         # Compute the tile indices for each point
         txs, tys = accumulation_db.tile_scheme.xy_to_tile_index(survey_data[0], survey_data[1])
         tile_list = numpy.unique(numpy.array((txs, tys)).T, axis=0)
+
+        # # remove any tile that aren't in the allowed list
+        # if limit_to_tiles is not None:
+        #     keep_rows = numpy.zeros(tile_list.shape[0], numpy.bool8)
+        #     # could expand the dimensions of the limit_to_tiles and compare all the tiles at once but
+        #     # by looping the tiles and running logical_or this supports sets which don't turn into numpy arrays as easily
+        #     for tx, ty in limit_to_tiles:
+        #         a = numpy.all(tile_list == (tx, ty), axis=1)
+        #         keep_rows = numpy.logical_or(a, keep_rows)
+        #     tile_list = numpy.delete(tile_list, ~keep_rows, axis=0)
+
+        # sort by TileX then split into groups based on TX
+        # Next sort each group by TileY.
+        # This should result in a dictionary of (TX,TY)=survey_data for just that tile.
+        # this should be much faster on a large geographic dataset with a lot of data (GMRT)
+        # which had been re-comparing to (tx, ty) for all data on each loop.
+        # The initial assumption of geographic limited tiles was not good enough so extra logic was needed.
+
+        # sort by x so the split works
+        tiles_data = {}
+        sorted_tx_ind = txs.argsort()
+        survey_data = survey_data[:, sorted_tx_ind]
+        txs = txs[sorted_tx_ind]
+        tys = tys[sorted_tx_ind]
+        # find the indices where each tx (column) starts -- had to be sorted for this to work
+        grouped_tx, tx_split_indices = numpy.unique(txs, return_index=True)
+        # split the data into lists of points based on the tx (column) it fell in
+        grouped_tx_survey_data = numpy.split(survey_data, tx_split_indices[1:], axis=1)
+        # also split the ty values so we can sort by it next
+        grouped_tys = numpy.split(tys, tx_split_indices[1:])
+        # for each tx column of data, sort by ty and make a dictionary of the tx,ty data points
+        for tx, group_survey_data, group_tys in zip(grouped_tx, grouped_tx_survey_data, grouped_tys):
+            # like above, sort by ty now
+            sorted_ty_ind = group_tys.argsort()
+            # rearrange the tx group to be in ty ascending order
+            group_survey_data = group_survey_data[:, sorted_ty_ind]
+            group_tys = group_tys[sorted_ty_ind]
+            # find the indices where the ty value changes
+            grouped_ty, ty_split_indices = numpy.unique(group_tys, return_index=True)
+            # group the tx points into a list split by ty (row)
+            grouped_tx_ty_survey_data = numpy.split(group_survey_data, ty_split_indices[1:], axis=1)
+            # make a dictionary value for each tx, ty pair
+            for ty, tile_survey_data in zip(grouped_ty, grouped_tx_ty_survey_data):
+                tiles_data[(int(tx), int(ty))] = tile_survey_data  # force int so we don't accidentally get numpy.int in the keys
+
+        # remove any tile that aren't in the allowed list
+        if limit_to_tiles is not None:
+            # make sure the limits are ints, not floats or numpy.ints etc so compare works
+            limit_ints = set([(int(tx), int(ty)) for tx, ty in limit_to_tiles])
+            for tx, ty in list(tiles_data.keys()):
+                if (tx, ty) not in limit_ints:
+                    del tiles_data[(tx, ty)]
+        tile_list = list(tiles_data.keys())
+
         # itererate each tile that was found to have data
-        # @todo figure out the contributor - should be the unique id from the database of surveys
         # @FIXME - confirm that points outside bounds (less than lower left and greater than upper right) don't crash this
-        for i_tile, (tx, ty) in enumerate(tile_list):
+        for i_tile, (tx, ty) in enumerate(tqdm(tile_list, desc='survey array tiles', mininterval=.7, leave=False)):
             if _debug:
                 pass
                 # print("debug skipping tiles")
@@ -580,9 +1696,9 @@ class WorldDatabase(VABC):
                 # if tx != 3325 or ty != 3207:  # utm 16, US5MSYAF_utm, H13193 (raw bag is in utm15 though) -- gaps in DB and exported enc cells  217849.73 (m), 3307249.86 (m)
                 # if tx != 4614 or ty != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
                 # if tx != 4615 or ty != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
-                # if tx != 4148 or ty != 4370:
+                # if tx != 3500 or ty != 4143:
                 #     continue
-            print(f'processing tile {i_tile + 1} of {len(tile_list)}')
+            # print(f'processing tile {i_tile + 1} of {len(tile_list)}')
             tile_history = accumulation_db.get_tile_history_by_index(tx, ty)
             try:
                 raster_data = tile_history[-1]
@@ -606,14 +1722,19 @@ class WorldDatabase(VABC):
 
             new_arrays = raster_data.get_arrays()
             # just operate on data that falls in this tile
-            pts = survey_data[:, numpy.logical_and(txs == tx, tys == ty)]
+            # pts2 = survey_data[:, numpy.logical_and(txs == tx, tys == ty)]
+            pts = tiles_data[(tx, ty)]
+            # for j in range(pts.shape[1]):
+            #     for i in range(pts2.shape[1]):
+            #         if (pts2[:, i] == pts[:, j]).all():
+            #             print(j, 'found', i)
+            #             break
 
             # replace x,y with row, col for the points
             i, j = raster_data.xy_to_rc_using_dims(new_arrays.shape[1], new_arrays.shape[2], pts[0], pts[1])
             # if there is a contributor ID and callback,
             # pass the existing contributors to the callback function and genenerate as many comparison matrices as needed
             # also allow for depth (elevation) to be placed into the comparison matrices.
-            # @fixme confirm this is working
             if compare_callback is not None and contrib_id is not None:
                 # pts has x,y then columns in RasterData order, so slice off the first two columns
                 sort_vals, new_sort_values, reverse = compare_callback(pts[2:], new_arrays)
@@ -632,16 +1753,20 @@ class WorldDatabase(VABC):
             rd.set_last_contributor(contrib_id, contrib_name)
             tile_history.append(rd)
 
-            # for x, y, depth, uncertainty, score, flag in sorted_pts:
-            #     # fixme: score should be a lookup into the database so that data/decay is considered correctly
-            #
-            #     # @todo If scores are all computed then we could overwrite rapidly based on index,
-            #     #   but has to be sorted by depth so the shallowest sounding in a cell is retained in case there were multiple
-            #     #   We are not trying to implement CUBE or CHRT here, just pick a value and shoalest is safest
-            #     # raster_data = raster_data[]
         return [tuple((int(tx), int(ty))) for tx, ty in tile_list]  # convert to a vanilla python int for compatibility with json
 
     def init_tile(self, tx, ty, tile_history):
+        """
+        Parameters
+        ----------
+        tx
+        ty
+        tile_history
+
+        Returns
+        -------
+
+        """
         # @todo lookup the resolution to use by default.
         #   Probably will be a lookup based on the ENC cell the tile covers and then twice the resolution needed for that cell
         # @todo once resolution is determined then convert to the right size in the coordinate system to represent that sizing in meters
@@ -653,139 +1778,159 @@ class WorldDatabase(VABC):
             # get the x,y bounds and figure out how many pixels (cells) would fit
             lx, ly, ux, uy = self.db.tile_scheme.tile_index_to_xy(tx, ty)
             #  -- since it is supposed to be an exact fit round up any numerical errors and truncate to an int
-            return int(0.00001 + (uy-ly)/self.db.tile_scheme.res_y), int(0.00001+(ux-lx)/self.db.tile_scheme.res_x)
+            return int(0.00001 + (uy - ly) / self.db.tile_scheme.res_y), int(0.00001 + (ux - lx) / self.db.tile_scheme.res_x)
         else:
             return 512, 512
 
-    def insert_survey_vr(self, vr, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, contrib_id=numpy.nan, compare_callback=None, reverse_z=False):
+    def insert_survey_vr(self, vr, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, contrib_id=numpy.nan, compare_callback=None, reverse_z=False,
+                         limit_to_tiles=None, force=False, transaction_id=-1, sorting_metadata=None):
         """
         Parameters
         ----------
         vr
         survey_score
         flag
+        override_epsg
+        contrib_id
+        compare_callback
+        reverse_z
+        limit_to_tiles
+        force
+        transaction_id
+        sorting_metadata
 
         Returns
         -------
 
         """
+        # raise Exception("limit tiles to area of interest, if applicable")
         if not isinstance(vr, bag.VRBag):
             vr = bag.VRBag(vr, mode='r')
+        self.db.LOGGER.debug(f"insert VR bag {vr.filename}")
 
-        print("@todo - do transforms correctly with proj/vdatum etc")
-        if override_epsg == NO_OVERRIDE:
-            epsg = rasterio.crs.CRS.from_string(vr.srs.ExportToWkt()).to_epsg()
-        else:
-            epsg = override_epsg
-        crs_transformer = get_crs_transformer(epsg, self.db.epsg)
+        crs_transformer = self._get_transformer(vr.srs, override_epsg, vr.filename)
 
         # adjust for the VR returning center of supercells and not the edge.
         supercell_half_x = vr.cell_size_x / 2.0
         supercell_half_y = vr.cell_size_y / 2.0
         x1 = vr.minx - supercell_half_x
         y1 = vr.miny - supercell_half_y
+        # noinspection PyUnresolvedReferences  -- nbs needs to update version of HSTP
         x2 = vr.maxx + supercell_half_x
+        # noinspection PyUnresolvedReferences
         y2 = vr.maxy + supercell_half_y
         # convert to target reference system if needed
-        if crs_transformer is not None:
-            ((x1, y1), (x2, y2)) = crs_transformer.transform((x1, x2), (y1, y2))
-        tile_list = self.db.get_tiles_indices(x1, y1, x2, y2)
-        with AreaLock(tile_list, EXCLUSIVE|NON_BLOCKING, self.db.get_history_path_by_index) as lock:
-            if contrib_id is None or contrib_id not in self.included_ids:
-                refinement_list = numpy.argwhere(vr.get_valid_refinements())
-                # in order to speed up the vr processing, which would have narrow strips being processed
-                # use a morton ordering on the tile indices so they are more closely processed in geolocation
-                # and fewer loads/writes are requested of the db tiles (which are slow tiff read/writes)
-                mort = morton.interleave2d_64(refinement_list.T)
-                sorted_refinement_indices = refinement_list[numpy.lexsort([mort])]
+        bounds = poly_from_pts(((x1, y1), (x2, y2)), crs_transformer)
 
-                temp_path = tempfile.mkdtemp(dir=self.db.data_path)
-                storage_db = self.db.make_accumulation_db(temp_path)
-                x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum = None, None, None, None, None, None
-                max_len = 500000
-                all_tiles = set()
-                for iref, (ti, tj) in enumerate(sorted_refinement_indices):
-                    # get an individual refinement and convert it to x,y from the row column system it was in.
-                    refinement = vr.read_refinement(ti, tj)
-                    # todo replace this with
-                    r, c = numpy.indices(refinement.depth.shape)  # make indices into array elements that can be converted to x,y coordinates
-                    pts = numpy.array([r, c, refinement.depth, refinement.uncertainty]).reshape(4, -1)
-                    pts = pts[:, pts[2] != vr.fill_value]  # remove nodata points
+        needs_processing = force or contrib_id is None or contrib_id not in self.included_ids
+        skip_as_disjoint = False
+        if needs_processing and self.area_of_interest and not self.area_of_interest.Intersects(bounds):
+            skip_as_disjoint = True
+        if skip_as_disjoint:
+            self.insert_survey_as_outside_area_of_interest(vr.filename, survey_score, flag, 'vr', override_epsg,
+                                                           contrib_id, reverse_z, transaction_id, sorting_metadata)
+        else:
+            # @todo adjust tile_list for area_of_interest
+            tile_list = self.db.get_tiles_indices(x1, y1, x2, y2)
+            with AreaLock(tile_list, EXCLUSIVE | NON_BLOCKING, self.db.get_history_path_by_index) as lock:
+                if needs_processing:
+                    self.start_survey_insertion(vr.filename, tile_list, contrib_id, transaction_id)
+                    refinement_list = numpy.argwhere(vr.get_valid_refinements())
+                    if self.area_of_interest:
+                        refinements = refinement_list.tolist()
+                        for r in range(len(refinements) - 1, -1, -1):
+                            i, j = refinements[r]
+                            bounds = poly_from_pts(vr.refinement_extents(i, j), crs_transformer)
+                            if not self.area_of_interest.Intersects(bounds):
+                                del refinements[r]
+                        refinement_list = numpy.array(refinements, dtype=refinement_list.dtype)
 
-                    x, y = affine_center(pts[0], pts[1], *refinement.geotransform)  # refinement_llx, resolution_x, 0, refinement_lly, 0, resolution_y)
-                    ptsnew = refinement.get_xy_pts_arrays()
-                    xnew, ynew = ptsnew[:2]
-                    ptsnew = ptsnew[2:]
-                    if not ((x==xnew).all() and (y==ynew).all() and (pts==ptsnew).all()):
-                        raise Exception("mismatch")
+                    if len(refinement_list) == 0:
+                        all_tiles = []
+                    else:
+                        # in order to speed up the vr processing, which would have narrow strips being processed
+                        # use a morton ordering on the tile indices so they are more closely processed in geolocation
+                        # and fewer loads/writes are requested of the db tiles (which are slow tiff read/writes)
+                        mort = morton.interleave2d_64(refinement_list.T)
+                        sorted_refinement_indices = refinement_list[numpy.lexsort([mort])]
 
-                    if _debug:
-                        print("debugging")
-                        # inspect_x, inspect_y = 690134.03, 3333177.81  # ti, tj = (655, 265) in H13190
-                        # if min(x) <  inspect_x and max(x) >inspect_x and min(y)< inspect_y and max(y) > inspect_y:
-                        #     mdata = vr.varres_metadata[ti, tj]
-                        #     resolution_x = mdata["resolution_x"]
-                        #     resolution_y = mdata["resolution_y"]
-                        #     sw_corner_x = mdata["sw_corner_x"]
-                        #     sw_corner_y = mdata["sw_corner_y"]
-                        #     bag_supergrid_dy = vr.cell_size_y
-                        #     bag_llx = vr.minx - bag_supergrid_dx / 2.0  # @todo seems the llx is center of the supergridd cel?????
-                        #     bag_lly = vr.miny - bag_supergrid_dy / 2.0
-                        #     supergrid_x = tj * bag_supergrid_dx
-                        #     supergrid_y = ti * bag_supergrid_dy
-                        #     refinement_llx = bag_llx + supergrid_x + sw_corner_x - resolution_x / 2.0  # @TODO implies swcorner is to the center and not the exterior
-                        #     refinement_lly = bag_lly + supergrid_y + sw_corner_y - resolution_y / 2.0
-                        # else:
-                        #     continue
-                    if crs_transformer:
-                        x, y = crs_transformer.transform(x, y)
-                    depth = pts[2]
-                    if reverse_z:
-                        depth *= -1
-                    uncertainty = pts[3]
-                    scores = numpy.full(x.shape, survey_score)
-                    flags = numpy.full(x.shape, flag)
-                    # it's really slow to add each refinement to the db, so store up points until it's bigger and write at once
-                    if x_accum is None:  # initialize arrays here to get the correct types
-                        x_accum = numpy.zeros([max_len], dtype=x.dtype)
-                        y_accum = numpy.zeros([max_len], dtype=y.dtype)
-                        depth_accum = numpy.zeros([max_len], dtype=depth.dtype)
-                        uncertainty_accum = numpy.zeros([max_len], dtype=uncertainty.dtype)
-                        scores_accum = numpy.zeros([max_len], dtype=scores.dtype)
-                        flags_accum = numpy.zeros([max_len], dtype=flags.dtype)
-                        last_index = 0
-                    # dump the accumulated arrays to the database if they are about to overflow the accumulation arrays
-                    if last_index + len(x) > max_len:
-                        tiles = self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
-                                                              uncertainty_accum[:last_index], scores_accum[:last_index], flags_accum[:last_index])),
-                                                 vr.filename, accumulation_db=storage_db, contrib_id=contrib_id, compare_callback=compare_callback)
-                        all_tiles.update(tiles)
-                        last_index = 0
-                    # append the new data to the end of the accumulation arrays
-                    prev_index = last_index
-                    last_index += len(x)
-                    x_accum[prev_index:last_index] = x
-                    y_accum[prev_index:last_index] = y
-                    depth_accum[prev_index:last_index] = depth
-                    uncertainty_accum[prev_index:last_index] = uncertainty
-                    scores_accum[prev_index:last_index] = scores
-                    flags_accum[prev_index:last_index] = flags
+                        temp_path = tempfile.mkdtemp(suffix="_accum", dir=self.db.data_path)
+                        storage_db = self.db.make_accumulation_db(temp_path)
+                        x_accum, y_accum, depth_accum, uncertainty_accum, scores_accum, flags_accum = None, None, None, None, None, None
+                        max_len = 500000
+                        all_tiles = set()
 
-                if last_index > 0:
-                    tiles = self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
-                                                          uncertainty_accum[:last_index], scores_accum[:last_index], flags_accum[:last_index])),
-                                             vr.filename, accumulation_db=storage_db, contrib_id=contrib_id, compare_callback=compare_callback)
-                    all_tiles.update(tiles)
-                self.db.append_accumulation_db(storage_db)
-                shutil.rmtree(storage_db.data_path, onerror=onerr)
-                # @fixme make sure vr.name is correct for full path
-                # fixme need to use a blocking locker on writing the metadata to the world_database
-                self.finished_survey_insertion(vr.name, all_tiles, contrib_id)
-            else:
-                raise Exception(f"Survey Exists already in database {contrib_id}")
+                        for ti, tj in tqdm(sorted_refinement_indices, desc='refinement', mininterval=.7, leave=False):
+                            # get an individual refinement and convert it to x,y from the row column system it was in.
+                            refinement = vr.read_refinement(ti, tj)
+                            # todo replace this with
+                            r, c = numpy.indices(refinement.depth.shape)  # make indices into array elements that can be converted to x,y coordinates
+                            pts = numpy.array([r, c, refinement.depth, refinement.uncertainty]).reshape(4, -1)
+                            pts = pts[:, pts[2] != vr.fill_value]  # remove nodata points
+
+                            x, y = affine_center(pts[0], pts[1],
+                                                 *refinement.geotransform)  # refinement_llx, resolution_x, 0, refinement_lly, 0, resolution_y)
+                            ptsnew = refinement.get_xy_pts_arrays()
+                            xnew, ynew = ptsnew[:2]
+                            ptsnew = ptsnew[2:]
+                            # noinspection PyUnresolvedReferences
+                            if not ((x == xnew).all() and (y == ynew).all() and (pts == ptsnew).all()):
+                                raise Exception("mismatch")
+
+                            if crs_transformer:
+                                x, y = crs_transformer.transform(x, y)
+                            depth = pts[2]
+                            if reverse_z:
+                                depth *= -1
+                            uncertainty = pts[3]
+                            scores = numpy.full(x.shape, survey_score)
+                            flags = numpy.full(x.shape, flag)
+                            # it's really slow to add each refinement to the db, so store up points until it's bigger and write at once
+                            if x_accum is None:  # initialize arrays here to get the correct types
+                                x_accum = numpy.zeros([max_len], dtype=x.dtype)
+                                y_accum = numpy.zeros([max_len], dtype=y.dtype)
+                                depth_accum = numpy.zeros([max_len], dtype=depth.dtype)
+                                uncertainty_accum = numpy.zeros([max_len], dtype=uncertainty.dtype)
+                                scores_accum = numpy.zeros([max_len], dtype=scores.dtype)
+                                flags_accum = numpy.zeros([max_len], dtype=flags.dtype)
+                                last_index = 0
+                            # dump the accumulated arrays to the database if they are about to overflow the accumulation arrays
+                            if last_index + len(x) > max_len:
+                                tiles = self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
+                                                                              uncertainty_accum[:last_index], scores_accum[:last_index],
+                                                                              flags_accum[:last_index])),
+                                                                 vr.filename, accumulation_db=storage_db, contrib_id=contrib_id,
+                                                                 compare_callback=compare_callback, limit_to_tiles=limit_to_tiles)
+                                all_tiles.update(tiles)
+                                last_index = 0
+                            # append the new data to the end of the accumulation arrays
+                            prev_index = last_index
+                            last_index += len(x)
+                            x_accum[prev_index:last_index] = x
+                            y_accum[prev_index:last_index] = y
+                            depth_accum[prev_index:last_index] = depth
+                            uncertainty_accum[prev_index:last_index] = uncertainty
+                            scores_accum[prev_index:last_index] = scores
+                            flags_accum[prev_index:last_index] = flags
+
+                        if last_index > 0:
+                            tiles = self.insert_survey_array(numpy.array((x_accum[:last_index], y_accum[:last_index], depth_accum[:last_index],
+                                                                          uncertainty_accum[:last_index], scores_accum[:last_index],
+                                                                          flags_accum[:last_index])),
+                                                             vr.filename, accumulation_db=storage_db, contrib_id=contrib_id,
+                                                             compare_callback=compare_callback)
+                            all_tiles.update(tiles)
+                        self.db.append_accumulation_db(storage_db)
+                        self.db.remove_accumulation_db(storage_db)
+                        del storage_db
+                    self.finished_survey_insertion(vr.filename, all_tiles, contrib_id, override_epsg, reverse_z, survey_score, flag, dformat="vr",
+                                                   transaction_id=transaction_id, sorting_metadata=sorting_metadata)
+                else:
+                    raise Exception(f"Survey Exists already in database {contrib_id}")
 
     def insert_survey_gdal(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, data_band=1, uncert_band=2,
-                           contrib_id=numpy.nan, compare_callback=None, reverse_z=False):
+                           contrib_id=numpy.nan, compare_callback=None, reverse_z=False, limit_to_tiles=None, force=False,
+                           transaction_id=-1, sorting_metadata=None):
         """ Insert a gdal readable dataset into the database.
         Currently works for BAG and probably geotiff.
         Parameters
@@ -796,46 +1941,77 @@ class WorldDatabase(VABC):
             score to use with the survey when combining into the database
         flag
             flag to apply when inserting the survey into the database
+        override_epsg
+        data_band
+        uncert_band
+        contrib_id
+        compare_callback
+        reverse_z
+        limit_to_tiles
+        force
+        transaction_id
+        sorting_metadata
 
         Returns
         -------
-        None
 
         """
         # @fixme rasterdata on disk is not storing the survey_ids?  Forgot to update/write metadata?
 
         # metadata = {**dataset.GetMetadata()}
         # pixel_is_area = True if 'AREA_OR_POINT' in metadata and metadata['AREA_OR_POINT'][:-2] == 'Area' else False
-
+        self.db.LOGGER.debug(f"insert gdal dataset {path_to_survey_data}")
         ds = gdal.Open(str(path_to_survey_data))
         drv = ds.GetDriver()
         driver_name = drv.ShortName
         geotransform = ds.GetGeoTransform()
-        if override_epsg == NO_OVERRIDE:
-            epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
-        else:
-            epsg = override_epsg
-        # fixme - do coordinate transforms correctly
-        print("@todo - do transforms correctly with proj/vdatum etc")
-        crs_transformer = get_crs_transformer(epsg, self.db.epsg)
+        crs_transformer = self._get_transformer(ds.GetSpatialRef(), override_epsg, path_to_survey_data)
 
         x1, y1 = affine_center(0, 0, *geotransform)
         x2, y2 = affine_center(ds.RasterYSize, ds.RasterXSize, *geotransform)
-        if crs_transformer is not None:
-            ((x1, y1), (x2, y2)) = crs_transformer.transform((x1, x2), (y1,y2))
-        tile_list = self.db.get_tiles_indices(x1, y1, x2, y2)
-        with AreaLock(tile_list, EXCLUSIVE|NON_BLOCKING, self.db.get_history_path_by_index) as lock:
-            if contrib_id is None or contrib_id not in self.included_ids:
-                temp_path = tempfile.mkdtemp(dir=self.db.data_path)
-                storage_db = self.db.make_accumulation_db(temp_path)
-                all_tiles = set()
-                # read the data array in blocks
-                # if geo_debug and False:
-                #     col_block_size = col_size
-                #     row_block_size = row_size
+        bounds = poly_from_pts(((x1, y1), (x2, y2)), crs_transformer)
 
-                # @fixme -- bands 1,2 means bag works but single band will fail
-                for ic, ir, nodata, (data, uncert) in iterate_gdal_image(ds, (data_band, uncert_band)):
+        needs_processing = force or contrib_id is None or contrib_id not in self.included_ids
+        skip_as_disjoint = False
+        if needs_processing and self.area_of_interest and not self.area_of_interest.Intersects(bounds):
+            skip_as_disjoint = True
+        if skip_as_disjoint:
+            self.insert_survey_as_outside_area_of_interest(path_to_survey_data, survey_score, flag, 'gdal', override_epsg,
+                                                           contrib_id, reverse_z, transaction_id, sorting_metadata)
+        else:
+            tile_list = self.db.get_tiles_indices(x1, y1, x2, y2)
+            with AreaLock(tile_list, EXCLUSIVE | NON_BLOCKING, self.db.get_history_path_by_index) as lock:
+                if needs_processing:
+                    self.start_survey_insertion(path_to_survey_data, tile_list, contrib_id, transaction_id)
+                    temp_path = tempfile.mkdtemp(suffix="_accum", dir=self.db.data_path)
+                    storage_db = self.db.make_accumulation_db(temp_path)
+                    all_tiles = set()
+                    # read the data array in blocks
+                    # if geo_debug and False:
+                    #     col_block_size = col_size
+                    #     row_block_size = row_size
+
+                    if self.area_of_interest:
+                        aoi_x1, aoi_x2, aoi_y1, aoi_y2 = self.area_of_interest.GetEnvelope()
+                        inv_crs_transform = self._get_transformer(ds.GetSpatialRef(), override_epsg, path_to_survey_data, inv=True)
+                        if inv_crs_transform is not None:  # convert all four corners of the envelope as it won't be square in reprojected CRS
+                            (xs, ys) = inv_crs_transform.transform([aoi_x1, aoi_x1, aoi_x2, aoi_x2], [aoi_y1, aoi_y2, aoi_y2, aoi_y1])
+                            aoi_x1, aoi_x2 = min(xs), max(xs)
+                            aoi_y1, aoi_y2 = min(ys), max(ys)
+                        ([r1, r2], [c1, c2]) = inv_affine([aoi_x1, aoi_x2], [aoi_y1, aoi_y2], *geotransform)
+                        start_row = int(min(r1, r2))
+                        start_row = max(start_row, 0)
+                        start_col = int(min(c1, c2))
+                        start_col = max(start_col, 0)
+                        end_row = int(max(r1, r2) + 1)
+                        end_col = int(max(c1, c2) + 1)
+                    else:
+                        start_row, start_col = 0, 0
+                        end_row, end_col = None, None
+                    # @fixme -- bands 1,2 means bag works but single band will fail
+                    for ic, ir, nodata, (data, uncert) in iterate_gdal_image(ds, band_nums=(data_band, uncert_band), min_block_size=4096,
+                                                                             max_block_size=8192, start_col=start_col, start_row=start_row,
+                                                                             end_col=end_col, end_row=end_row):
                         # if _debug:
                         #     if ic > 1:
                         #         break
@@ -846,7 +2022,17 @@ class WorldDatabase(VABC):
                         c += ic
                         # pts = numpy.dstack([r, c, data, uncert]).reshape((-1, 4))
                         pts = numpy.array([r, c, data, uncert]).reshape(4, -1)
-                        pts = pts[:, pts[2] != nodata]  # remove nodata points
+                        # @todo consider changing this to use the where_not_nodata function
+                        if nodata is None or numpy.isnan(nodata):
+                            pts = pts[:, ~numpy.isnan(pts[2])]
+                        else:
+                            # found in a 32bit float that gdal is returning a double precision number inf (1.7976931348623157e+308)
+                            # which wouldn't match the data which had INF so we'll remove data by numpy.inf and the value itself
+                            if not numpy.isinf(nodata) and nodata in (numpy.finfo(numpy.float32).max, numpy.finfo(numpy.float64).max,):
+                                pts = pts[:, pts[2] != numpy.inf]  # remove nodata points
+                            elif not numpy.isinf(nodata) and nodata in (numpy.finfo(numpy.float32).min, numpy.finfo(numpy.float64).min):
+                                pts = pts[:, pts[2] != -numpy.inf]  # remove nodata points
+                            pts = pts[:, pts[2] != nodata]  # remove nodata points
                         # pts = pts[:, pts[2] > -18.2]  # reduce points to debug
                         if pts.size > 0:
                             # if driver_name == 'BAG':
@@ -887,26 +2073,29 @@ class WorldDatabase(VABC):
                             scores = numpy.full(x.shape, survey_score)
                             flags = numpy.full(x.shape, flag)
                             tiles = self.insert_survey_array(numpy.array((x, y, depth, uncertainty, scores, flags)), path_to_survey_data,
-                                                             accumulation_db=storage_db, contrib_id=contrib_id, compare_callback=compare_callback)
+                                                             accumulation_db=storage_db, contrib_id=contrib_id, compare_callback=compare_callback,
+                                                             limit_to_tiles=limit_to_tiles)
                             all_tiles.update(tiles)
-                self.db.append_accumulation_db(storage_db)
-                shutil.rmtree(storage_db.data_path)
-                # @fixme -- turn all_tiles into one consistent, unique list.  Is list of lists with duplicates right now
-                # fixme need to use a blocking locker on writing the metadata to the world_database
-                self.finished_survey_insertion(path_to_survey_data, all_tiles, contrib_id)
-            else:
-                raise Exception(f"Survey Exists already in database {contrib_id}")
+                    self.db.append_accumulation_db(storage_db)
+                    self.db.remove_accumulation_db(storage_db)
+                    del storage_db
+                    # @fixme -- turn all_tiles into one consistent, unique list.  Is list of lists with duplicates right now
+                    self.finished_survey_insertion(path_to_survey_data, all_tiles, contrib_id, override_epsg, reverse_z, survey_score, flag,
+                                                   dformat="gdal", transaction_id=transaction_id, sorting_metadata=sorting_metadata)
+                else:
+                    raise Exception(f"Survey Exists already in database {contrib_id}")
 
     def export_area(self, fname, x1, y1, x2, y2, res, target_epsg=None, driver="GTiff",
                     layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
-                    gdal_options=("BLOCKXSIZE=256", "BLOCKYSIZE=256", "TILED=YES", "COMPRESS=LZW", "BIGTIFF=YES"), compare_callback=None):
+                    gdal_options=("BLOCKXSIZE=256", "BLOCKYSIZE=256", "TILED=YES", "COMPRESS=LZW", "BIGTIFF=YES"),
+                    compare_callback=None, align=True):
         """ Retrieves an area from the database at the requested resolution.
 
         # 1) Create a single tif tile that covers the area desired
         # 2) Get the master db tile indices that the area overlaps and iterate them
         # 3) Read the single tif sub-area as an array that covers this tile being processed
         # 4) Use the db.tile_scheme function to convert points from the tiles to x,y
-        # 5) @todo make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
+        # 5) Make sure the tiles aren't locked, and put in a read lock so the data doesn't get changed while we are reading
         # 6) Sort on score in case multiple points go into a position that the right value is retained
         #      sort based on score then on depth so the shoalest top score is kept
         # 7) Use affine crs_transform convert x,y into the i,j for the exported area
@@ -933,44 +2122,127 @@ class WorldDatabase(VABC):
             gdal driver name to use
         layers
             Layers to extract from the database into the output file.  Defaults to Elevation, Uncertainty and Contributor
-
+        gdal_options
+        compare_callback
+        align
         Returns
         -------
         int, dataset
             number of database tiles that supplied data into the export area, open gdal dataset for the file location specified
 
         """
+        if not target_epsg:
+            target_epsg = self.db.tile_scheme.epsg
         # 1) Create a single tif tile that covers the area desired
+        # probably won't export the score layer but we need it when combining data into the export area
+        dataset, dataset_score = self.make_export_rasters(fname, x1, y1, x2, y2, res,
+                                                          target_epsg=target_epsg, driver=driver, layers=layers,
+                                                          gdal_options=gdal_options, align=align)
+
+        tile_count = self.export_into_raster(dataset, dataset_score, target_epsg=target_epsg, layers=layers, compare_callback=compare_callback)
+        score_name = dataset_score.GetDescription()
+        del dataset_score
+        try:
+            os.remove(score_name)
+        except PermissionError:
+            gc.collect()
+            try:
+                os.remove(score_name)
+            except PermissionError:
+                print(f"Failed to remove {score_name}, permission denied (in use?)")
+        return tile_count, dataset
+
+    def make_export_rasters(self, fname, x1, y1, x2, y2, res, target_epsg=None, driver="GTiff",
+                            layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
+                            gdal_options=("BLOCKXSIZE=256", "BLOCKYSIZE=256", "TILED=YES", "COMPRESS=LZW", "BIGTIFF=YES"),
+                            align=True):
+        """
+        Parameters
+        ----------
+        fname
+        x1
+        y1
+        x2
+        y2
+        res
+        target_epsg
+        driver
+        layers
+        gdal_options
+        align
+
+        Returns
+        -------
+
+        """
+        # @TODO change align flag to be None/center/edge for no alignment, cell centers match (like bag format) or cell edge (like geotiff)
+        try:
+            dx, dy = res
+        except TypeError:
+            dx = dy = res
+        if not target_epsg:
+            target_epsg = self.db.tile_scheme.epsg
+
+        fname = pathlib.Path(fname)
+        score_name = fname.with_suffix(".score" + fname.suffix)
+        if align:
+            align_y, align_x = self.db.tile_scheme.min_y, self.db.tile_scheme.min_x
+        else:
+            align_x = align_y = None
+        dataset = make_gdal_dataset_area(fname, len(layers), x1, y1, x2, y2, dx, dy, target_epsg, driver,
+                                         gdal_options, align_x=align_x, align_y=align_y)
+        for index, band_info in enumerate(layers):
+            band = dataset.GetRasterBand(index + 1)
+            band.SetDescription(LayersEnum(band_info).name)
+            del band
+        # probably won't export the score layer but we need it when combining data into the export area
+        dataset_score = make_gdal_dataset_area(score_name, 3, x1, y1, x2, y2, dx, dy, target_epsg, driver, align_x=align_x, align_y=align_y)
+        return dataset, dataset_score
+
+    def export_into_raster(self, dataset, dataset_score, target_epsg=None,
+                           layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
+                           compare_callback=None):
+        """
+        Parameters
+        ----------
+        dataset
+        dataset_score
+        target_epsg
+        layers
+        compare_callback
+
+        Returns
+        -------
+
+        """
         if not target_epsg:
             target_epsg = self.db.tile_scheme.epsg
         crs_transform = get_crs_transformer(self.db.tile_scheme.epsg, target_epsg)
         inv_crs_transform = get_crs_transformer(target_epsg, self.db.tile_scheme.epsg)
 
-        try:
-            dx, dy = res
-        except TypeError:
-            dx = dy = res
-
-        fname = pathlib.Path(fname)
-        score_name = fname.with_suffix(".score" + fname.suffix)
-
-        dataset = make_gdal_dataset_area(fname, len(layers), x1, y1, x2, y2, dx, dy, target_epsg, driver, gdal_options)
-        # probably won't export the score layer but we need it when combining data into the export area
-
-        dataset_score = make_gdal_dataset_area(score_name, 3, x1, y1, x2, y2, dx, dy, target_epsg, driver)
-
         affine_transform = dataset.GetGeoTransform()  # x0, dxx, dyx, y0, dxy, dyy
-        score_band = dataset_score.GetRasterBand(1)
-        score_key2_band = dataset_score.GetRasterBand(2)
-        max_cols, max_rows = score_band.XSize, score_band.YSize
+
+        max_cols, max_rows = dataset.RasterXSize, dataset.RasterYSize
 
         # 2) Get the master db tile indices that the area overlaps and iterate them
+        x1, y1 = affine(0, 0, *affine_transform)
+        x2, y2 = affine(max_rows - 1, max_cols - 1, *affine_transform)
         if crs_transform:
             overview_x1, overview_y1, overview_x2, overview_y2 = transform_rect(x1, y1, x2, y2, inv_crs_transform.transform)
         else:
             overview_x1, overview_y1, overview_x2, overview_y2 = x1, y1, x2, y2
         tile_count = 0
-        for txi, tyi, tile_history in self.db.iter_tiles(overview_x1, overview_y1, overview_x2, overview_y2):
+
+        cnt_histories = 0
+        # @todo change functions in backends to iterate tile paths and then build on that for iterating tiles (instead of just tiles)
+        for tx, ty in self.db.get_tiles_indices(overview_x1, overview_y1, overview_x2, overview_y2):
+            hist_path = self.db.get_history_path_by_index(tx, ty)
+            if self.db.storage_class.exists(hist_path):
+                cnt_histories += 1
+
+        # for txi, tyi, tile_history in self.db.iter_tiles(overview_x1, overview_y1, overview_x2, overview_y2, no_create=True):
+        for txi, tyi, tile_history in tqdm(self.db.iter_tiles(overview_x1, overview_y1, overview_x2, overview_y2, no_create=True),
+                                            total=cnt_histories, desc='bruty tile', mininterval=.7, leave=False):
             # if txi != 3325 or tyi != 3207:  # utm 16, US5MSYAF_utm, H13193 -- gaps in DB and exported enc cells  217849.73 (m), 3307249.86 (m)
             # if txi != 4614 or tyi != 3227:  # utm 15 h13190 -- area with res = 4.15m (larger than the 4m output)
             #     continue
@@ -1016,21 +2288,91 @@ class WorldDatabase(VABC):
             # send the data to disk, I forget if this has any affect other than being able to look at the data in between steps to debug progress
             dataset.FlushCache()
             dataset_score.FlushCache()
-        del score_key2_band, score_band, dataset_score
-        try:
-            os.remove(score_name)
-        except PermissionError:
-            gc.collect()
-            try:
-                os.remove(score_name)
-            except PermissionError:
-                print(f"Failed to remove {score_name}, permission denied (in use?)")
-        return tile_count, dataset
+        return tile_count
+
+    def fast_extract(self, x1, y1, x2, y2, layers=(LayersEnum.ELEVATION,)):
+        """ Quickly extract data.  This can only be used by databases that used an ExactTilingScheme so the indexing is uniform.
+
+        This function will basically grab the data and just insert into an output array at the same resolution as the underlying data.
+        This is faster because the scoring comparison is not needed and the CRS transforms are not applicable.
+        The only thing needed is to figure out the database indices mapping to the output array.
+
+        Returns
+        -------
+
+        """
+        if not isinstance(self.db.tile_scheme, ExactTilingScheme):
+            raise TypeError("The tile scheme for this database is not derived from ExactTilingScheme "
+                            "and this function can not be used since the tile sizes aren't uniform")
+
+        txs, tys = self.db.tile_scheme.xy_to_tile_index(numpy.array([x1, x2]), numpy.array([y1, y2]))
+        txs = list(range(min(txs), max(txs) + 1))
+        tys = list(range(min(tys), max(tys) + 1))
+        cols = numpy.zeros(len(txs), numpy.int)
+        rows = numpy.zeros(len(tys), numpy.int)
+
+        # # @todo figure out the starting position and what its row/column is and make that the origin
+        # nr, nc = self.init_tile(txs[0], tys[0], None)
+        # start_row, start_col = xy_to_rc_using_dims
+        # # @todo figure out the amount to trim at the end also
+        # nr, nc = self.init_tile(txs[-1], tys[-1], None)
+        # end_row, end_col = xy_to_rc_using_dims
+
+        total_cols = 0
+        for itx, tx in enumerate(txs):
+            cols[itx] = total_cols
+            nr, nc = self.init_tile(tx, tys[0], None)
+            total_cols += nc
+
+        total_rows = 0
+        for ity, ty in enumerate(tys):
+            rows[ity] = total_rows
+            nr, nc = self.init_tile(txs[0], ty, None)
+            total_rows += nr
+        rr, cc = numpy.meshgrid(rows, cols)
+        indices = numpy.transpose([rr, cc])
+
+        # @FIXME is float32 going to work with contributor being a large integer value?
+        output_array = numpy.full([len(layers), total_rows, total_cols], numpy.nan, numpy.float32)
+
+        for icol, tx in enumerate(txs):
+            for irow, ty in enumerate(tys):
+                tile_history = self.db.get_tile_history_by_index(tx, ty)
+                try:
+                    raster_data = tile_history[-1]
+                    arrays = raster_data.get_arrays(layers)
+                    start_row, start_col = indices[irow, icol]
+                    output_array[:, start_row:start_row + arrays.shape[1], start_col:start_col + arrays.shape[2]] = arrays
+                except IndexError:
+                    # if the db is empty then nothing to do
+                    pass
+        return output_array, txs, tys, indices
 
     @staticmethod
     def merge_rasters(tile_layers, tile_scoring, raster_data,
                       crs_transform, affine_transform, start_col, start_row, block_cols, block_rows,
                       dataset, layers, dataset_score, reverse_sort=(False, False, False)):
+        """
+        Parameters
+        ----------
+        tile_layers
+        tile_scoring
+        raster_data
+        crs_transform
+        affine_transform
+        start_col
+        start_row
+        block_cols
+        block_rows
+        dataset
+        layers
+        dataset_score
+        reverse_sort
+
+        Returns
+        -------
+
+        """
         output_scores = []
         for i in range(len(tile_scoring)):
             score_band = dataset_score.GetRasterBand(i + 1)
@@ -1061,356 +2403,418 @@ class WorldDatabase(VABC):
             band = dataset.GetRasterBand(band_num + 1)
             band.WriteArray(export_sub_area[band_num], start_col, start_row)
         for i in range(len(tile_scoring)):
-            score_band = dataset_score.GetRasterBand(i+1)
+            score_band = dataset_score.GetRasterBand(i + 1)
             score_band.WriteArray(sort_key_scores[i], start_col, start_row)
-
 
     def extract_soundings(self):
         # this is the same as extract area except score = depth
-        pass
+        raise NotImplementedError
 
     def soundings_from_caris_combined_csar(self):
         # Either fill a world database and then extract soundings or
         # generalize the inner loop of extract area then use it against csar data directly
-        pass
+        raise NotImplementedError
 
     def export_at_date(self, area, date):
-        pass
+        raise NotImplementedError
 
-    def remove_survey(self, survey_id):
-        pass
+    def clean(self, removals, compare_callback=None, transaction_id=-1, subprocesses=5):
+        """
+        Parameters
+        ----------
+        invalid_score_surveys
+        unfinished_surveys
+        out_of_sync
+        compare_callback
+        transaction_id
+        subprocesses
 
-    def revise_survey(self, survey_id, survey_data):
-        pass
+        Returns
+        -------
+
+        """
+        # removals = set()
+        # removals.update(invalid_score_surveys)
+        # removals.update(unfinished_surveys)
+        # removals.update(out_of_sync)
+        self.remove_and_recompute(removals, compare_callback=compare_callback, transaction_id=transaction_id, subprocesses=subprocesses)
+
+    def remove_survey(self, contributor, transaction_id=-1):
+        """ Will remove a survey from all the tiles it had been appled to.
+        Returns a list of the tiles affected and the IDs that had been processed after the removed contributor.
+        Those contributors that came after are also removed from the listed tiles.
+        The caller should then re-insert those contributors or remove them from the database also.
+        See reinsert_surveys_in_tiles and remove_and_recompute functions.
+
+        Imagine a high accuracy/score survey was inserted and then some low accuracy/score surveys are added.
+        The high accuracy data would prevent the low accuracy from ever appearing in the history.
+        Then it is discoverd that the high scoring survey had errors in it (say, bad vessel offsets) and needs to be removed.
+        The low accuracy data would never have appeared in the history so removing the high accuracy survey would leave a hole.
+        This is why the caller makes the decision to remove or re-insert the data.
+
+        Will raise nbs_locks.LockNotAcquired if the tiles are already in use and should be tried again later.
+
+        Parameters
+        ----------
+        contributor
+        transaction_id
+
+        Returns
+        -------
+        dict
+            keys are survey ids affected, values are sets of the tiles affected for that survey
+        """
+        # 1) Find all the tiles the ID falls in and make a master list of tile numbers (this is in master metadata record?)
+        # 1a) Lock all the tiles for write access
+        # 2) For each Tile, find where in the history of the tile the ID was
+        # 3) Find all the IDs that came after it's insertion and add to a master list of IDs
+        # 4) Revert all the tiles back to the state before the ID was inserted
+        # 5) Remove the ID from the master list of IDs that are included in the database
+
+        # 1) Find all the tiles the ID falls in and make a master list of tile numbers (this is in master metadata record?)
+        try:
+            rec = self.started_ids[contributor]
+        except KeyError:
+            rec = self.included_ids[contributor]
+        path_to_file, tile_list = rec.survey_path, rec.tiles
+        self.db.LOGGER.debug(f"Trying to remove contributor {contributor} - try lock for:")
+        self.db.LOGGER.debug(f"  path to file was {path_to_file} in tiles {tile_list}")
+        # 1a) Lock all the tiles for write access
+        with AreaLock(tile_list, EXCLUSIVE | NON_BLOCKING, self.db.get_history_path_by_index) as lock:
+            self.db.LOGGER.info(f"removing contributor {contributor}")
+            # add to the removed listing before we take it out of the overall metadata
+            data = self.removed_ids.data_class()
+            data.nbs_id = contributor
+            data.tiles = tile_list
+            data.affects = "TBD"
+            data.transaction_id = transaction_id
+            data.started = 1
+            data.finished = 0
+            new_id = self.removed_ids.add_oid_record(data)  # (contributor, tile_list, "TBD", transaction_id, 1, 0))
+            contributor_tiles = {}  # master list of other contributors that will be affected by removing the requested contributor
+            for tx, ty in tile_list:
+                tile_history = self.db.get_tile_history_by_index(tx, ty, no_create=True)
+                if tile_history is not None:
+                    remove_index = None
+                    for t in range(len(tile_history)):
+                        # meta = tile_history.get_metadata()['contributors']
+                        current_contrib = tile_history.history[t].get_metadata()['contrib_id']
+                        # 2) For each Tile, find where in the history of the tile the ID was
+                        if current_contrib == contributor:
+                            if remove_index is None:  # if the contributor is listed twice (perhaps a crash during load) then ignore the second occurrence
+                                remove_index = t
+                        # 3) Find all the IDs that came after it's insertion and add to a master list of IDs
+                        if remove_index is not None:  # we'd found the desired contributor already
+                            if current_contrib != contributor:
+                                contributor_tiles.setdefault(current_contrib, set())
+                                contributor_tiles[current_contrib].add((int(tx), int(ty)))
+                    # 4) Revert all the tiles back to the state before the ID was inserted
+                    # remove the history entries from the requested contributor to the end
+                    if remove_index is not None:
+                        del tile_history[remove_index:]
+            data.affects = ",".join([str(c) for c in contributor_tiles])
+            data.finished = 1
+            self.removed_ids[new_id] = data
+            # (contributor, tile_list, ",".join([str(c) for c in contributor_tiles]), transaction_id, 1, 1)
+
+            # 5) Remove the ID from the master list of IDs that are included in the database
+            # remove the contributor from the master metadata list
+            # (the contributor list holds contributors that are edited and either need to be removed or re-inserted)
+            with FileLock(self.metadata_filename(), self.metadata_mode(), EXCLUSIVE) as metadata_file:
+                # backup_path1 = self.metadata_filename().parent.joinpath("wdb_metadata.bak1")
+                # self.to_file(backup_path1)
+
+                # update the metadata in case another process wrote to it since the last time we updated/loaded
+                # self.update_metadata_from_disk(locked_file=metadata_file)  # removed with switch to sqlite
+
+                # add the new survey to the metadata and store to disk
+                # json doesn't like pathlib.Paths to be stored -- convert to strings
+                try:
+                    del self.included_surveys[path_to_file]
+                except KeyError:
+                    pass  # must not have finished this survey (crashed in processing)
+                del self.started_surveys[path_to_file]
+
+                try:
+                    del self.included_ids[int(contributor)]
+                except KeyError:
+                    pass  # must not have finished this survey (crashed in processing)
+                try:
+                    del self.started_ids[contributor]
+                except KeyError:
+                    try:
+                        del self.started_ids[str(contributor)]
+                    except KeyError:
+                        try:
+                            del self.started_ids[int(contributor)]
+                        except KeyError:
+                            self.db.LOGGER.warning(f"While removing {contributor}, it was not found in started_ids table.  The database may still be corrupt - a full scan of contributor layers would have to be done to be certain." )
+
+                # Sqlite file updates immediately, so no longer need to call to_file() which only stores the class setup.
+                # # rather than overwrite, since we have it locked, truncate the file and then write new data to it
+                # metadata_file.seek(0)
+                # metadata_file.truncate(0)
+                # self.to_file(locked_file=metadata_file)
+
+        self.db.LOGGER.debug(f"removing contributor {contributor} will affect {len(contributor_tiles)} contributors: {contributor_tiles}")
+        return contributor_tiles
+
+    def reinsert_from_sqlite(self, comp_callback=None):
+        """ Use the metadata to try and reinsert contributors from disk.
+        This is useful when removing a survey which then requires all surveys after it to be reprocessed.
+        Optionally can restrict insert to only certain tile indices,
+        useful when a survey is removed and not the entire database area needs to be reprocessed.
+
+        Parameters
+        ----------
+
+        Returns
+        -------
+
+        """
+        recs = True
+        skips = 0
+        while len(self.reinserts.unfinished_records()) > 0:
+            # this stops a race condition where the process that did the work on the last survey gets shut out by the other processes overwhelming the lock server
+            time.sleep(2)
+            for reinsert_rec in self.reinserts.unfinished_records():  # if we use the generator it may have trouble when records are removed by other processes
+                oid = reinsert_rec.oid
+                contributor = reinsert_rec.nbs_id
+                try:
+                    included_rec = self.included_ids[contributor]
+                except KeyError:
+                    try:
+                        included_rec = self.included_ids[str(contributor)]
+                    except KeyError:
+                        try:
+                            included_rec = self.included_ids[int(contributor)]
+                        except KeyError:
+                            # if the contributor to reinsert is not in the included_ids list then remove the reinsert as either:
+                            # 1) There was an error during insert, or
+                            # 2) there was a change in the metadata tables or other bug.
+                            # Removing it from the reinsert list should then cause it to get cleaned up in one of the QC runs.
+                            # Either as data in a tile but not in the DB or an unfinished insert (in 'started_ids' but not 'inserted_ids')
+                            self.db.LOGGER.warning(
+                                f"{contributor} was found in the reinsert list but not in the included_ids\nThis should get automatically cleaned up but PLEASE CONFIRM the DB is not otherwise corrupt.")
+                            for tx, ty in reinsert_rec.tiles:
+                                tile_history = self.db.get_tile_history_by_index(tx, ty)
+                                contribs = tile_history.get_metadata()['contributors'].keys()
+                                if contributor in contribs or contributor in map(int, contribs):
+                                    self.db.LOGGER.warning(f"{contributor} was found in the reinsert list but not in the included_ids yet in the bruty internal tiles at ({tx},{ty})!!!")
+                            del self.reinserts[oid]
+                            continue
+                fname = included_rec.survey_path
+                override_epsg = included_rec.epsg
+                reverse_z = included_rec.reverse_z
+                dformat = included_rec.dformat
+                trans_id = included_rec.transaction_id
+
+                try:
+                    lock = FileLock(fname)  # this doesn't work with the file lock - just the multiprocessing locks
+                    if lock.acquire():
+                        rec = self.reinserts[oid]
+                        if not rec.finished:  # still in the database, did another process remove it?
+                            self.reinserts.set_started(oid)
+                            self.insert_survey(fname, contrib_id=rec.nbs_id, compare_callback=comp_callback, override_epsg=override_epsg,
+                                               reverse_z=reverse_z,
+                                               limit_to_tiles=rec.tiles, force=True, dformat=dformat, transaction_id=trans_id)
+                            self.reinserts.set_finished(oid)
+                        lock.release()
+                    else:
+                        # print(f"{path} was locked - probably another process is working on it")
+                        raise LockNotAcquired()
+                except LockNotAcquired:
+                    skips += 1
+                    if skips % 20 == 0:
+                        print(os.getpid(), 'files in use for ', contributor, fname)
+                        print(f'skipped {skips} times so far')
+
+                # Added limit_to_tiles to address this --
+                # fixme surveys can be inserted into a tile multiple times - Imagine inserting survey numbers 1,2,3,4 in order
+                #    If two surveys (1,4) are removed and they both overlap a survey (2) then the overlapped survey will be re-inserted into
+                #    all tiles (1,4) fell in, even if #2 wasn't removed in the areas that had tile 4 since #2 had been inserted first.
+                #    So, this tile in question may have had surveys 2,3,4 in it's contributor then #4 is removed which would not list #2 as needing removal
+                #    In a different tile surveys 1,2 were listed - and when #1 is removed then #2 is listed for reinsertion.
+                #    This means that the 2,3,4 tile will reprocess #2 and it's tile history will show 2,3,2  (duplicate #2 entries)
+                #    Either remove one at a time (which has some efficiency issues or check on re-insert if the survey is already in the history,
+                #    or just live with the duplicate (it doesn't hurt much).
+    def add_reinserts(self, contributors:dict):
+        existing_unfinished = {rec.nbs_id: rec for rec in self.reinserts.unfinished_records()}
+
+        for contrib, tiles in contributors.items():
+            try:
+                existing = existing_unfinished[contrib]
+                updated = set(existing.tiles)
+                updated.update(tiles)
+                existing.tiles = updated
+                self.reinserts[existing.oid] = existing  # set the data back into the file
+            except KeyError:
+                self.reinserts.add_oid_record((contrib, tuple(tiles), 0, 0))
+
+    def remove_and_recompute(self, contributors: (int, float, list, tuple), compare_callback=None, subprocesses=5, transaction_id=-1):
+        """ Remove the given contributor IDs and then attempt to reinsert the contributors that would have been affected by the surveys being removed.
+
+        Parameters
+        ----------
+        contributors
+        compare_callback
+        subprocesses
+        transaction_id
+
+        Returns
+        -------
+
+        """
+        # if not isinstance(contributors, collections.abc.Iterable):
+        try:
+            iter(contributors)
+        except TypeError:
+            contributors = [contributors]
+        self.db.LOGGER.info(f"removing and recomputing for contributors: {contributors}")
+        affected_contributors = {}
+        unfinished_removals = []
+        for contributor in contributors:
+            try:
+                contributors_tiles = self.remove_survey(contributor, transaction_id=transaction_id)
+                for contrib, tiles in contributors_tiles.items():
+                    affected_contributors.setdefault(contrib, set())
+                    affected_contributors[contrib].update(tiles)
+            except LockNotAcquired:
+                print("Unable to remove survey, lock not acquired", contributor)
+                unfinished_removals.append(contributor)
+        for contrib in contributors:
+            if contrib in affected_contributors:
+                del affected_contributors[contrib]  # don't reinsert any surveys listed for full removal
+
+        # @todo - figure out if this is right.  If a removal was locked then we are reinserting everything else then raising an error.
+        #    This seems best as otherwise we could remove data but not replace it so we'd have partially inserted data and not know it.
+        # 1) Make a sqlite database of the contibutors and tiles to work on
+        self.add_reinserts(affected_contributors)
+        if len(self.reinserts.unfinished_records()) > 0:
+            if NO_LOCK or subprocesses == 1:
+                if subprocesses > 1:
+                    print("Warning, using more than one process would require a lock server.\nOnly one process will be used.")
+                self.reinsert_from_sqlite(comp_callback=compare_callback)
+            else:  # a server must be running so we can multi-process
+                # 3) start multiple processes to reinsert the data based on the file
+                if compare_callback:
+                    cb_module = compare_callback.func.__module__
+                    cb_name = compare_callback.func.__name__
+                    cb_args = compare_callback.args
+                    cb_kwargs = compare_callback.keywords
+                else:
+                    cb_module = None
+                    cb_name = None
+                    cb_args = ()
+                    cb_kwargs = {}
+                # to call the insert function we need to pickle all the parameters that were used in the scoring callback
+                # fixme this will probably fail if the callback is just a function and not a partial or the parameters get complex (non-picklable)
+                all_args = [str(self.db.data_path), current_address()[1], cb_module, cb_name]
+                all_args.extend(cb_args)
+                process_list = []
+                # pickle.dump((all_args, cb_kwargs), open(self.reinsert_filename().with_suffix(".test.reinsert.pickle"), "wb"))
+                for p in range(subprocesses):  # wait for them to all finish
+                    proc = multiprocessing.Process(target=start_reinsert_process, args=all_args, kwargs=cb_kwargs)
+                    proc.start()
+                    process_list.append(proc)
+                for proc in process_list:  # wait for them to all finish
+                    proc.join()
+        if unfinished_removals:
+            raise RuntimeError(
+                f"some removal were locked, make sure all bruty combines are closed and lock server is restarted {unfinished_removals}")
+
+    def revise_survey(self, survey_id, path_to_survey_file):
+        # we are not going to trust that the data was only edited for height/depth but that the scoring may have been adjusted too
+        # so this becomes a simple two step process.
+        # If we want to add a modify the data we could find all the nodes that applied but this would violate the NBS combine method
+        # which includes depth as one of the parameters to compute the supercession values, even though rarely used.
+        # 1) Remove the existing survey
+        # 2) Re-add the edited survey
+        raise NotImplementedError
 
     def find_contributing_surveys(self, area):
-        pass
+        raise NotImplementedError
 
     def find_area_affected_by_survey(self, survey_data):
-        pass
+        raise NotImplementedError
 
     def change_survey_score(self, survey_id, new_score):
-        pass
+        raise NotImplementedError
 
     def __cleanup_disk(self):
-        pass
+        # could both recompress the tiffs and search for broken files?
+        raise NotImplementedError
 
+
+def start_reinsert_process(db_path, lock_port, comp_callback_module, comp_callback_name, *args, **opts):
+    """
+    Parameters
+    ----------
+    db_path
+    lock_port
+    comp_callback_module
+    comp_callback_name
+    args
+    opts
+
+    Returns
+    -------
+
+    """
+    if lock_port:
+        use_locks(lock_port)
+    db = WorldDatabase.open(db_path)
+    if comp_callback_module:
+        im = importlib.import_module(comp_callback_module)
+        comp_func = eval("im." + comp_callback_name)
+        comp_callback = partial(comp_func, *args, **opts)
+    elif comp_callback_name:
+        comp_func = eval(comp_callback_name)
+        comp_callback = partial(comp_func, *args, **opts)
+    else:
+        comp_callback = None
+    # print(db_path, len(db.included_ids))
+    # print(comp_callback_module, comp_callback_name)
+    # print(comp_callback, len(args), len(opts))
+    db.reinsert_from_sqlite(comp_callback)
 
 
 class CustomBackend(WorldTilesBackend):
-    def __init__(self, utm_epsg, res_x, res_y,  x1, y1, x2, y2, history_class, storage_class, data_class, data_path, zoom_level=13):
+    def __init__(self, utm_epsg, res_x, res_y, x1, y1, x2, y2, history_class, storage_class, data_class, data_path, zoom_level=13):
         tile_scheme = ExactTilingScheme(res_x, res_y, min_x=x1, min_y=y1, max_x=x2, max_y=y2, zoom=zoom_level, epsg=utm_epsg)
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
 
 
 class CustomArea(WorldDatabase):
-    def __init__(self, epsg, x1, y1, x2, y2, res_x, res_y, storage_directory):
+    """ This class allows for only processing a limited area using an exact coordinate bound and resolution.
+    The default implementation will use an accumulation history (so remove doesn't work) and saves to disk as geotiffs.
+    """
+
+    def __init__(self, epsg, x1, y1, x2, y2, res_x, res_y, storage_directory, history_class=None, storage_class=None, data_class=None):
         min_x, min_y, max_x, max_y, shape_x, shape_y = calc_area_array_params(x1, y1, x2, y2, res_x, res_y)
         shape = max(shape_x, shape_y)
-        tiles = shape/512  # this should result in tiles max sizes between 512 and 1024 pixels
+        tiles = shape / 512  # this should result in tiles max sizes between 512 and 1024 pixels
         zoom = int(numpy.log2(tiles))
         if zoom < 0:
             zoom = 0
-        super().__init__(CustomBackend(epsg, res_x, res_y, min_x, min_y, max_x, max_y, AccumulationHistory, DiskHistory, TiffStorage,
+        if history_class is None:
+            history_class = AccumulationHistory
+        if storage_class is None:
+            storage_class = DiskHistory
+        if data_class is None:
+            data_class = TiffStorage
+        super().__init__(CustomBackend(epsg, res_x, res_y, min_x, min_y, max_x, max_y, history_class, storage_class, data_class,
                                        storage_directory, zoom_level=zoom))
 
     def export(self, fname, driver="GTiff", layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
-                    gdal_options=("BLOCKXSIZE=256", "BLOCKYSIZE=256", "TILED=YES", "COMPRESS=LZW", "BIGTIFF=YES")):
+               gdal_options=("BLOCKXSIZE=256", "BLOCKYSIZE=256", "TILED=YES", "COMPRESS=LZW", "BIGTIFF=YES")):
         """Export the full area of the 'single file database' in the epsg the data is stored in"""
         y1 = self.db.tile_scheme.min_y
         y2 = self.db.tile_scheme.max_y - self.res_y
         x1 = self.db.tile_scheme.min_x
         x2 = self.db.tile_scheme.max_x - self.res_x
+        # we already aligned the data with minx, miny so we'll tell export_area that align=false
         return super().export_area(fname, x1, y1, x2, y2, (self.res_x, self.res_y), driver=driver,
-                    layers=layers, gdal_options=gdal_options)
-
-    @property
-    def res_x(self):
-        return self.db.tile_scheme.res_x
-
-    @property
-    def res_y(self):
-        return self.db.tile_scheme.res_y
+                                   layers=layers, gdal_options=gdal_options, align=False)
 
 
-if __name__ == "__main__":
-
-    data_dir = pathlib.Path(r"G:\Data\NBS\H11305_for_Bruty")
-    # orig_db = CustomArea(26916, 395813.2, 3350563.98, 406818.2, 3343878.98, 4, 4, data_dir.joinpath('bruty'))
-    new_db = CustomArea(None, 395813.20000000007, 3350563.9800000004, 406818.20000000007, 3343878.9800000004, 4, 4, data_dir.joinpath('bruty_debug_center'))
-    # use depth band for uncertainty since it's not in upsample data
-    new_db.insert_survey_gdal(r"G:\Data\NBS\H11305_for_Bruty\1of3.tif", 0, uncert_band=1, override_epsg=None)
-    # new_db.insert_survey_gdal(r"G:\Data\NBS\H11305_for_Bruty\2of3.tif", 0, uncert_band=1, override_epsg=None)
-    # new_db.insert_survey_gdal(r"G:\Data\NBS\H11305_for_Bruty\3of3.tif", 0, uncert_band=1, override_epsg=None)
-    new_db.insert_survey_gdal(r"G:\Data\NBS\H11305_for_Bruty\H11305_VB_5m_MLLW_1of3.bag", 1, override_epsg=None)
-    # new_db.insert_survey_gdal(r"G:\Data\NBS\H11305_for_Bruty\H11305_VB_5m_MLLW_2of3.bag", 1, override_epsg=None)
-    # new_db.insert_survey_gdal(r"G:\Data\NBS\H11305_for_Bruty\H11305_VB_5m_MLLW_3of3.bag", 1, override_epsg=None)
-    new_db.export(r"G:\Data\NBS\H11305_for_Bruty\combine_new_centers.tif")
-    import sys
-    sys.exit()
-
-    fname = r"G:\Data\NBS\Speed_test\H11045_VB_4m_MLLW_2of2.bag"
-    ds = gdal.Open(fname)
-    x1, resx, dxy, y1, dyx, resy = ds.GetGeoTransform()
-    numx = ds.RasterXSize
-    numy = ds.RasterYSize
-    epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
-    epsg = 26918
-    ds = None
-    # db = WorldDatabase(UTMTileBackendExactRes(4, 4, epsg, RasterHistory, DiskHistory, TiffStorage,
-    #                                     r"G:\Data\NBS\Speed_test\test_db_world"))
-    db = CustomArea(epsg, x1, y1, x1+(numx+1)*resx, y1+(numy+1)*resy, 4, 4, r"G:\Data\NBS\Speed_test\test_cust4")
-    db.insert_survey_gdal(fname, override_epsg=epsg)
-    db.export(r"G:\Data\NBS\Speed_test\test_cust4\export.tif")
-    raise Exception("Done")
-
-    from nbs.bruty.history import MemoryHistory
-    from nbs.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, LayersEnum, arrays_match
-    from nbs.bruty.utils import save_soundings_from_image
-
-    # from tests.test_data import master_data, data_dir
-
-    # use_dir = data_dir.joinpath('tile4_vr_utm_db')
-    # db = WorldDatabase(UTMTileBackend(26919, RasterHistory, DiskHistory, TiffStorage, use_dir))  # NAD823 zone 19.  WGS84 would be 32619
-    # db.export_area_old(use_dir.joinpath("export_tile_old.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
-    # db.export_area(use_dir.joinpath("export_tile_new.tif"), 255153.28, 4515411.86, 325721.04, 4591064.20, 8)
-
-    build_mississippi = True
-    export_mississippi = False
-    process_utm_15 = True
-    output_res = (4, 4)  # desired output size in meters
-    data_dir = pathlib.Path(r'G:\Data\NBS\Mississipi')
-    if process_utm_15:
-        export_dir = data_dir.joinpath("UTM15")
-        epsg = 26915
-        max_lon = -90
-        min_lon = -96
-        max_lat = 35
-        min_lat = 0
-        use_dir = data_dir.joinpath('vrbag_utm15_debug_db')
-
-        data_files = [(r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13194_MB_VR_LWRP.bag", 92),
-                      (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13193_MB_VR_LWRP.bag", 100),
-                      (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13330_MB_VR_LWRP.bag", 94),
-                      (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13188_MB_VR_LWRP.bag", 95),
-                      (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13189_MB_VR_LWRP.bag", 96),
-                      (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_MB_VR_LWRP.bag", 97),
-                      (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13191_MB_VR_LWRP.bag", 98),
-                      (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13192_MB_VR_LWRP.bag", 99),
-                      # (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_MB_VR_LWRP.bag.resampled_4m.uncert.tif", 77),
-                      # (r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13192_MB_VR_LWRP.bag.resampled_4m.uncert.tif", 79),
-                   ]
-        resamples = []
-        # [r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_MB_VR_LWRP.bag",
-        #            r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13192_MB_VR_LWRP.bag",]
-        for vr_path in resamples:
-            resampled_path = vr_path + ".resampled_4m.tif"
-            bag.VRBag_to_TIF(vr_path, resampled_path, 4, use_blocks=False)
-            resampled_with_uncertainty = resampled_path = resampled_path[:-4] + ".uncert.tif"
-            add_uncertainty_layer(resampled_path, resampled_with_uncertainty)
-            data_files.append(resampled_with_uncertainty)
-    else:
-        export_dir = data_dir.joinpath("UTM16")
-        epsg = 26916
-        max_lon = -84
-        min_lon = -90
-        max_lat = 35
-        min_lat = 0
-        use_dir = data_dir.joinpath('vrbag_utm16_debug_db')
-        data_files = [(r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13195_MB_VR_LWRP.bag", 93),
-                      (r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13196_MB_VR_LWRP.bag", 91),
-                      (r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13193_MB_VR_LWRP.bag", 100),
-                      (r"G:\Data\NBS\Mississipi\UTM16\NCEI\H13194_MB_VR_LWRP.bag", 92),
-                   ]
-
-    if build_mississippi:
-        if os.path.exists(use_dir):
-            shutil.rmtree(use_dir, onerror=onerr)
-
-    db = WorldDatabase(UTMTileBackendExactRes(*output_res, epsg, RasterHistory, DiskHistory, TiffStorage,
-                                      use_dir))  # NAD823 zone 19.  WGS84 would be 32619
-    if 0:  # find a specific point in the tiling database
-        y, x = 30.120484, -91.030685
-        px, py = crs_transform.transform(x, y)
-        tile_index_x, tile_index_y = db.db.tile_scheme.xy_to_tile_index(px, py)
-
-    if build_mississippi:
-
-        for data_file, score in data_files:
-            # bag_file = directory.joinpath(directory.name + "_MB_VR_LWRP.bag")
-            if _debug:
-                if 'H13190' not in data_file:
-                    print("Skipped for debugging", data_file)
-                    continue
-            if 'H13194' in data_file:  # this file is encoded in UTM16 even in the UTM15 area
-                override_epsg = 26916
-            elif 'H13193' in data_file:  # this file is encoded in UTM15 even in the UTM16 area
-                override_epsg = 26915
-            else:
-                override_epsg = epsg
-            # db.insert_survey_gdal(bag_file, override_epsg=epsg)  # single res
-            if str(data_file)[-4:] in (".bag", ):
-                db.insert_survey_vr(data_file, survey_score=score, override_epsg=override_epsg)
-            elif str(data_file)[-4:] in ("tiff", ".tif"):
-                db.insert_survey_gdal(data_file, survey_score=score)
-
-    if export_mississippi:
-        area_shape_fname = r"G:\Data\NBS\Support_Files\MCD_Bands\Band5\Band5_V6.shp"
-        ds = gdal.OpenEx(area_shape_fname)
-        # ds.GetLayerCount()
-        lyr = ds.GetLayer(0)
-        srs = lyr.GetSpatialRef()
-        export_epsg = rasterio.crs.CRS.from_string(srs.ExportToWkt()).to_epsg()
-        lyr.GetFeatureCount()
-        lyrdef = lyr.GetLayerDefn()
-        for i in range(lyrdef.GetFieldCount()):
-            flddef = lyrdef.GetFieldDefn(i)
-            if flddef.name == "CellName":
-                cell_field = i
-                break
-        crs_transform = get_crs_transformer(export_epsg, db.db.tile_scheme.epsg)
-        inv_crs_transform = get_crs_transformer(db.db.tile_scheme.epsg, export_epsg)
-        for feat in lyr:
-            geom = feat.GetGeometryRef()
-            # geom.GetGeometryCount()
-            minx, maxx, miny, maxy = geom.GetEnvelope()  # (-164.7, -164.39999999999998, 67.725, 67.8)
-            # output in WGS84
-            cx = (minx + maxx) / 2.0
-            cy = (miny + maxy) / 2.0
-            # crop to the area around Mississippi
-            if cx > min_lon and cx < max_lon and cy > min_lat and cy < max_lat:
-                cell_name = feat.GetField(cell_field)
-                if _debug:
-
-                    ##
-                    ## vertical stripes in lat/lon
-                    ## "US5MSYAF" for example
-                    # if cell_name not in ("US5MSYAF",):  # , 'US5MSYAD'
-                    #     continue
-
-                    ## @fixme  There is a resolution issue at ,
-                    ## where the raw VR is at 4.2m which leaves stripes at 4m export so need to add
-                    ## an upsampled dataset to fill the area (with lower score so it doesn't overwrite the VR itself)
-                    if cell_name not in ('US5BPGBD',):  # 'US5BPGCD'):
-                        continue
-
-                    # @fixme  missing some data in US5PLQII, US5PLQMB  US5MSYAE -- more upsampling needed?
-
-                print(cell_name)
-                # convert user res (4m in testing) size at center of cell for resolution purposes
-                dx, dy = compute_delta_coord(cx, cy, *output_res, crs_transform, inv_crs_transform)
-
-                bag_options_dict = {'VAR_INDIVIDUAL_NAME': 'Chief, Hydrographic Surveys Division',
-                                     'VAR_ORGANISATION_NAME': 'NOAA, NOS, Office of Coast Survey',
-                                     'VAR_POSITION_NAME': 'Chief, Hydrographic Surveys Division',
-                                     'VAR_DATE': datetime.now().strftime('%Y-%m-%d'),
-                                     'VAR_VERT_WKT': 'VERT_CS["unknown", VERT_DATUM["unknown", 2000]]',
-                                     'VAR_ABSTRACT': "This multi-layered file is part of NOAA Office of Coast Survey’s National Bathymetry. The National Bathymetric Source is created to serve chart production and support navigation. The bathymetry is compiled from multiple sources with varying quality and includes forms of interpolation. Soundings should not be extracted from this file as source data is not explicitly identified. The bathymetric vertical uncertainty is communicated through the associated layer. More generic quality and source metrics will be added with 2.0 version of the BAG format.",
-                                     'VAR_PROCESS_STEP_DESCRIPTION': f'Generated By GDAL {gdal.__version__} and NBS',
-                                     'VAR_DATETIME': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
-                                     'VAR_VERTICAL_UNCERT_CODE': 'productUncert',
-                                     # 'VAR_RESTRICTION_CODE=' + restriction_code,
-                                     # 'VAR_OTHER_CONSTRAINTS=' + other_constraints,
-                                     # 'VAR_CLASSIFICATION=' + classification,
-                                     #'VAR_SECURITY_USER_NOTE=' + security_user_note
-                                     }
-                tif_tags = {'EMAIL_ADDRESS': 'OCS.NBS@noaa.gov',
-                            'ONLINE_RESOURCE': 'https://www.ngdc.noaa.gov',
-                            'LICENSE': 'License cc0-1.0',
-                            }
-
-                export_path = export_dir.joinpath(cell_name + ".tif")
-                cnt, exported_dataset = db.export_area(export_path, minx, miny, maxx, maxy, (dx+dx*.1, dy+dy*.1), target_epsg=export_epsg)
-
-                # export_path = export_dir.joinpath(cell_name + ".bag")
-                # bag_options = [key + "=" + val for key, val in bag_options_dict.items()]
-                # cnt2, ex_ds = db.export_area(export_path, minx, miny, maxx, maxy, (dx+dx*.1, dy+dy*.1), target_epsg=export_epsg,
-                #                       driver='BAG', gdal_options=bag_options)
-
-                if cnt > 0:
-                    # output in native UTM -- Since the coordinates "twist" we need to check all four corners,
-                    # not just lower left and upper right
-                    x1, y1, x2, y2 = transform_rect(minx, miny, maxx, maxy, crs_transform.transform)
-                    cnt, utm_dataset = db.export_area(export_dir.joinpath(cell_name + "_utm.tif"),x1, y1, x2, y2, output_res)
-                else:
-                    exported_dataset = None  # close the gdal file
-                    os.remove(export_path)
-                os.remove(export_path.with_suffix(".score.tif"))
-
-    test_soundings = False
-    if test_soundings:
-        soundings_files = [pathlib.Path(r"C:\Data\nbs\PBC19_Tile4_surveys\soundings\Tile4_4m_20210219_source.tiff"),
-                           pathlib.Path(r"C:\Data\nbs\PBC19_Tile4_surveys\soundings\Tile4_4m_20201118_source.tiff"),
-                           ]
-        for soundings_file in soundings_files:
-            ds = gdal.Open(str(soundings_file))
-            # epsg = rasterio.crs.CRS.from_string(ds.GetProjection()).to_epsg()
-            xform = ds.GetGeoTransform()  # x0, dxx, dyx, y0, dxy, dyy
-            d_val = ds.GetRasterBand(1)
-            col_size = d_val.XSize
-            row_size = d_val.YSize
-            del d_val, ds
-            x1, y1 = affine(0, 0, *xform)
-            x2, y2 = affine(row_size, col_size, *xform)
-            res = 50
-            res_x = res
-            res_y = res
-            # move the minimum to an origin based on the resolution so future exports would match
-            if x1 < x2:
-                x1 -= x1 % res_x
-            else:
-                x2 -= x2 % res_x
-
-            if y1 < y2:
-                y1 -= y1 % res_y
-            else:
-                y2 -= y2 % res_y
-
-            #  note: there is an issue where the database image and export image are written in reverse Y direction
-            #  because of this the first position for one is top left and bottom left for the other.
-            #  when converting the coordinate of the cell it basically ends up shifting by one
-            #  image = (273250.0, 50.0, 0.0, 4586700.0, 0.0, -50.0)  db = (273250.0, 50, 0, 4552600.0, 0, 50)
-            #  fixed by using cell centers rather than corners.
-            #  Same problem could happen of course if the centers are the edges of the export tiff
-            # db = CustomArea(26919, x1, y1, x2, y2, res_x, res_y, soundings_file.parent.joinpath('debug'))  # NAD823 zone 19.  WGS84 would be 32619
-            # db.insert_survey_gdal(str(soundings_file))
-            # db.export_area_new(str(soundings_file.parent.joinpath("output_soundings_debug5.tiff")), x1, y1, x2, y2, (res_x, res_y), )
-            save_soundings_from_image(soundings_file, str(soundings_file) + "_3.gpkg", 50)
-
-
-# test positions -- H13190, US5GPGBD, Mississipi\vrbag_utm15_full_db\4615\3227\_000001_.tif, Mississipi\UTM15\NCEI\H13190_MB_VR_LWRP_resampled.tif
-# same approx position
-# 690134.03 (m), 3333177.81 (m)  is 41.7 in the H13190
-# 690134.03 (m), 3333177.81 (m)  is 42.4 in the resampled
-# 690133.98 (m), 3333178.01 (m)  is 42.3 in the \4615\3227\000001.tif
-# 690133.60 (m), 3333177.74 (m)  is 42.3 in the US5GPGBD
-
-# seems to be the same Z value of 41.7
-# 690134.03 (m), 3333177.81 (m)  H13190
-# 690138.14 (m), 3333177.79 (m)  resample  (right (east) one column)
-# 690129.99 (m), 3333173.99 (m)  \4615\3227\000001.tif  (down+left (south west) one row+col)
-# 690129.62 (m), 3333173.76 (m)  US5GPGBD  (down+left (south west) one row+col)
-
-# from importlib import reload
-# import HSTB.shared.gridded_coords
-# bag.VRBag_to_TIF(r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_MB_VR_LWRP.bag", r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_resample.tif", 4.105774879455566, bag.MEAN, nodata=1000000.)
-
-# index2d = numpy.array([(655, 265)], dtype=numpy.int32)
-
-# >>> print('x', refinement_llx + 9 * resolution_x + resolution_x / 2.0, 'y',refinement_lly + 8 * resolution_y + resolution_y / 2.0)
-# x 690134.0489868548 y 3333177.797961975
-# >>> print("x (cols)",xstarts[9],":", xends[9], "y (rows)",ystarts[8],":", yends[8])
-# x (cols) 690131.9960994151 : 690136.1018732946 y (rows) 3333175.7450745353 : 3333179.850848415
-# >>> print("rows",row_start_indices[8],":",row_end_indices[8], "cols",col_start_indices[9],":", col_end_indices[9])
-# rows 4052 : 4053 cols 2926 : 2927
-# >>> print('starts',HSTB.shared.gridded_coords.affine(row_start_indices[8], col_start_indices[9], *ds_val.GetGeoTransform()), ',  ends',HSTB.shared.gridded_coords.affine(row_end_indices[8], col_end_indices[9], *ds_val.GetGeoTransform()))
-# starts (690131.995748028, 3333183.9557557716) ,  ends (690136.1015229075, 3333179.849980892)
-# >>> ds_val.GetGeoTransform(), sr_grid.geotransform
-# ((678118.498450741,  4.105774879455566,  0.0,  3349820.5555673256,  0.0,  -4.105774879455566),
-#  (678118.498450741,  4.105774879455566,  0,  3303552.578450741,  0,  4.105774879455566))
-
-# ds = gdal.Open(r"G:\Data\NBS\Mississipi\UTM15\NCEI\H13190_resample4.tif")
-# b = ds.GetRasterBand(1)
-# dep = b.ReadAsArray()
-# b.GetNoDataValue()
-# (dep!=0.0).any()

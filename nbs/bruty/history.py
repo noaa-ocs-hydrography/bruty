@@ -9,6 +9,7 @@ import numpy
 
 from nbs.bruty.abstract import VABC
 from nbs.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum
+from nbs.bruty.utils import remove_file
 
 class History(VABC, MutableSequence):
     """ Base class for things that want to act like a list.  Intent is to maintain something that acts like a list and returns/stores
@@ -78,6 +79,7 @@ class DiskHistory(History):
         """
         super().__init__(data_class, data_path, prefix, postfix)
         os.makedirs(self.data_path, exist_ok=True)
+
     @property
     def filename_pattern(self):
         """ Gets the pattern to use to find valid files inside the self.data_path directory.
@@ -103,15 +105,66 @@ class DiskHistory(History):
         fname = self.filename_pattern.replace("\\d+", "%06d"%self._abs_index(key))
         return self.data_path.joinpath(fname)
 
+    @classmethod
+    def exists(cls, data_path):
+        pth = pathlib.Path(data_path)
+        metaname = cls.make_meta_filename(pth)
+        return metaname.exists()
+
+    @staticmethod
+    def make_meta_filename(data_path):
+        pth = pathlib.Path(data_path)
+        return pth.joinpath("metadata.json")
+
+    @property
+    def metadata_filename(self):
+        return self.make_meta_filename(self.data_path)
+        # return self.data_path.joinpath("metadata.json")
+
+    def validate(self):
+        meta = self.get_metadata()
+        expected = set(meta['contributors'].keys())
+        commits = {}
+        for idx in range(len(self)):
+            contrib = str(self[idx].get_metadata()['contrib_id'])  # use str since json returns it as strings
+            commits.setdefault(contrib, 0)
+            commits[contrib] += 1
+        actual = set(commits.keys())
+        missing = expected.difference(actual)
+        extra = actual.difference(expected)
+        duplicates = [contrib for contrib, cnt in commits.items() if cnt > 1]
+        return missing, extra, duplicates, expected, actual
+
     def get_metadata(self):
+        """ Returns a copy of the metadata, so editing the returned dictionary will have no effect on the history itself.
+
+        Returns
+        -------
+        dict
+            keys should include 'min_x', 'min_y', 'max_x', 'max_y', 'contributors' and optionally 'epsg'
+        """
         try:
-            metadata = json.load(open(self.data_path.joinpath("metadata.json")))
+            metadata = json.load(open(self.metadata_filename))
         except FileNotFoundError:
             metadata = {}
+        except Exception as e:
+            print(self.metadata_filename)
+            raise e
+
         return metadata
 
     def set_metadata(self, meta):
-        json.dump(meta, open(self.data_path.joinpath("metadata.json"), "w"))
+        """ Writes a metadata.json file that is global to the history.  This is separate from the json files that may occur with the TiffStorage.
+
+        Parameters
+        ----------
+        meta
+
+        Returns
+        -------
+
+        """
+        json.dump(meta, open(self.metadata_filename, "w"))
 
     def __getitem__(self, key):
         if isinstance(key, (list, tuple)):
@@ -145,9 +198,16 @@ class DiskHistory(History):
         else:
             key = self._abs_index(key)
             fname = self.filename_from_index(key)
-            os.remove(fname)
+            # when running on UNC there seems to be a delay in releasing the file sometimes, give it a moment and then retry
+            # then raise exception if it fails again.
+            remove_file(fname, allow_permission_fail=True, raise_on_fail=True)
+            remove_file(self.data_class.build_metapath(fname), allow_permission_fail=True, raise_on_fail=True)
             for index in range(key+1, len(self)):
-                os.rename(self.filename_from_index(index), self.filename_from_index(index-1))
+                from_filename, to_filename = self.filename_from_index(index), self.filename_from_index(index-1)
+                os.rename(from_filename, to_filename)
+                from_meta = self.data_class.build_metapath(from_filename)
+                to_meta = self.data_class.build_metapath(to_filename)
+                os.rename(from_meta, to_meta)
 
     def data_files(self):
         """ Finds all the files in the data_path directory that would match the naming convention
@@ -183,7 +243,11 @@ class DiskHistory(History):
         # fname = self.filename_from_index(key)
         # Rename the existing files from the end to the location desired and then create the new data at the position that was opened up.
         for index in range(len(self) - 1, key - 1, -1):
-            os.rename(self.filename_from_index(index), self.filename_from_index(index+1))
+            from_filename, to_filename = self.filename_from_index(index), self.filename_from_index(index + 1)
+            os.rename(from_filename, to_filename)
+            from_meta = self.data_class.build_metapath(from_filename)
+            to_meta = self.data_class.build_metapath(to_filename)
+            os.rename(from_meta, to_meta)
         # put the new data in place
         self.__setitem__(key, value)
 
@@ -244,8 +308,20 @@ class RasterHistory(History):
         max_y
             a Y coordinate for the area being kept
         """
-        self.set_corners(x1, y1, x2, y2)
+        # @todo fix this to be better serialization, this is goofy with get, set metadata
         self.history = history_data
+        meta = self.get_metadata()
+        if not meta or x1 is not None or x2 is not None:
+            self.set_corners(x1, y1, x2, y2)
+        else:
+            self.min_x = meta["min_x"]
+            self.min_y = meta['min_y']
+            self.max_x = meta["max_x"]
+            self.max_y = meta["max_y"]
+            try:
+                self.epsg = meta["epsg"]
+            except KeyError:  # epsg was never set
+                pass
         self.sources = []
 
     def set_corners(self, min_x, min_y, max_x, max_y):
@@ -263,6 +339,9 @@ class RasterHistory(History):
         else:
             self.max_x = self.max_y = self.min_x = self.min_y = None
 
+    def validate(self):
+        return self.history.validate()
+
     def get_metadata(self):
         return self.history.get_metadata()
 
@@ -274,6 +353,9 @@ class RasterHistory(History):
 
     def set_epsg(self, epsg):
         self.epsg = epsg
+        meta = self.get_metadata()
+        meta["epsg"] = self.epsg
+        self.set_metadata(meta)
 
     def __setitem__(self, key, value):
         # @todo have to reform the deltas in the history like insert does.  Maybe a "reform" function is needed.
@@ -281,8 +363,50 @@ class RasterHistory(History):
 
     def __delitem__(self, key):
         # @todo have to reform the deltas in the history like insert does.  Maybe a "reform" function is needed.
-        self.history.__delitem__(key)
-        print("history delete doesn't work yet")
+        if isinstance(key, (list, tuple)):
+            indices = sorted(key)  # remove from the end to beginning or the indices will remove the wrong items
+            indices.reverse()
+            return [self.__delitem__(index) for index in indices]
+        elif isinstance(key, slice):
+            if key.stop is not None and key.stop > len(self):
+                key = slice(key.start, len(self), key.step)
+            indices = list(range(*key.indices(len(self))))
+            if indices[0] < indices[-1]:  # go from the end to the beginning as you can only remove the last item
+                indices.reverse()
+            return self.__delitem__(indices)
+        else:
+            key = self._abs_index(key)
+            if key >= len(self) or key < 0:
+                raise IndexError("history index out of range")
+            if key != len(self) - 1:
+                # @todo allow removing in the middle?
+                #    figure out the raster at the last place before delete then
+                #    make a delta for what changed on the last commit then
+                #    add all the deltas from the raster we computed plus the remaining deltas without the one being deleted
+                raise IndexError("Can only remove the last item, not something before since this is a stack of differences (this could change if needed)")
+            rd = self[key-1]  # this retrieves a RasterData at the index specified, which can then be used to replace the RasterDelta that was there
+            # metadata should be loaded with the raster data, right?
+            # saved_meta = self.history[key-1].get_metadata()  # save this in case for when it gets removed by the delete below
+            # rd.set_metadata(saved_meta)
+            del self.history[key]  # remove the last thing which is a RasterData
+            full_meta = self.get_metadata()
+            # @todo get rid of these key strings and either use class variables or make a wrapper class with slots as these strings are not good design choice long term
+            full_meta['contributors'] = {}
+            if key > 0:
+                del self.history[key - 1]  # remove the next to last delta and replace it with a RasterData
+                self.history.append(rd)
+                # since we can't trust that the ID was only added once in a tile
+                # (when insert processing breaks the survey may have multiple entries in the tiles but only one in the global database metadata)
+                # we will rebuild the contributors by reading the histories and recreate the contributor dictionary
+                for h in range(len(self)):
+                    meta = self.history[h].get_metadata()
+                    try:
+                        full_meta['contributors'][str(meta['contrib_id'])] = meta['contrib_path']
+                    except KeyError:
+                        pass  # user did not have set contributor data for rasters in the history
+            self.set_metadata(full_meta)
+
+
 
     def __len__(self):
         return len(self.history)
@@ -303,13 +427,14 @@ class RasterHistory(History):
                 key = slice(key.start, len(self), key.step)
             return [self.__getitem__(index) for index in range(*key.indices(len(self)))]
         else:
-            if key < 0:
-                key = len(self.history) + key
-            if key >= len(self.history) or key < 0:
+            key = self._abs_index(key)
+            if key >= len(self) or key < 0:
                 raise IndexError("history index out of range")
             current_val = self.history[-1]
-            for delta_idx in range(len(self.history) - 2, key-1, -1):
-                current_val = current_val.apply_delta(self.history[delta_idx])
+            for delta_idx in range(len(self) - 2, key-1, -1):
+                rd = self.history[delta_idx]
+                current_val = current_val.apply_delta(rd)
+                current_val.set_metadata(rd.get_metadata())
             # current_val.set_corners(self.min_x, self.min_y, self.max_x, self.max_y)
             # current_val.set_epsg(self.epsg)
             return current_val

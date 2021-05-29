@@ -1,45 +1,22 @@
 from multiprocessing.managers import SyncManager, BaseProxy
 from concurrent.futures import ThreadPoolExecutor
 import time
-from nbs.bruty.nbs_locks import AreaLock, EXCLUSIVE, NON_BLOCKING, LockNotAcquired
 
-def client():
-    SyncManager.register('get_lock')
-    manager = SyncManager(address=('localhost', 5000), authkey=b'abracadabra')
-    manager.connect()
-    # distance_time = manager.DistanceTime()
-    # distance_time.get_distance_time()
-    lck = manager.get_lock((1, 1))
-    print("retrieved lock", lck)
-    b = lck.acquire()  # block=True, timeout=1)
-    print("acquire returned",b)
-    if b:
-        time.sleep(5)
-        lck.release()
-        print("lock released")
-    else:
-        print('try faulty release')
-        lck.release()
+from nbs.bruty.nbs_locks import LockNotAcquired, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, start_server, \
+    current_address
+
+# As of Windows 10
+# First start a lock_server (nbs.bruty.lockserver.py) on port 5000
+# then run this file four separate times (4 processes) and eventually it will overrun the sockets and it'll start the wait timeout.
+
+start_server(5000)
 
 
-    #
-    # executor = ThreadPoolExecutor(max_workers=3)
-    # a = executor.submit(distance_time.get_distance_time)
-    # print(a)
-    # b = executor.submit(distance_time.get_distance_time)
-    # print(b)
-    # c = executor.submit(distance_time.get_distance_time)
-    # print(c)
-    # print(a, b, c)
-    # print('done')
-    # time.sleep(5)
-
-# client()
 def fn(tx, ty):
     return str((tx, ty))
-tile_list = [[n,n] for n in range(1000)]
+tile_list = [[n,n] for n in range(2)]
 
-for r in range(1000):
+for r in range(10000):
     while 1:
         try:
             print('iteration', r)

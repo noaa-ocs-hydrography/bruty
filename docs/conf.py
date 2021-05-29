@@ -44,7 +44,7 @@ MOCK_MODULES = ['scipy', 'matplotlib', 'matplotlib.pyplot', 'scipy.interpolate',
 for mod_name in MOCK_MODULES:
     sys.modules[mod_name] = mock.Mock()
 
-top_classes = "collections.abc.MutableSequence, bruty.abstract.ABC, bruty.abstract.VABC"
+top_classes = "collections.abc.MutableSequence, nbs.bruty.abstract.ABC, nbs.bruty.abstract.VABC"
 
 p, f = os.path.split(__file__)
 root_p = os.path.normpath(p)

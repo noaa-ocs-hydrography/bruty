@@ -1,1 +1,1 @@
-..  automodapi:: bruty.raster_delta
+..  automodapi:: nbs.bruty.raster_delta

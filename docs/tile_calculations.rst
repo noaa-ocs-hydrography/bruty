@@ -1,1 +1,1 @@
-..  automodapi:: bruty.tile_calculations
+..  automodapi:: nbs.bruty.tile_calculations

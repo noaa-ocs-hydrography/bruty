@@ -1,1 +1,1 @@
-..  automodapi:: bruty.world_raster_database
+..  automodapi:: nbs.bruty.world_raster_database

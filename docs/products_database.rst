@@ -1,1 +1,1 @@
-..  automodapi:: bruty.products_database
+..  automodapi:: nbs.bruty.products_database

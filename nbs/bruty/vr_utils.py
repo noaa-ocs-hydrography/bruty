@@ -634,7 +634,7 @@ def vr_raster_mask(vr, points_ds, output_path, supercell_gap_multiplier=-1, bloc
     cached_row, cached_col = -1, -1  # position of the currently held cache block from the mask raster
     for corners, edges, intra_refinment in passes:
         # iterate VR refinements filling in the mask cells
-        for ri, rj in tqdm(sorted_refinement_indices, mininterval=.75):
+        for ri, rj in tqdm(sorted_refinement_indices, desc='refinements', mininterval=.75):
             # get surrounding vr refinements as buffer
             index_ranges = numpy.zeros((3, 3, 2, 2), dtype=numpy.int32)
             for i in (-1, 0, 1):
@@ -830,14 +830,162 @@ def interpolate_raster(vr, points_ds, mask_ds, output_path, use_blocks=True, nod
         row_buffer_size = col_buffer_size = 1 * pixels_per_supergrid
         row_size = interp_band.XSize
         col_size = interp_band.YSize
-        for ic in tqdm(range(0, col_size, col_block_size), mininterval=.7):
+        for ic in tqdm(range(0, col_size, col_block_size), desc='column block', mininterval=.7):
             cols = col_block_size
             if ic + col_block_size > col_size:  # read a full set of data by offsetting the column index back a bit
                 ic = col_size - cols
             col_buffer_lower = col_buffer_size if ic >= col_buffer_size else ic
             col_buffer_upper = col_buffer_size if col_size - (ic + col_block_size) >= col_buffer_size else col_size - (ic + col_block_size)
             read_cols = col_buffer_lower + cols + col_buffer_upper
-            for ir in tqdm(range(0, row_size, row_block_size), mininterval=.7):
+            for ir in tqdm(range(0, row_size, row_block_size), desc='row block', mininterval=.7, leave=False):
+                rows = row_block_size
+                if ir + row_block_size > row_size:
+                    ir = row_size - rows
+                row_buffer_lower = row_buffer_size if ir >= row_buffer_size else ir
+                row_buffer_upper = row_buffer_size if row_size - (ir + row_block_size) >= row_buffer_size else row_size - (ir + row_block_size)
+                read_rows = row_buffer_lower + rows + row_buffer_upper
+                points_array = points_band.ReadAsArray(ic - col_buffer_lower, ir - row_buffer_lower, read_cols, read_rows)
+
+                # Find the points that actually have data as N,2 array shape that can index the data arrays
+                if numpy.isnan(points_no_data):
+                    point_indices = numpy.nonzero(~numpy.isnan(points_array))
+                else:
+                    point_indices = numpy.nonzero(points_array != points_no_data)
+                # if there were any data points then do interpolation -- could be all empty space too which raises Exception in griddata
+                if len(point_indices[0]):
+                    # get the associated data values
+                    point_values = points_array[point_indices]
+                    # interpolate all the other points in the array
+                    # (actually it's interpolating everywhere which is a waste of time where there is already data)
+                    row_i, col_i = numpy.mgrid[row_buffer_lower:row_buffer_lower + row_block_size,
+                                   col_buffer_lower:col_buffer_lower + col_block_size]
+                    try:
+                        interp_data = scipy.interpolate.griddata(numpy.transpose(point_indices), point_values,
+                                                                 (row_i, col_i), method=method)
+                    except scipy.spatial.qhull.QhullError as e:
+                        if len(point_indices[0]) < 3:
+                            # find the data that would fall in the griddata result and just insert those couple points
+                            # could do with a for loop and a couple if statements easier
+                            interp_data = interp_band.ReadAsArray(ic, ir, col_block_size, row_block_size)
+                            ind = numpy.transpose(point_indices)
+                            row_non_neg = ind[:, 0] >= 0
+                            row_not_big = ind[:, 0] < row_block_size
+                            col_non_neg = ind[:, 1] >= 0
+                            col_not_big = ind[:, 1] < col_block_size
+                            use_indices = numpy.logical_and.reduce((row_non_neg, row_not_big, col_non_neg, col_not_big))
+                            if numpy.count_nonzero(use_indices):
+                                interp_data[point_indices[0][use_indices], point_indices[1][use_indices]] = point_values[use_indices]
+                        else:
+                            raise e
+
+                    mask_data = mask_band.ReadAsArray(ic, ir, col_block_size, row_block_size)
+                    if numpy.isnan(mask_no_data):
+                        mask_array = numpy.isnan(mask_data)
+                    else:
+                        mask_array = mask_data == mask_no_data
+                    interp_data[mask_array] = nodata
+                    # Write the data into the TIF on disk
+                    interp_band.WriteArray(interp_data, ic, ir)
+    else:
+        points_array = points_band.ReadAsArray()
+        mask_data = mask_band.ReadAsArray()
+
+        # Find the points that actually have data
+        if numpy.isnan(points_no_data):
+            point_indices = numpy.nonzero(~numpy.isnan(points_array))
+        else:
+            point_indices = numpy.nonzero(points_array != points_no_data)
+        # get the associated data values
+        point_values = points_array[point_indices]
+        # interpolate all the other points in the array (actually interpolating everywhere which is a waste of time where there is already data)
+        xi, yi = numpy.mgrid[0:points_array.shape[0], 0:points_array.shape[1]]
+        interp_data = scipy.interpolate.griddata(numpy.transpose(point_indices), point_values,
+                                                 (xi, yi), method=method)
+        _plot(interp_data)
+        # mask based on the cell mask found using the MIN mode
+        interp_data[mask_data == mask_no_data] = nodata
+        _plot(interp_data)
+        # Write the data into the TIF on disk
+        interp_band.WriteArray(interp_data)
+
+    # release the temporary tif files and delete them
+    point_band = None
+    point_ds = None
+    mask_band = None
+    mask_ds = None
+    return interp_ds
+
+
+def interpolate_raster_new(vr, points_ds, mask_ds, output_path, use_blocks=True, nodata=numpy.nan, method='linear'):
+    """ Create a interpolated single resolution raster representing the area covered by the supplied VR bag file.
+    Data inside a refinement will be 'upsampled' between any data cells that have valid data.
+    Data between refinements will be 'interpolated' if the gap is less than the sum of the reolutions of the two refinements.
+
+    Parameters
+    ----------
+    vr
+        An open HSTB.drivers.bag.VRBag instance
+    points_ds
+        open gdal dataset of the points raster made from the vr
+    mask_ds
+        open gdal dataset of the mask raster made from the vr and points
+    output_path
+        path to store the resulting interpolated single resolution dataset
+    use_blocks
+        Reduce memory usage by reading/writing blocks from the gdal.dataset rather than loading the entire raster into memory
+    nodata
+        Value to write into the output file as the nodata value
+    method
+        scipy.interpolate method to use when processing the datasets.
+    Returns
+    -------
+    dataset
+        An open gdal.dataset object of the file saved at output_path with the interpolated data
+    """
+    # Interpolation scheme
+    # Given the POINT version of the TIFF with only data at precise points of VR BAG (old version of function would create POINT tiff)
+    # Load in blocks with enough buffer around the outside (nominally 3x3 supergrids with 1 supergrid buffer)
+    #     run scipy.interpolate.griddata on the block (use linear as cubic causes odd peaks and valleys)
+    #     copy the interior (3x3 supergrids without the buffer area) into the output TIFF
+    #
+    # Given the mask version of the TIFF  (old function used to Create a 'min')
+    # Load blocks of data and copy any NaNs from the MIN (cell based coverage) into the INTERP grid to remove erroneous interpolations,
+    # this essentially limits coverage to VR cells that were filled
+
+    dx = vr.cell_size_x
+    dy = vr.cell_size_y
+    cell_szx = numpy.abs(points_ds.GetGeoTransform()[1])
+    cell_szy = numpy.abs(points_ds.GetGeoTransform()[5])
+
+    points_band = points_ds.GetRasterBand(1)
+    points_no_data = points_band.GetNoDataValue()
+    mask_band = mask_ds.GetRasterBand(1)
+    mask_no_data = mask_band.GetNoDataValue()
+    interp_ds = points_ds.GetDriver().CreateCopy(str(output_path), points_ds)
+    # interp_ds = points_ds.GetDriver().Create(dst_filename, points_ds.RasterXSize, points_ds.RasterYSize, bands=1, eType=points_band.DataType,
+    #                                          options=["BLOCKXSIZE=256", "BLOCKYSIZE=256", "TILED=YES", "COMPRESS=LZW", "BIGTIFF=YES"])
+    # interp_ds.SetProjection(points_ds.GetProjection())
+    # interp_ds.SetGeoTransform(points_ds.GetGeoTransform())
+    interp_band = interp_ds.GetRasterBand(1)
+    interp_band.SetNoDataValue(nodata)
+
+    if use_blocks:
+        # @todo move to using iterate gdal generator from bruty.utils -- would need to add buffer option to iterate_gdal
+        pixels_per_supergrid = int(max(dx / cell_szx, dy / cell_szy)) + 1
+        row_block_size = col_block_size = 3 * pixels_per_supergrid
+        if row_block_size < 512:
+            row_block_size = col_block_size = 512
+        row_buffer_size = col_buffer_size = 1 * pixels_per_supergrid
+        row_size = interp_band.XSize
+        col_size = interp_band.YSize
+        for ic in tqdm(range(0, col_size, col_block_size), desc='column block', mininterval=.7):
+            cols = col_block_size
+            if ic + col_block_size > col_size:  # read a full set of data by offsetting the column index back a bit
+                ic = col_size - cols
+            col_buffer_lower = col_buffer_size if ic >= col_buffer_size else ic
+            col_buffer_upper = col_buffer_size if col_size - (ic + col_block_size) >= col_buffer_size else col_size - (ic + col_block_size)
+            read_cols = col_buffer_lower + cols + col_buffer_upper
+            for ir in tqdm(range(0, row_size, row_block_size), desc='row block', mininterval=.7, leave=False):
                 rows = row_block_size
                 if ir + row_block_size > row_size:
                     ir = row_size - rows
