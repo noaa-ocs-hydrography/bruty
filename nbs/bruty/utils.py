@@ -1,8 +1,8 @@
 import os
 import subprocess
 import pathlib
+import sys
 import time
-import msvcrt
 import re
 from datetime import datetime, timedelta
 
@@ -13,6 +13,52 @@ from osgeo import gdal, osr, ogr
 import pyproj.exceptions
 from pyproj import Transformer, CRS
 from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
+
+if sys.platform.startswith('linux'):
+    import fcntl
+    import termios
+    import struct
+
+    char_cache = []
+
+    def kbhit():  # Windows returns true if any characters are left in the buffer, so we are emulating that behavior
+        bytes_str = fcntl.ioctl(sys.stdin.fileno(), termios.FIONREAD, struct.pack('I', 0))
+        bytes_num = struct.unpack('I', bytes_str)[0]
+        if bytes_num > 0:
+            cache_chars()
+        return len(char_cache) > 0
+
+    # When a stdin.read is called the ioctl will return zero next time, so we need to cache the available characters now
+    # We do this non-blocking since the read will wait forever otherwise
+    def cache_chars():
+        fd = sys.stdin.fileno()
+        # fetch stdin's old flags
+        old_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        # set the none-blocking flag
+        fcntl.fcntl(fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
+        try:
+            ch = sys.stdin.read(1)  # read one character at a time, read() waits for eof
+            while ch:
+                char_cache.append(ch)
+                ch = sys.stdin.read(1)
+        except:
+            ch = ''
+        finally:
+            # resetting stdin to default flags
+            fcntl.fcntl(fd, fcntl.F_SETFL, old_flags)
+        return len(char_cache)
+
+    # Windows gives one character at a time, so we are emulating that behavior either returning the cached characters or reading more
+    def getch():
+        try:
+            return char_cache.pop(0)
+        except IndexError:
+            next_key = sys.stdin.read(1)  # this will block until a key is pressed
+            cache_chars()  # also caches any other keys that are available
+            return next_key
+
+else:
+    from msvcrt import kbhit, getch
 
 try:
     from tqdm import tqdm
@@ -45,13 +91,15 @@ def get_epsg_or_wkt(srs):
         #         break
     return epsg
 
+
 QUIT = "quit"
 HELP = "help"
 
+
 def key_to_action(key):
-    if b"q" == key:
+    if key in (b"q", 'q', b'Q', 'Q'):
         user_action = QUIT
-    elif b"?" == key:
+    elif key in (b"?", '?'):
         user_action = HELP
     else:
         user_action = None
@@ -59,13 +107,19 @@ def key_to_action(key):
 
 
 def user_action():
+    ignore_chars = ('\n', '\r')  # characters to ignore
     action = None
-    while msvcrt.kbhit():
+    while kbhit():
         print("checking keyboard input for 'qq' or other command")
-        action = key_to_action(msvcrt.getch())
-        if action == QUIT:
-            print("hit 'q' twice to quit")
-            action = key_to_action(msvcrt.getch())
+        ch = getch()
+        if ch not in ignore_chars:
+            action = key_to_action(ch)
+            if action == QUIT:
+                print("hit 'q' twice to quit")
+                second_key = getch()
+                if second_key in ignore_chars:  # user could hit q\n\n  (two enters) which should not quit, so ignore the first but not a second
+                    second_key = getch()
+                action = key_to_action(second_key)
     return action
 
 

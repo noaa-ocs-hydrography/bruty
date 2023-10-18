@@ -5,7 +5,6 @@ import datetime
 import tempfile
 import re
 import sys
-import msvcrt
 import subprocess
 import pathlib
 import shutil
