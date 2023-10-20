@@ -14,7 +14,7 @@ import pyproj.exceptions
 from pyproj import Transformer, CRS
 from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
 
-if sys.platform.startswith('linux'):
+if os.name == 'posix':
     import fcntl
     import termios
     import struct
@@ -57,8 +57,10 @@ if sys.platform.startswith('linux'):
             cache_chars()  # also caches any other keys that are available
             return next_key
 
-else:
+elif os.name == 'nt':
     from msvcrt import kbhit, getch
+else:
+    raise NotImplementedError("Unexpected operating system, not nt or posix")
 
 try:
     from tqdm import tqdm
