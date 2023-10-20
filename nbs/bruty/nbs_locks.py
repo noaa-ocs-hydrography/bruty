@@ -7,14 +7,9 @@ import random
 import functools
 import sys
 import time
-import win32con
-import win32file
-import pywintypes
-import winerror
-import msvcrt
 import enum
+import contextlib
 from multiprocessing.managers import SyncManager
-
 
 class LockNotAcquired(Exception):
     pass
@@ -292,10 +287,21 @@ class NameLock(BaseLock):
 # The code below is the equivalent of portalocker but for windows only and uses msvcrt (which might not exist in Python 3.6-3.8?)
 # basically fills the need for a os level file lock, not like the lock server being used above.
 
-LOCK_EX = 0x1  #: exclusive lock
-LOCK_SH = 0x2  #: shared lock
-LOCK_NB = 0x4  #: non-blocking
-LOCK_UN = msvcrt.LK_UNLCK  #: unlock
+if os.name == 'nt':  # pragma: no cover
+    import msvcrt
+    LOCK_EX = 0x1  #: exclusive lock
+    LOCK_SH = 0x2  #: shared lock
+    LOCK_NB = 0x4  #: non-blocking
+    LOCK_UN = msvcrt.LK_UNLCK  #: unlock
+
+elif os.name == 'posix':  # pragma: no cover
+    import fcntl
+    LOCK_EX = fcntl.LOCK_EX  #: exclusive lock
+    LOCK_SH = fcntl.LOCK_SH  #: shared lock
+    LOCK_NB = fcntl.LOCK_NB  #: non-blocking
+    LOCK_UN = fcntl.LOCK_UN  #: unlock
+else:
+    raise RuntimeError("Locks only defined for nt and posix platforms")
 
 
 class LockFlags(enum.IntFlag):
@@ -305,7 +311,6 @@ class LockFlags(enum.IntFlag):
     UNBLOCK = LOCK_UN  #: unlock
 
 
-__overlapped = pywintypes.OVERLAPPED()
 lock_length = int(2**31 - 1)
 current_time = getattr(time, "monotonic", time.time)
 DEFAULT_TIMEOUT = 5
@@ -334,104 +339,163 @@ class FileToLarge(BaseLockException):
     pass
 
 
-def file_lock(file_, flags: LockFlags):
-    if flags & LockFlags.SHARED:
-        if flags & LockFlags.NON_BLOCKING:
-            mode = win32con.LOCKFILE_FAIL_IMMEDIATELY
-        else:
-            mode = 0
-        # is there any reason not to reuse the following structure?
-        hfile = win32file._get_osfhandle(file_.fileno())
-        try:
-            win32file.LockFileEx(hfile, mode, 0, -0x10000, __overlapped)
-        except pywintypes.error as exc_value:
-            # error: (33, 'LockFileEx', 'The process cannot access the file
-            # because another process has locked a portion of the file.')
-            if exc_value.winerror == winerror.ERROR_LOCK_VIOLATION:
-                raise LockException(
-                    LockException.LOCK_FAILED,
-                    exc_value.strerror,
-                    fh=file_)
-            else:
-                # Q:  Are there exceptions/codes we should be dealing with
-                # here?
-                raise
-    else:
-        if flags & LockFlags.NON_BLOCKING:
-            mode = msvcrt.LK_NBLCK
-        else:
-            mode = msvcrt.LK_LOCK
+if os.name == 'nt':
+    import win32con
+    import win32file
+    import pywintypes
+    import winerror
+    import msvcrt
 
-        # windows locks byte ranges, so make sure to lock from file start
+    __overlapped = pywintypes.OVERLAPPED()
+
+    def file_lock(file_, flags: LockFlags):
+        """ Python docs say for the file lock (if blocking) will try 10 times at one second intervals before raising an exception
+        """
+        if flags & LockFlags.SHARED:
+            if flags & LockFlags.NON_BLOCKING:
+                mode = win32con.LOCKFILE_FAIL_IMMEDIATELY
+            else:
+                mode = 0
+            # is there any reason not to reuse the following structure?
+            hfile = win32file._get_osfhandle(file_.fileno())
+            try:
+                win32file.LockFileEx(hfile, mode, 0, -0x10000, __overlapped)
+            except pywintypes.error as exc_value:
+                # error: (33, 'LockFileEx', 'The process cannot access the file
+                # because another process has locked a portion of the file.')
+                if exc_value.winerror == winerror.ERROR_LOCK_VIOLATION:
+                    raise LockException(
+                        LockException.LOCK_FAILED,
+                        exc_value.strerror,
+                        fh=file_)
+                else:
+                    # Q:  Are there exceptions/codes we should be dealing with
+                    # here?
+                    raise
+        else:
+            if flags & LockFlags.NON_BLOCKING:
+                mode = msvcrt.LK_NBLCK
+            else:
+                mode = msvcrt.LK_LOCK
+
+            # windows locks byte ranges, so make sure to lock from file start
+            try:
+                savepos = file_.tell()
+                if savepos:
+                    # [ ] test exclusive lock fails on seek here
+                    # [ ] test if shared lock passes this point
+                    file_.seek(0)
+                    # [x] check if 0 param locks entire file (not documented in
+                    #     Python)
+                    # [x] fails with "IOError: [Errno 13] Permission denied",
+                    #     but -1 seems to do the trick
+
+                try:
+                    # docs say the locking will try 10 times at one second intervals before raising an exception
+                    # https://docs.python.org/3/library/msvcrt.html
+                    msvcrt.locking(file_.fileno(), mode, lock_length)
+                except IOError as exc_value:
+                    # [ ] be more specific here
+                    raise LockException(
+                        LockException.LOCK_FAILED,
+                        exc_value.strerror,
+                        fh=file_)
+                finally:
+                    if savepos:
+                        file_.seek(savepos)
+            except IOError as exc_value:
+                raise LockException(
+                    LockException.LOCK_FAILED, exc_value.strerror,
+                    fh=file_)
+
+    def file_unlock(file_):
         try:
             savepos = file_.tell()
             if savepos:
-                # [ ] test exclusive lock fails on seek here
-                # [ ] test if shared lock passes this point
                 file_.seek(0)
-                # [x] check if 0 param locks entire file (not documented in
-                #     Python)
-                # [x] fails with "IOError: [Errno 13] Permission denied",
-                #     but -1 seems to do the trick
 
             try:
-                msvcrt.locking(file_.fileno(), mode, lock_length)
-            except IOError as exc_value:
-                # [ ] be more specific here
-                raise LockException(
-                    LockException.LOCK_FAILED,
-                    exc_value.strerror,
-                    fh=file_)
+                msvcrt.locking(file_.fileno(), LockFlags.UNBLOCK,
+                               lock_length)
+            except IOError as exc:
+                exception = exc
+                if exc.strerror == 'Permission denied':
+                    hfile = win32file._get_osfhandle(file_.fileno())
+                    try:
+                        win32file.UnlockFileEx(
+                            hfile, 0, -0x10000, __overlapped)
+                    except pywintypes.error as exc:
+                        exception = exc
+                        if exc.winerror == winerror.ERROR_NOT_LOCKED:
+                            # error: (158, 'UnlockFileEx',
+                            #         'The segment is already unlocked.')
+                            # To match the 'posix' implementation, silently
+                            # ignore this error
+                            pass
+                        else:
+                            # Q:  Are there exceptions/codes we should be
+                            # dealing with here?
+                            raise
+                else:
+                    raise LockException(
+                        LockException.LOCK_FAILED,
+                        exception.strerror,
+                        fh=file_)
             finally:
                 if savepos:
                     file_.seek(savepos)
-        except IOError as exc_value:
+        except IOError as exc:
             raise LockException(
-                LockException.LOCK_FAILED, exc_value.strerror,
+                LockException.LOCK_FAILED, exc.strerror,
                 fh=file_)
 
-def file_unlock(file_):
-    try:
-        savepos = file_.tell()
-        if savepos:
-            file_.seek(0)
+
+elif os.name == 'posix':  # pragma: no cover
+    import fcntl
+
+    import signal, errno
+    from contextlib import contextmanager
+    import fcntl
+
+
+    @contextmanager
+    def timeout(seconds):
+        def timeout_handler(signum, frame):
+            # Now that flock retries automatically when interrupted, we need
+            # an exception to stop it
+            # This exception will propagate on the main thread, make sure you're calling flock there
+            raise InterruptedError
+
+        original_handler = signal.signal(signal.SIGALRM, timeout_handler)
 
         try:
-            msvcrt.locking(file_.fileno(), LockFlags.UNBLOCK,
-                           lock_length)
-        except IOError as exc:
-            exception = exc
-            if exc.strerror == 'Permission denied':
-                hfile = win32file._get_osfhandle(file_.fileno())
-                try:
-                    win32file.UnlockFileEx(
-                        hfile, 0, -0x10000, __overlapped)
-                except pywintypes.error as exc:
-                    exception = exc
-                    if exc.winerror == winerror.ERROR_NOT_LOCKED:
-                        # error: (158, 'UnlockFileEx',
-                        #         'The segment is already unlocked.')
-                        # To match the 'posix' implementation, silently
-                        # ignore this error
-                        pass
-                    else:
-                        # Q:  Are there exceptions/codes we should be
-                        # dealing with here?
-                        raise
-            else:
-                raise LockException(
-                    LockException.LOCK_FAILED,
-                    exception.strerror,
-                    fh=file_)
+            signal.alarm(seconds)
+            yield
         finally:
-            if savepos:
-                file_.seek(savepos)
-    except IOError as exc:
-        raise LockException(
-            LockException.LOCK_FAILED, exc.strerror,
-            fh=file_)
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, original_handler)
 
+    def file_lock(file_, flags: LockFlags):
+        locking_exceptions = (IOError, InterruptedError)
+        with contextlib.suppress(NameError):
+            locking_exceptions += (BlockingIOError,)  # type: ignore
+        # Locking with NON_BLOCKING without EXCLUSIVE or SHARED enabled results
+        # in an error
+        if (flags & LockFlags.NON_BLOCKING) and not flags & (
+            LockFlags.SHARED | LockFlags.EXCLUSIVE
+        ):
+            raise RuntimeError(
+                'When locking in non-blocking mode the SHARED '
+                'or EXCLUSIVE flag must be specified as well',
+            )
+        try:
+            with timeout(9):  # if this is non-blocking it returns immediately, for blocking we'll try for 9 seconds since that is what windows does
+                fcntl.flock(file_, flags)
+        except locking_exceptions:
+            raise LockException(LockException.LOCK_FAILED, "Failed to acquire lock", fh=file_) from None
 
+    def file_unlock(file_):
+        fcntl.flock(file_.fileno(), LockFlags.UNBLOCK)
 
 class Lock:
     def __init__(
@@ -520,7 +584,7 @@ class Lock:
                 # If fail_when_locked is True, stop trying
                 if fail_when_locked:
                     try_close()
-                    raise AlreadyLocked(exception)
+                    raise AlreadyLocked(exception) from None
 
                 # Wait a bit
                 time.sleep(check_interval)

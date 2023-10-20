@@ -66,6 +66,7 @@ def test_exclusive_twice_with():
                 raise Exception("Should not reach here")
         except AlreadyLocked:
             pass
+    os.remove(fname)
 
 
 def test_shared_then_exclusive_blocking():
@@ -77,6 +78,8 @@ def test_shared_then_exclusive_blocking():
             lock2.release()
         except AlreadyLocked:
             pass
+        else:
+            raise Exception("AlreadyLocked should have been raised")
     os.remove(fname)
 
 
@@ -104,3 +107,7 @@ if __name__ == "__main__":
     test_shared_then_exclusive()
     print("exclusive_then_shared")
     test_exclusive_then_shared()
+    print("exclusive_twice_with")
+    test_exclusive_twice_with()
+    print("shared_then_exclusive_blocking")
+    test_shared_then_exclusive_blocking()
