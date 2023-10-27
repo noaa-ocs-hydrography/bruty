@@ -64,7 +64,7 @@ def test_overwrite():
 
 
 def test_no_substitution():
-    c = configs.load_config(r"configs\substitutions.config", interp=False, immediate_interp=False)
+    c = configs.load_config(r"configs\substitutions.config", interp=False)
     # c.write(sys.stdout)
     assert c['DEFAULT']['subst'] == 'changed'
     assert c['DEFAULT']['sub_test'] == '${subst}${test_sub1}${test_sub2}'
@@ -73,7 +73,7 @@ def test_no_substitution():
 
 
 def test_delay_substitution():
-    c = configs.load_config(r"configs\substitutions.config", interp=True, immediate_interp=False)
+    c = configs.load_config(r"configs\substitutions.config", interp=True)
     # c.write(sys.stdout)
     assert c['DEFAULT']['subst'] == 'changed'
     assert c['DEFAULT']['sub_test'] == 'changedchangedchanged'
@@ -81,11 +81,14 @@ def test_delay_substitution():
     assert c['DEFAULT']['test_sub2'] == 'changed'
 
 
-def test_immediate_substitution():
-    c = configs.load_config(r"configs\substitutions.config", interp=True, immediate_interp=True)
-    # c.write(sys.stdout)
-    assert c['DEFAULT']['subst'] == 'changed'
-    assert c['DEFAULT']['sub_test'] == 'changedchangedbase'
-    assert c['DEFAULT']['test_sub1'] == 'changed'
-    assert c['DEFAULT']['test_sub2'] == 'base'
-
+def test_subsection():
+    c = configs.load_config(r"configs\substitutions.config")
+    # this is explicitly supplied in the last config
+    assert c['SEC']['test_section'] == 'subst'
+    # This is a 'default' section value in an additional_config - make sure it propagates
+    assert c['DEFAULT']['sub'] == 'passed'
+    # The 'default' section in the last file should determine this -
+    # there was a bug where the additional_configs would supply a default but configparser would fill a section value
+    # then the default in the last file would not take effect since it thought there was an explicit section value from another file
+    assert c['SEC']['subst'] == 'changed'
+    assert c['SEC']['def_sec'] == '2'

@@ -94,9 +94,46 @@ def parse_ints_with_ranges(val: str):
     return full_list
 
 
+def get_additional_configs(config_filename, base_config_path, parent_paths=tuple()):
+    configs = []
+    raw_config_file = configparser.ConfigParser()
+    found = raw_config_file.read(config_filename)  # read the initial file to get and extra configs and additional defaults
+    if len(found) == 0:
+        raise FileNotFoundError("File not found " + str(config_filename))
+
+    try:
+        extra_confs = [fname.strip() for fname in parse_multiple_values(raw_config_file['DEFAULT']['additional_configs'])]
+        extra_confs.reverse()  # file should be in most significant to least - read in the opposite order
+    except KeyError:
+        extra_confs = []
+    # use the parameter base_config_path and if it doesn't exist then see if config_path is set, else use the directory local to the config.
+    if base_config_path is None:
+        try:
+            config_basepath = raw_config_file['DEFAULT']['config_path']
+            pth = pathlib.Path(config_basepath)
+            if not pth.is_absolute():
+                pth = config_filename.parent.joinpath(pth)  # this is an absolute path determined above
+            base_config_path = pth
+        except KeyError:
+            base_config_path = config_filename.parent
+    base_config_path = pathlib.Path(base_config_path)  # make sure it's a pathlib Path
+    # load each file in the order of priority
+    for fname in extra_confs:
+        fname = pathlib.Path(fname)
+        # if the additional config is an absolute path then use it otherwise use the basepath determined above as the starting point
+        if not fname.is_absolute():
+            fname = base_config_path.joinpath(fname)
+        fpath = pathlib.Path(fname).absolute().resolve()
+        if fpath in parent_paths:
+            raise FileExistsError("Circular load of configs in " + str(config_filename) + " and " + str(fpath))
+        configs.append(fpath)
+        configs.extend(get_additional_configs(fpath, base_config_path, parent_paths+(config_filename, )))
+    return configs
+
+
 def load_config(config_filename: Union[str, os.PathLike], base_config_path: Union[str, os.PathLike] = None,
                 initial_config: Union[str, os.PathLike, configparser.ConfigParser] = None,
-                interp: bool = True, immediate_interp: bool = False, parent_paths: tuple = tuple()):
+                interp: bool = True):
     """
     Parameters
     ----------
@@ -128,60 +165,21 @@ def load_config(config_filename: Union[str, os.PathLike], base_config_path: Unio
     -------
 
     """
+    # There are problems with how this was done.
+    # If read_dict() is used then the config object is translated and sections have a full copy of data.
+    # It an earlier default value will get copied into a section and prevents what should have been a propagated value from a later default.
+    # Or a later default can overwrite an earlier section specific value accidentally
+    # So all the config filenames with full paths in order should be found and then read() should be called multiple times.
     config_filename = pathlib.Path(config_filename).absolute().resolve()
-    # if immediate_interp is set then this will translate variables into absolute values upon read  ex: ${utm} -> 19
-    # really it's upon using 'get' methods but this configparser is imported to the final one at the bottom of this function
-    # so it will happen within this function.
-    if immediate_interp:
-        use_interp = configparser.ExtendedInterpolation()
-    else:
-        use_interp = None
-    raw_config_file = configparser.ConfigParser(interpolation=use_interp)
+    extra_configs = get_additional_configs(config_filename, base_config_path)
+    use_interp = configparser.ExtendedInterpolation() if interp else None
+    config_file = configparser.ConfigParser(interpolation=use_interp)
     if initial_config:
         if isinstance(initial_config, str):
-            raw_config_file.read(initial_config)
+            config_file.read(initial_config)
         else:  # this will accept a dictionary or a configparser instance which acts like a dictionary {section: {key: value}}
-            raw_config_file.read_dict(initial_config)
-    found = raw_config_file.read(config_filename)  # read the initial file to get and extra configs and additional defaults
-    if len(found) == 0:
-        raise FileNotFoundError("File not found " + str(config_filename))
-
-    try:
-        extra_confs = [fname.strip() for fname in parse_multiple_values(raw_config_file['DEFAULT']['additional_configs'])]
-        extra_confs.reverse()  # file should be in most significant to least - read in the opposite order
-    except KeyError:
-        extra_confs = []
-    # use the parameter base_config_path and if it doesn't exist then see if config_path is set, else use the directory local to the config.
-    if base_config_path is None:
-        try:
-            config_basepath = raw_config_file['DEFAULT']['config_path']
-            pth = pathlib.Path(config_basepath)
-            if not pth.is_absolute():
-                pth = config_filename.parent.joinpath(pth)  # this is an absolute path determined above
-            base_config_path = pth
-        except KeyError:
-            base_config_path = config_filename.parent
-    base_config_path = pathlib.Path(base_config_path)  # make sure it's a pathlib Path
-    # load each file in the order of priority
-    for fname in extra_confs:
-        fname = pathlib.Path(fname)
-        # if the additional config is an absolute path then use it otherwise use the basepath determined above as the starting point
-        if not fname.is_absolute():
-            fname = base_config_path.joinpath(fname)
-        fpath = pathlib.Path(fname).absolute().resolve()
-        if fpath in parent_paths:
-            raise FileExistsError("Circular load of configs in " + str(config_filename) + " and " + str(fpath))
-        sub_config_file = load_config(fpath, base_config_path, parent_paths=parent_paths+(config_filename, ),
-                                      interp=immediate_interp, immediate_interp=immediate_interp)
-        raw_config_file.read_dict(sub_config_file)
-    raw_config_file.read(config_filename)  # read the original file again so it's defaults are used and not overwritten by the sub-configs
-    # if interp is set then this will translate variables into absolute values upon 'get' of the returned configparser instance
-    if interp:
-        use_interp = configparser.ExtendedInterpolation()
-    else:
-        use_interp = None
-    config_file = configparser.ConfigParser(interpolation=use_interp)
-    config_file.read_dict(raw_config_file)
+            config_file.read_dict(initial_config)
+    config_file.read(extra_configs+[config_filename])
     return config_file
 
 
