@@ -634,7 +634,6 @@ def complete_export_tiled(export, all_simple_records, closing_dist, epsg, decima
     new_nodata = 1000000
     bands = (elevation_band_index, uncertainty_band_index, contributor_band_index)
     image_ops = BufferedImageOps(original_ds)
-    buff = closing_dist / resolution
 
     # iterate the contributor index since we are modifying the data as we go
     # so checking elevation==nodata will fail as we modify what becomes the buffer area of the next block
@@ -652,6 +651,8 @@ def complete_export_tiled(export, all_simple_records, closing_dist, epsg, decima
     all_simple_records = {}
     old_to_new_mapping = {0: 0.0}  # add the generalized contributor since we know the conversion and there is no matching orig_simple_record
     inew = 1
+
+    buff = closing_dist / resolution
     LOGGER.debug("iterate blocks to generalize data")
     for block_cnt, block in enumerate(image_ops.iterate_gdal(buff, buff, band_nums=bands, min_block_size=block_size, max_block_size=block_size)):
         # if True or not (block_cnt==0 or block_cnt==1 or (block_cnt >= 4 and block_cnt <= 7)):
@@ -676,7 +677,7 @@ def complete_export_tiled(export, all_simple_records, closing_dist, epsg, decima
                 if band_num == elevation_band_index:
                     has_data = has_data or where_not_nodata(subarray, new_nodata).any()
             progress.update(1)
-            if has_data:
+            if has_data and closing_dist > 0:
                 # FIXME - HACK  we should send a float version of the contributor number since we have a hack
                 #   of storing int32 inside the float32 tiff, but zero is the same in both so we can get away with it for now
                 # numpy.array(0, dtype=numpy.float32).tobytes()

@@ -922,7 +922,7 @@ class WorldDatabase(VABC):
         """
         data_path = WorldDatabase.metadata_filename_in_dir(data_dir)
         mode = 'rb'
-
+        # if no_locks was used then this always succeeds and a different lock should be used earlier like in combine_tiles.py script
         with FileLock(data_path, mode, SHARED) as infile:  # this will wait for the file to be available
             data = pickle.load(infile)
         data['data_path'] = pathlib.Path(data_dir)  # override in case the user copied the data to a different path
