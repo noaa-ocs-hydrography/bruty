@@ -3,6 +3,7 @@ import datetime
 import pprint
 import io
 # import glob
+import getpass
 import pathlib
 import logging
 import inspect
@@ -209,7 +210,9 @@ def iter_configs(config_filenames: Union[list, str, os.PathLike], log_files: boo
     user_directory_exists = False
     if isinstance(config_filenames, (str, os.PathLike)):
         use_configs = pathlib.Path(config_filenames)  # (os.path.dirname(os.path.abspath(__file__))
-        user_dir = use_configs.joinpath(os.getlogin())
+        # Previously, the logged in user was found with os.getlogin(), but this was incompatible with linux systemd services
+        # user_dir = use_configs.joinpath(os.getlogin())
+        user_dir = use_configs.joinpath(getpass.getuser())
         if user_dir.exists():
             user_directory_exists = True
             use_configs = user_dir
