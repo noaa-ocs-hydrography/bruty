@@ -189,8 +189,6 @@ def iter_configs(config_filenames: Union[list, str, os.PathLike], log_files: boo
     A ConfigParser object is created.  Then the default_config_name is loaded, if applicable.
     Then loads all configs from the base_configs directory (local to the script) listed in the [DEFAULT] section 'additional_configs' entry.
     Then looks for a subdirectory of the logged in user (os.getlogin()) and uses that if it exists, otherwise uses the current dir.
-    Previously, the logged in user was found with os.getlogin(), but this was incompatible with linux systemd services
-    The previous method was left in a commented line.
     Finally iterates each config in the user subdirectory or current directory so they have the highest priority.
 
     Parameters
@@ -212,6 +210,7 @@ def iter_configs(config_filenames: Union[list, str, os.PathLike], log_files: boo
     user_directory_exists = False
     if isinstance(config_filenames, (str, os.PathLike)):
         use_configs = pathlib.Path(config_filenames)  # (os.path.dirname(os.path.abspath(__file__))
+        # Previously, the logged in user was found with os.getlogin(), but this was incompatible with linux systemd services
         # user_dir = use_configs.joinpath(os.getlogin())
         user_dir = use_configs.joinpath(getpass.getuser())
         if user_dir.exists():
