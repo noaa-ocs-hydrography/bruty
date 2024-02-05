@@ -11,6 +11,7 @@ import logging
 import io
 
 import numpy
+from osgeo import gdal, osr, ogr
 
 from nbs.bruty import world_raster_database
 from nbs.bruty.world_raster_database import WorldDatabase, use_locks, UTMTileBackendExactRes, NO_OVERRIDE
@@ -23,6 +24,7 @@ from nbs.configs import get_logger, run_command_line_configs, make_family_of_log
 from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_metadata, ConnectionInfo, connect_params_from_config
 from nbs.scripts.convert_csar import convert_csar_python
 from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db
+from nbs_utils.points_utils import to_npz
 
 interactive_debug = False
 if interactive_debug and sys.gettrace() is None:  # this only is set when a debugger is run (?)
@@ -104,6 +106,7 @@ def find_surveys_to_update(db, sort_dict, names_list):
 def cached_conversion_name(path):
     """  Find a cached conversion on disk that matches the supplied original path.
     For a CSAR file this would be a .bruty.npz or .csar.tif file.
+    For a GeoPackage file this would be a .bruty.npz file.
     If the conversion file exists but is older than the supplied path then it is ignored and the original path will be returned.
 
     Parameters
@@ -117,14 +120,14 @@ def cached_conversion_name(path):
 
     """
     # convert csar names to exported data, 1 of 3 types
-    if str(path).lower().endswith(".csar"):
-        csar_path = pathlib.Path(path)
+    if str(path).lower().endswith(".csar") or str(path).lower().endswith(".gpkg"):
+        orig_path = pathlib.Path(path)
         for ext in (".csar.tif", ".bruty.npz"):
-            export_path = csar_path.with_suffix(ext)
+            export_path = orig_path.with_suffix(ext)
             if export_path.exists():
                 # if the npz or tif file is newer than the geopackage or csar then use the exported file
                 # - otherwise pretend it's not there and force a reconvert
-                if (export_path.stat().st_mtime - csar_path.stat().st_mtime) >= 0:
+                if (export_path.stat().st_mtime - orig_path.stat().st_mtime) >= 0:
                     path = str(export_path)
                     break
 
@@ -225,6 +228,65 @@ def get_converted_csar(path, transform_metadata, sid):
     return path
 
 
+def convert_nbs_gpkg(path):
+    """ Converts an NBS geopackage to a bruty.npz file.  This will only work on gepackages that contain point data and the first layer is
+    specially named NBS-XYZU.
+    Parameters
+    ----------
+    path : str or Path
+
+    Returns
+    -------
+    str : the path to the npz file or the original path if the conversion failed.
+    """
+    try:
+        # assume if the NBS name exists that it is the only layer and convert to NPZ
+        gpkg = ogr.OpenEx(str(path))
+        lyr = gpkg.GetLayer("NBS-XYZU")
+        srs = lyr.GetSpatialRef()
+        npts = lyr.GetFeatureCount()
+        x = numpy.zeros(npts, dtype=numpy.float64)
+        y = numpy.zeros(npts, dtype=numpy.float64)
+        depth = numpy.zeros(npts, dtype=numpy.float64)
+        uncertainty = numpy.zeros(npts, dtype=numpy.float64)
+        for i, feat in enumerate(lyr):
+            x[i], y[i], depth[i] = feat.GetGeometryRef().GetPoint()
+            uncertainty[i] = feat['uncertainty']
+        # write the npz file
+        npz_path = pathlib.Path(path).with_suffix(".bruty.npz")
+        to_npz(str(npz_path), srs, numpy.array([x, y, depth, uncertainty]).T)
+    except Exception as e:
+        print(f"Error converting {path} to npz: {e}")
+        npz_path = None
+    return npz_path
+
+
+def get_converted_gpkg(path, sid):
+    """ This function converts a gpkg to a npz file if the gpkg has an NBS-XYZU layer (i.e. is a special NBS file).
+
+    Parameters
+    ----------
+    path
+    sid
+
+    Returns
+    -------
+    str : the path to the converted file, if no conversion was done, the original path is returned.
+    """
+    path = cached_conversion_name(path)
+    if path.lower().endswith(".gpkg") and os.path.exists(path):
+        # use the file lock on CSAR, we need this lock whether or not we are running a lock server and
+        # there shouldn't be many of them or changing fast (which is the problem with Windows locks)
+        lock_name = path + ".conversion.lock"
+        with Lock(lock_name, 'w', fail_when_locked=True) as _lck:
+            LOGGER.info(f"Trying to perform gpkg conversion for nbs_id={sid}, {path}")
+            exported_path = convert_nbs_gpkg(path)
+            if exported_path:
+                path = str(exported_path)
+        remove_file(lock_name)
+    return path
+
+
 def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug=False, override_epsg=NO_OVERRIDE, crop=False):
     unconverted_csars = []
     files_not_found = []
@@ -292,6 +354,18 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
                         path = get_converted_csar(path, transform_metadata, sid)
                         if not path:
                             LOGGER.error(f"no csar conversion file found for nbs_id={sid}, {path}")
+                            unconverted_csars.append(names_list.pop(i))
+                            continue
+                    except (LockNotAcquired, BaseLockException):
+                        LOGGER.info(f"{path} is locked and is probably being converted by another process")
+                        continue
+                # @TODO determine if the speed increase is worth the conversion to NPZ instead of just processing as a geopackage
+                # TODO - allow other geopackages (not the enc converted ones) to pass through to normal processing
+                if path.lower().endswith(".gpkg"):
+                    try:
+                        path = get_converted_gpkg(path, sid)
+                        if not path:
+                            LOGGER.error(f"no npz conversion file found for nbs_id={sid}, {path}")
                             unconverted_csars.append(names_list.pop(i))
                             continue
                     except (LockNotAcquired, BaseLockException):
