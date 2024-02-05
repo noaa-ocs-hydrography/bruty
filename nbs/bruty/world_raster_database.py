@@ -1365,6 +1365,9 @@ class WorldDatabase(VABC):
                         progress_bar.reset()
                         with AreaLock(tile_list, EXCLUSIVE | NON_BLOCKING, self.db.get_history_path_by_index) as lock:
                             self.start_survey_insertion(path_to_survey_data, tile_list, contrib_id, transaction_id)
+                            # @TODO for small text data (like ENCs) there is a lot of overhead in making an accumulation DB and then merging it in.
+                            #   Could optionally determine/supply the point count (for npz files) and
+                            #   then choose to directly insert or make an accumulation DB
                             temp_path = tempfile.mkdtemp(suffix="_accum", dir=self.db.data_path)
                             storage_db = self.db.make_accumulation_db(temp_path)
                             for wkt, x, y, depth, uncertainty in iterate_points_file(path_to_survey_data, dformat=dformat, block_size=block_size):

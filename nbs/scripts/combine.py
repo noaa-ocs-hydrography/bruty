@@ -241,8 +241,8 @@ def convert_nbs_gpkg(path):
     """
     try:
         # assume if the NBS name exists that it is the only layer and convert to NPZ
-        gpkg = ogr.OpenEx(str(path))
-        lyr = gpkg.GetLayer("NBS-XYZU")
+        gpkg = ogr.Open(str(path))
+        lyr = gpkg.GetLayer("NBS_XYZU")
         srs = lyr.GetSpatialRef()
         npts = lyr.GetFeatureCount()
         x = numpy.zeros(npts, dtype=numpy.float64)
@@ -251,6 +251,7 @@ def convert_nbs_gpkg(path):
         uncertainty = numpy.zeros(npts, dtype=numpy.float64)
         for i, feat in enumerate(lyr):
             x[i], y[i], depth[i] = feat.GetGeometryRef().GetPoint()
+            depth[i] = feat['elevation']
             uncertainty[i] = feat['uncertainty']
         # write the npz file
         npz_path = pathlib.Path(path).with_suffix(".bruty.npz")
