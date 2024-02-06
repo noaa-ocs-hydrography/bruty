@@ -1186,34 +1186,45 @@ class WorldDatabase(VABC):
         generator yielding (wkt, x, y, depth, uncertainty)
 
         """
+
         self.db.LOGGER.debug(f"insert geopackage {path_to_survey_data}")
         gpkg = gdal.OpenEx(path_to_survey_data)
         # geopackages can have both raster and vector layers, so we will iterate through them but currently only supporting point data from a gpkg
         for ilyr in range(gpkg.GetLayerCount()):
             lyr = gpkg.GetLayer(ilyr)
+            # The Z value could be in the XYZ coordinate or in a field.
+            # See if there is a field we expect to be the desired Z value based on its name
+            dfn = lyr.GetLayerDefn()
+            field_names = [dfn.GetFieldDefn(ifld).name for ifld in range(dfn.GetFieldCount())]
+            elevation_field = None
+            for field in field_names:
+                if field.lower() in ["elevation"]:
+                    elevation_field = field
+                    break
+            # Iterate all the points in the geopackage layer.
+            # It is faster to use fiona which does this in C calls but we are avoiding adding that dependency (for now)
+            # There is old code in the repository history that optionally got the coordinates using fiona
             if lyr.GetGeomType() == ogr.wkbPoint:
                 srs = lyr.GetSpatialRef()
                 wkt = srs.ExportToWkt()
-                attr_depth[i] = feat['elevation']  # test what happens with attribute name not existing
-
                 total_points = lyr.GetFeatureCount()
-                for i, feat in enumerate(lyr):
-                    if i % block_size == 0:  # allocate space for next block of data
-                        npts = min(total_points - i, block_size)
+                # ifeat is the index along all the points in the layer
+                # i is the index in a particular block of data we will return
+                for ifeat, feat in enumerate(lyr):
+                    i = ifeat % block_size
+                    if i == 0:  # allocate space for next block of data
+                        npts = min(total_points - ifeat, block_size)  # this is either a block of data or the remaining points making a partial block
                         x = numpy.zeros(npts, dtype=numpy.float64)
                         y = numpy.zeros(npts, dtype=numpy.float64)
                         depth = numpy.zeros(npts, dtype=numpy.float64)
                         uncertainty = numpy.zeros(npts, dtype=numpy.float64)
                     # read the point data and get the depth from the point Z or override with the elevation attribute
                     x[i], y[i], depth[i] = feat.GetGeometryRef().GetPoint()
-                    try:
-                        attr_depth = feat['elevation']
-                        depth[i] = attr_depth
-                    except KeyError:
-                        pass
+                    if elevation_field:  # override the Z with the field value
+                        depth[i] = feat[elevation_field]
                     uncertainty[i] = feat['uncertainty']
                     # yield the block of data if it is full or we are at the end of the file
-                    if i % block_size == block_size - 1 or i == total_points - 1:  # end of block or end of file
+                    if i == block_size - 1 or ifeat == total_points - 1:  # end of block or end of file
                         yield wkt, x, y, depth, uncertainty
 
     def insert_survey_as_outside_area_of_interest(self, path_to_survey_data, survey_score=100, flag=0, dformat=None, override_epsg: int = NO_OVERRIDE,
@@ -1288,7 +1299,8 @@ class WorldDatabase(VABC):
                 gpkg = gdal.OpenEx(path_to_survey_data)
                 # geopackages can have both raster and vector layers, so we will iterate through them but currently only supporting point data from a gpkg
                 disjoints = []
-                point_lyr_count = 0
+                point_lyr_count = 0  # count the points layers which may not be the same as the total layers since are ignoring rasters
+                # FIXME should we raise an exception if there are raster layers?
                 for ilyr in range(gpkg.GetLayerCount()):
                     lyr = gpkg.GetLayer(ilyr)
                     if lyr.GetGeomType() == ogr.wkbPoint:
@@ -1304,7 +1316,8 @@ class WorldDatabase(VABC):
                         bounds = poly_from_pts(numpy.array(((lx, ly), (ux, uy))), transformer)
                         lyr_is_disjoint = self.area_of_interest and not self.area_of_interest.Intersects(bounds)
                         disjoints.append(lyr_is_disjoint)
-                if len(lyr_is_disjoint) == point_lyr_count and all(disjoints):
+                # Make sure all points layers were checked and disjoint from the area we want
+                if len(disjoints) == point_lyr_count and all(disjoints):
                     skip_as_disjoint = True
 
             if skip_as_disjoint:
@@ -1374,7 +1387,11 @@ class WorldDatabase(VABC):
                             #   then choose to directly insert or make an accumulation DB
                             temp_path = tempfile.mkdtemp(suffix="_accum", dir=self.db.data_path)
                             storage_db = self.db.make_accumulation_db(temp_path)
-                            for wkt, x, y, depth, uncertainty in iterate_points_file(path_to_survey_data, dformat=dformat, block_size=block_size):
+                            if str(path_to_survey_data).lower().endswith(".gpkg"):
+                                pts_iterator = self.iterate_pts_gpkg(path_to_survey_data, block_size=block_size)
+                            else:
+                                pts_iterator = iterate_points_file(path_to_survey_data, dformat=dformat, block_size=block_size)
+                            for wkt, x, y, depth, uncertainty in pts_iterator:
                                 progress_bar.update(1)
                                 if has_out_of_bounds_points:  # must have specified crop and failed the tile computation, so remove the data
                                     too_big = numpy.logical_or(x > self.db.tile_scheme.max_x, y > self.db.tile_scheme.max_y)
@@ -1404,6 +1421,8 @@ class WorldDatabase(VABC):
                             del storage_db
         else:
             raise Exception(f"Survey Exists already in database {contrib_id}")
+
+    insert_txt_survey = insert_points_survey  # @TODO remove this alias for old function name for backwards compatibility
 
     def _insert_xyz(self, x, y, depth, uncertainty, survey_score, flag, contrib_id, path_to_survey_data, compare_callback, override_epsg, reverse,
                     limit_to_tiles=None, force=False, dformat=None, transaction_id=-1, sorting_metadata=None):
@@ -2091,6 +2110,8 @@ class WorldDatabase(VABC):
                                                    dformat="gdal", transaction_id=transaction_id, sorting_metadata=sorting_metadata)
                 else:
                     raise Exception(f"Survey Exists already in database {contrib_id}")
+
+    insert_survey_gdal = insert_raster_survey  # @TODO remove this alias for old function for backward compatibility
 
     def export_area(self, fname, x1, y1, x2, y2, res, target_epsg=None, driver="GTiff",
                     layers=(LayersEnum.ELEVATION, LayersEnum.UNCERTAINTY, LayersEnum.CONTRIBUTOR),
