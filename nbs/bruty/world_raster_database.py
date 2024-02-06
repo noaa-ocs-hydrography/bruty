@@ -1131,19 +1131,13 @@ class WorldDatabase(VABC):
                 done = True
         if not done:
             if extension in ['.bag', '.tif', '.tiff']:
-                self.insert_survey_gdal(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback,
+                self.insert_raster_survey(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback,
                                         reverse_z=reverse_z, limit_to_tiles=limit_to_tiles, force=force, survey_score=survey_score, flag=flag,
                                         transaction_id=transaction_id, sorting_metadata=sorting_metadata)
                 done = True
         if not done:
-            if extension in ['.gpkg']:
-                self.insert_survey_gpkg(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback,
-                                        reverse_z=reverse_z, limit_to_tiles=limit_to_tiles, force=force, survey_score=survey_score, flag=flag,
-                                        transaction_id=transaction_id, sorting_metadata=sorting_metadata)
-                done = True
-        if not done:
-            if extension in ['.txt', '.npy', '.csv', '.npz']:
-                self.insert_txt_survey(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback,
+            if extension in ['.txt', '.npy', '.csv', '.npz', '.gpkg']:
+                self.insert_points_survey(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback,
                                        reverse_z=reverse_z, limit_to_tiles=limit_to_tiles, force=force, survey_score=survey_score, flag=flag,
                                        dformat=dformat, transaction_id=transaction_id, sorting_metadata=sorting_metadata, crop=crop)
                 done = True
@@ -1178,67 +1172,49 @@ class WorldDatabase(VABC):
             print("@todo - do transforms correctly with proj/vdatum etc")
         return transformer
 
-    def insert_survey_gpkg(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE,
-                           contrib_id=numpy.nan, compare_callback=None, reverse_z=False, limit_to_tiles=None, force=False,
-                           transaction_id=-1, sorting_metadata=None):
+    def iterate_pts_gpkg(self, path_to_survey_data, block_size=30000000):
         """ Reads a geopackage for layers that are point data (currently ignores rasters or other geometries) with an uncertainty field per point.
-        Inserts the point data into current WorldDatabase object.
 
         Parameters
         ----------
         path_to_survey_data
-        survey_score
-        flag
-        override_epsg
-        contrib_id
-        compare_callback
-        reverse_z
-        limit_to_tiles
-        force
-        transaction_id
-        sorting_metadata
+        block_size : int
+            maximum number of points to read at once
 
         Returns
         -------
+        generator yielding (wkt, x, y, depth, uncertainty)
 
         """
         self.db.LOGGER.debug(f"insert geopackage {path_to_survey_data}")
-        raise Exception("Need to add an overview/area_of_interest check to insert geopackage")
         gpkg = gdal.OpenEx(path_to_survey_data)
         # geopackages can have both raster and vector layers, so we will iterate through them but currently only supporting point data from a gpkg
         for ilyr in range(gpkg.GetLayerCount()):
             lyr = gpkg.GetLayer(ilyr)
             if lyr.GetGeomType() == ogr.wkbPoint:
                 srs = lyr.GetSpatialRef()
-                transformer = self._get_transformer(srs, override_epsg, path_to_survey_data)
+                wkt = srs.ExportToWkt()
+                attr_depth[i] = feat['elevation']  # test what happens with attribute name not existing
 
-                if fiona:
-                    fi_file = fiona.open(path_to_survey_data, layer=ilyr)
-                    npts = len(fi_file)
-                    x = numpy.zeros(npts, dtype=numpy.float64)
-                    y = numpy.zeros(npts, dtype=numpy.float64)
-                    depth = numpy.zeros(npts, dtype=numpy.float32)
-                    uncertainty = numpy.zeros(npts, dtype=numpy.float32)
-                    for i, feat in enumerate(fi_file):
-                        x[i], y[i] = feat['geometry']['coordinates']
-                        depth[i] = feat['properties']['elevation']
-                        uncertainty[i] = feat['properties']['uncertainty']
-                else:  # gdal - slower
-                    npts = lyr.GetFeatureCount()
-                    x = numpy.zeros(npts, dtype=numpy.float64)
-                    y = numpy.zeros(npts, dtype=numpy.float64)
-                    depth = numpy.zeros(npts, dtype=numpy.float64)
-                    uncertainty = numpy.zeros(npts, dtype=numpy.float64)
-                    for i, feat in enumerate(lyr):
-                        x[i], y[i], depth[i] = feat.GetGeometryRef().GetPoint()
-                        uncertainty[i] = feat['uncertainty']
-                if transformer:
-                    x, y = transformer.transform(x, y)
-                if reverse_z:
-                    depth *= -1
-                self._insert_xyz(x, y, depth, uncertainty, survey_score, flag, contrib_id, path_to_survey_data, compare_callback,
-                                 override_epsg, reverse_z, limit_to_tiles=limit_to_tiles, force=force, dformat="gpkg",
-                                 transaction_id=transaction_id, sorting_metadata=sorting_metadata)
+                total_points = lyr.GetFeatureCount()
+                for i, feat in enumerate(lyr):
+                    if i % block_size == 0:  # allocate space for next block of data
+                        npts = min(total_points - i, block_size)
+                        x = numpy.zeros(npts, dtype=numpy.float64)
+                        y = numpy.zeros(npts, dtype=numpy.float64)
+                        depth = numpy.zeros(npts, dtype=numpy.float64)
+                        uncertainty = numpy.zeros(npts, dtype=numpy.float64)
+                    # read the point data and get the depth from the point Z or override with the elevation attribute
+                    x[i], y[i], depth[i] = feat.GetGeometryRef().GetPoint()
+                    try:
+                        attr_depth = feat['elevation']
+                        depth[i] = attr_depth
+                    except KeyError:
+                        pass
+                    uncertainty[i] = feat['uncertainty']
+                    # yield the block of data if it is full or we are at the end of the file
+                    if i % block_size == block_size - 1 or i == total_points - 1:  # end of block or end of file
+                        yield wkt, x, y, depth, uncertainty
 
     def insert_survey_as_outside_area_of_interest(self, path_to_survey_data, survey_score=100, flag=0, dformat=None, override_epsg: int = NO_OVERRIDE,
                                                   contrib_id=numpy.nan, reverse_z: bool = False, transaction_id=-1, sorting_metadata=None):
@@ -1250,7 +1226,7 @@ class WorldDatabase(VABC):
                                        dformat, transaction_id, sorting_metadata=sorting_metadata)
 
     # noinspection PyUnboundLocalVariable
-    def insert_txt_survey(self, path_to_survey_data, survey_score=100, flag=0, dformat=None, override_epsg: int = NO_OVERRIDE,
+    def insert_points_survey(self, path_to_survey_data, survey_score=100, flag=0, dformat=None, override_epsg: int = NO_OVERRIDE,
                           contrib_id=numpy.nan, compare_callback=None, reverse_z: bool = False, limit_to_tiles=None, force=False, transaction_id=-1,
                           sorting_metadata=None, block_size=30000000, crop=False):
         """ Reads a text file and inserts into the tiled database.
@@ -1307,6 +1283,30 @@ class WorldDatabase(VABC):
                     bounds = poly_from_pts(corners, transformer)
                     if self.area_of_interest and not self.area_of_interest.Intersects(bounds):
                         skip_as_disjoint = True
+            elif str(path_to_survey_data).lower().endswith(".gpkg"):
+                # @TODO if we want to support geopackages with raster data we will have to split the point processing out of here
+                gpkg = gdal.OpenEx(path_to_survey_data)
+                # geopackages can have both raster and vector layers, so we will iterate through them but currently only supporting point data from a gpkg
+                disjoints = []
+                point_lyr_count = 0
+                for ilyr in range(gpkg.GetLayerCount()):
+                    lyr = gpkg.GetLayer(ilyr)
+                    if lyr.GetGeomType() == ogr.wkbPoint:
+                        point_lyr_count += 1
+                        srs = lyr.GetSpatialRef()
+                        wkt = srs.ExportToWkt()
+                        if wkt is not None and override_epsg == NO_OVERRIDE:
+                            epsg = wkt
+                            transformer = get_crs_transformer(epsg, self.db.epsg)
+                        else:
+                            transformer = None
+                        lx, ux, ly, uy = lyr.GetExtent()
+                        bounds = poly_from_pts(numpy.array(((lx, ly), (ux, uy))), transformer)
+                        lyr_is_disjoint = self.area_of_interest and not self.area_of_interest.Intersects(bounds)
+                        disjoints.append(lyr_is_disjoint)
+                if len(lyr_is_disjoint) == point_lyr_count and all(disjoints):
+                    skip_as_disjoint = True
+
             if skip_as_disjoint:
                 self.insert_survey_as_outside_area_of_interest(path_to_survey_data, survey_score, flag, dformat, override_epsg,
                                                                contrib_id, reverse_z, transaction_id, sorting_metadata)
@@ -1328,7 +1328,11 @@ class WorldDatabase(VABC):
                 # find the tiles to lock
                 with tqdm(desc="geocode/process points", total=2) as top_progress_bar:
                     with tqdm(desc="geocode+split", total=0, leave=False) as progress_bar:
-                        for wkt, x, y, depth, uncertainty in iterate_points_file(path_to_survey_data, dformat=dformat, block_size=block_size):
+                        if str(path_to_survey_data).lower().endswith(".gpkg"):
+                            pts_iterator = self.iterate_pts_gpkg(path_to_survey_data, block_size=block_size)
+                        else:
+                            pts_iterator = iterate_points_file(path_to_survey_data, dformat=dformat, block_size=block_size)
+                        for wkt, x, y, depth, uncertainty in pts_iterator:
                             # this shold only need to happen once but we can reset the transformer on each loop as it's cheap to do
                             progress_bar.reset(progress_bar.total + 1)
                             progress_bar.refresh()
@@ -1931,7 +1935,7 @@ class WorldDatabase(VABC):
                 else:
                     raise Exception(f"Survey Exists already in database {contrib_id}")
 
-    def insert_survey_gdal(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, data_band=1, uncert_band=2,
+    def insert_raster_survey(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, data_band=1, uncert_band=2,
                            contrib_id=numpy.nan, compare_callback=None, reverse_z=False, limit_to_tiles=None, force=False,
                            transaction_id=-1, sorting_metadata=None):
         """ Insert a gdal readable dataset into the database.
