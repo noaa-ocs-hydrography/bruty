@@ -23,7 +23,7 @@ def convert_csar_python(csar_path, metadata):
     old_script = str(path_to_fuse_dev.joinpath(r'fuse_dev\scripts\csar_convert\csar_to_temp.py'))
     new_script = pathlib.Path(__file__).parent.joinpath("caris_env_csar_convert.py")
     command = generate_argument_string(str(new_script), pythonpath=f'{path_to_fuse_dev}')
-    full_command = command + " " + str(csar_path)
+    full_command = command + ' "' + str(csar_path) + '"'  # quotes around path in case there's a space in it
     execute_subprocess(full_command, override_logger=LOGGER)
 
     elev_path = csar_path.with_suffix('.elev.raster.npy')
