@@ -120,7 +120,7 @@ def cached_conversion_name(path):
 
     """
     # convert csar names to exported data, 1 of 3 types
-    if str(path).lower().endswith(".csar") or str(path).lower().endswith(".gpkg"):
+    if str(path).lower().endswith(".csar"):
         orig_path = pathlib.Path(path)
         for ext in (".csar.tif", ".bruty.npz"):
             export_path = orig_path.with_suffix(ext)
