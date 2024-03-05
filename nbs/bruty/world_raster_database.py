@@ -1506,6 +1506,8 @@ class WorldDatabase(VABC):
                     self.included_ids[contrib_id] = data
                     # (str(path_to_survey_data), [(tx, ty) for tx, ty in tiles], sorting_metadata, override_epsg, reverse_z, survey_score, flag, dformat, mtime,
                     # transaction_id)
+            elif contrib_id != self.started_surveys[str(path_to_survey_data)].nbs_id:
+                self.db.LOGGER.warning(f"Two IDs reference the same file ID {contrib_id} and {self.started_surveys[str(path_to_survey_data)].nbs_id} both refer to  {path_to_survey_data}")
             # Sqlite file updates immediately, so no longer need to call to_file() which only stores the class setup.
             # # rather than overwrite, since we have it locked, truncate the file and then write new data to it
             # metadata_file.seek(0)
@@ -1562,6 +1564,8 @@ class WorldDatabase(VABC):
                 if contrib_id is not None:
                     self.started_ids[contrib_id] = data
                     # (str(path_to_survey_data), [(tx, ty) for tx, ty in tiles], mtime, transaction_id)
+            elif contrib_id != self.started_surveys[str(path_to_survey_data)].nbs_id:
+                self.db.LOGGER.warning(f"Two IDs reference the same file ID {contrib_id} and {self.started_surveys[str(path_to_survey_data)].nbs_id} both refer to  {path_to_survey_data}")
             # Sqlite file updates immediately, so no longer need to call to_file() which only stores the class setup.
             # # rather than overwrite, since we have it locked, truncate the file and then write new data to it
             # metadata_file.seek(0)
