@@ -11,6 +11,7 @@ import pathlib
 import shutil
 import logging
 import io
+import platform
 
 import numpy
 import psutil
@@ -65,9 +66,10 @@ def launch(world_db, conn_info, for_navigation_flag=(True, True), override_epsg=
         nbs_code = str(pathlib.Path(nbs_code).parent)
         # FIXME -- figure out and remove this hack
         # looks like activate is overwriting the pythonpath, so specify it after the activate command
-        args = ['cmd.exe', '/K', 'set', f'pythonpath=&&', 'set', 'TCL_LIBRARY=what&&', 'set',
-                'TIX_LIBRARY=&&', 'set', 'TK_LIBRARY=&&', env_path, env_name, '&&',
-                'set', f'pythonpath={nbs_code};{bruty_code}&&', 'python', "combine.py"]
+        common_args = ['set', 'TCL_LIBRARY=what', 'set', 'TIX_LIBRARY=', 'set', 'TK_LIBRARY=']
+        common_args.extend([env_path, env_name])
+
+        args = common_args + [f'export PYTHONPATH={nbs_code}:{bruty_code} &&', 'python', 'combine.py']
         for table in conn_info.tablenames:
             args.extend(["-t", table])
         for exclusion in exclude:
@@ -92,9 +94,14 @@ def launch(world_db, conn_info, for_navigation_flag=(True, True), override_epsg=
             args.extend(['-f', fingerprint])
         args.extend(["-d", conn_info.database, "-r", str(conn_info.port), "-o", conn_info.hostname, "-u", conn_info.username,
                      "-p", conn_info.password])
-        args.extend(["&&", "exiter.bat", "0"])  # exiter closes the console if there was no error code, keeps it open if there was an error
+        args.extend(["&&", "exit", "0"])
 
-        proc = subprocess.Popen(args, **popen_kwargs(activate=False, minimize=minimized))
+        if platform.system() == 'Windows':
+            args = ['cmd.exe', '/K'] + args
+        else:
+            args = ['sh', '-c'] + [' '.join(args)]
+
+        proc = subprocess.Popen(args, **popen_kwargs(new_console=False, activate=False, minimize=minimized))
         os.chdir(restore_dir)
         ret = proc.pid
     else:
@@ -145,8 +152,8 @@ def main(config):
     quitter = False
     debug_config = config.getboolean('DEBUG', False)
     minimized = config.getboolean('MINIMIZED', False)
-    env_path = config.get('environment_path', r"D:\languages\miniconda3\Scripts\activate")
-    env_name = config.get('environment_name', "NBS")
+    env_path = config.get('environment_path')
+    env_name = config.get('environment_name')
     port = config.get('lock_server_port', None)
     use_locks(port)
     ignore_pids = psutil.pids()
