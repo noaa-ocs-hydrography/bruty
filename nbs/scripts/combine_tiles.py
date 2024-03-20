@@ -46,7 +46,7 @@ print("\nremove the hack setting the bruty and nbs directories into the python p
 
 
 def launch(world_db, conn_info, for_navigation_flag=(True, True), override_epsg=NO_OVERRIDE, extra_debug=False, new_console=True,
-           lock=None, exclude=None, crop=False, log_path=None, env_path=r'D:\languages\miniconda3\Scripts\activate', env_name='NBS', minimized=False,
+           lock=None, exclude=None, crop=False, log_path=None, env_path=r'', env_name='', minimized=False,
            fingerprint=""):
     """ for_navigation_flag = (use_nav_flag, nav_flag_value)
 
@@ -60,48 +60,58 @@ def launch(world_db, conn_info, for_navigation_flag=(True, True), override_epsg=
         # spawn a new console, activate a python environment and run the combine.py script with appropriate arguments
         restore_dir = os.getcwd()
         os.chdir(pathlib.Path(__file__).parent)
+        # FIXME -- figure out and remove this hack
         bruty_code = nbs.bruty.__path__._path[0]
         bruty_code = str(pathlib.Path(bruty_code).parent.parent)
         nbs_code = fuse_dev.__path__._path[0]
         nbs_code = str(pathlib.Path(nbs_code).parent)
-        # FIXME -- figure out and remove this hack
+        if platform.system() == 'Windows':
+            separator = ";"
+            env_var_cmd = "set"
+        else:
+            separator = ":"
+            env_var_cmd = "export"
         # looks like activate is overwriting the pythonpath, so specify it after the activate command
-        common_args = ['set', 'TCL_LIBRARY=what', 'set', 'TIX_LIBRARY=', 'set', 'TK_LIBRARY=']
-        common_args.extend([env_path, env_name])
-
-        args = common_args + [f'export PYTHONPATH={nbs_code}:{bruty_code} &&', 'python', 'combine.py']
+        cmds = [f'{env_var_cmd} TCL_LIBRARY=what', f'{env_var_cmd} TIX_LIBRARY=', f'{env_var_cmd} TK_LIBRARY=']
+        if env_path:
+            cmds.append(env_path + " " + env_name)  # activate the environment
+        cmds.append(f'{env_var_cmd} PYTHONPATH={nbs_code}{separator}{bruty_code}')  # add the NBS and Bruty code to the python path
+        combine_args = ['python combine.py']
         for table in conn_info.tablenames:
-            args.extend(["-t", table])
+            combine_args.extend(["-t", table])
         for exclusion in exclude:
-            args.extend(['-x', exclusion])
-        args.extend(["-b", str(world_db_path)])
+            combine_args.extend(['-x', exclusion])
+        combine_args.extend(["-b", str(world_db_path)])
         if not for_navigation_flag[0]:  # not using the navigation flag
-            args.append("-i")
+            combine_args.append("-i")
         else:  # using the navigation flag, so  see if it should be True (default) or False (needs arg)
             if not for_navigation_flag[1]:
-                args.append("-n")
+                combine_args.append("-n")
         if crop:
-            args.append('-c')
+            combine_args.append('-c')
         if override_epsg != NO_OVERRIDE:
-            args.extend(["-e", str(override_epsg)])
+            combine_args.extend(["-e", str(override_epsg)])
         if extra_debug:
-            args.append("--debug")
+            combine_args.append("--debug")
         if lock:
-            args.extend(["-l", lock])
+            combine_args.extend(["-l", lock])
         if log_path:
-            args.extend(["-g", log_path])
+            combine_args.extend(["-g", log_path])
         if fingerprint:
-            args.extend(['-f', fingerprint])
-        args.extend(["-d", conn_info.database, "-r", str(conn_info.port), "-o", conn_info.hostname, "-u", conn_info.username,
-                     "-p", conn_info.password])
-        args.extend(["&&", "exit", "0"])
-
+            combine_args.extend(['-f', fingerprint])
+        combine_args.extend(["-d", conn_info.database, "-r", str(conn_info.port), "-o", conn_info.hostname, "-u", conn_info.username,
+                             "-p", '"'+conn_info.password+'"'])
+        cmds.append(" ".join(combine_args))
         if platform.system() == 'Windows':
-            args = ['cmd.exe', '/K'] + args
+            cmds.append("exiter.bat 0")  # exiter.bat closes the console if there was no error code, keeps it open if there was an error
+            args = 'cmd.exe /K ' + "&&".join(cmds)
+            kwargs = popen_kwargs(activate=False, minimize=minimized)  # windows specific flags start flags
         else:
-            args = ['sh', '-c'] + [' '.join(args)]
+            cmds.extend(["exit", "0"])
+            args = ['sh', '-c'] + [' '.join(cmds)]
+            kwargs = {}
 
-        proc = subprocess.Popen(args, **popen_kwargs(new_console=False, activate=False, minimize=minimized))
+        proc = subprocess.Popen(args, **kwargs)
         os.chdir(restore_dir)
         ret = proc.pid
     else:
