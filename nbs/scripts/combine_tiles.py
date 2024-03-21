@@ -108,7 +108,7 @@ def launch(world_db, conn_info, for_navigation_flag=(True, True), override_epsg=
             kwargs = popen_kwargs(activate=False, minimize=minimized)  # windows specific flags start flags
         else:
             cmds.extend(["exit", "0"])
-            args = ['sh', '-c'] + [' '.join(cmds)]
+            args = ['sh', '-c', ';'.join(cmds)]
             kwargs = {}
 
         proc = subprocess.Popen(args, **kwargs)
