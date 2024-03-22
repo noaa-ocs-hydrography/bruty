@@ -82,6 +82,6 @@ def test_complete_export_tiled():
 
     del new_ds
 
-    tile_export.complete_export_tiled(nav_export, fake_contributors, use_block_size * res, epsg=epsg, decimals=2, block_size=use_block_size, debug_plots=True)
+    tile_export.complete_export_tiled(nav_export, fake_contributors, use_block_size * res, epsg=epsg, decimals=2, block_size=use_block_size, debug_plots=True, erode_flag=True)
 
 

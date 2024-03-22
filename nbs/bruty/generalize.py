@@ -30,10 +30,10 @@ DEFAULT_CARIS_ENVIRONMENT = 'CARIS35'
 default_config_name = "default.config"
 _debug = False
 write_distance = False  # FIXME - this doesn't work if no generalization takes place (need to change code below)
-perform_closing = False
+
 
 def generalize_tile(elev_array, uncert_array, contrib_array, nodata, closing_distance, resolution, gen_contributor_idx=0,
-                     uncertainty_closing_distance_multiplier=.1, uncertainty_elevation_multiplier=.1, ext_progress=None):
+                     uncertainty_closing_distance_multiplier=.1, uncertainty_elevation_multiplier=.1, ext_progress=None, perform_closing = False):
 
     progress = ext_progress if ext_progress is not None else tqdm(desc="TileGen", total=5, leave=False)
     # interpolate the combined raster within the new coverage provided by a binary closing
@@ -46,7 +46,6 @@ def generalize_tile(elev_array, uncert_array, contrib_array, nodata, closing_dis
     # LOGGER.info('generalized interpolation completed.  Begin closing.')
     # This step is to be moved to Xipe
     if perform_closing:
-        raise NotImplementedError("Removed closing for Xipe to implement")
         for generalized_area in interpolation_coverage(raster, generalized_interpolation, resolution,
                                                        closing_distances=[closing_distance], upsampled=True):  # support_filenames=[outfilepath]
             generalized_data, closing_distance, not_present = generalized_area
@@ -98,7 +97,7 @@ def generalize_tile(elev_array, uncert_array, contrib_array, nodata, closing_dis
     return dist_to_data
 
 def generalize(raster_filename, closing_distance, output_crs=None, gen_contributor_idx=0,
-               uncertainty_closing_distance_multiplier=.1, uncertainty_elevation_multiplier=.1):
+               uncertainty_closing_distance_multiplier=.1, uncertainty_elevation_multiplier=.1, perform_closing = False):
     if _debug:
         import pickle
         fname = "e:\\debug\\generalize.pickle"

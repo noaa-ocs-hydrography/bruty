@@ -333,7 +333,7 @@ def combine_and_export(export_dir, bruty_dir, tile_info, all_simple_records, com
                 # databases = [root_dir.joinpath(db_name) for db_name in databases]
                 # nav_sensitive_cnt = add_databases(databases, nav_dataset, nav_score, comp)
                 del nav_score, nav_dataset  # closes the files so they can be copied
-                complete_export(nav_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
+                complete_export(nav_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals, erode_flag=tile_info.erode)
                 navigation_id = write_export_record(nav_export, navigation=True)
 
             if tile_info.public or tile_info.internal:
@@ -355,7 +355,7 @@ def combine_and_export(export_dir, bruty_dir, tile_info, all_simple_records, com
                         public_id = navigation_id
                     else:
                         copy_dataset(dataset, public_export.extracted_filename)
-                        complete_export(public_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
+                        complete_export(public_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals, erode_flag=tile_info.erode)
                         public_id = write_export_record(public_export, public=True)
 
                 if tile_info.internal:
@@ -376,7 +376,7 @@ def combine_and_export(export_dir, bruty_dir, tile_info, all_simple_records, com
                         internal_id = public_id
                     else:
                         copy_dataset(dataset, internal_export.extracted_filename)
-                        complete_export(internal_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
+                        complete_export(internal_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals, erode_flag=tile_info.erode)
                         internal_id = write_export_record(internal_export, internal=True)
 
             for exp, wanted in ((nav_export, tile_info.navigation), (internal_export, tile_info.internal), (public_export, tile_info.public)):
@@ -448,9 +448,9 @@ def setup_export_raster(filename, tile_info, db):
     return dataset, dataset_score
 
 
-def complete_export(export, all_simple_records, closing_dist, epsg, decimals=None):
+def complete_export(export, all_simple_records, closing_dist, epsg, decimals=None, erode_flag=False):
     # return complete_export_sequential(export, all_simple_records, closing_dist, epsg, decimals)
-    return complete_export_tiled(export, all_simple_records, closing_dist, epsg, decimals)
+    return complete_export_tiled(export, all_simple_records, closing_dist, epsg, decimals, erode_flag=erode_flag)
 
 if has_numba:
     @jit(nopython=True)
@@ -611,7 +611,7 @@ def create_subdataset(ds, filename_ext, ir, ic, array, nodata, names=(ELEVATION_
     return new_ds
 
 
-def complete_export_tiled(export, all_simple_records, closing_dist, epsg, decimals=None, block_size=DEFAULT_BLOCK_SIZE, debug_plots=False):
+def complete_export_tiled(export, all_simple_records, closing_dist, epsg, decimals=None, block_size=DEFAULT_BLOCK_SIZE, debug_plots=False, erode_flag=False):
     """ for the export object, take the extracted filename and perform generalization, cloud overviews and consolidate the raster attribute table
     all_simple_records is a list of the postgres metadata records for operating on the raster attributes.
     closing_dist is used in generalization.
@@ -773,8 +773,8 @@ def complete_export_tiled(export, all_simple_records, closing_dist, epsg, decima
                         temp_ds = create_subdataset(original_ds, f"{block_cnt}_borders", ir - low_row_buff, ic - low_col_buff,
                                                     trimmed_elev, new_nodata); del temp_ds
 
-                    trimmed_dist_array = generalize_tile(trimmed_elev, trimmed_uncert, trimmed_contrib,
-                                                         new_nodata, closing_dist, resolution, ext_progress=progress)
+                    trimmed_dist_array = generalize_tile(trimmed_elev, trimmed_uncert, trimmed_contrib, new_nodata,
+                                                         closing_dist, resolution, ext_progress=progress, perform_closing = erode_flag)
                     if debug_plots:
                         temp_ds = create_subdataset(original_ds, f"{block_cnt}_hi_res", ir - low_row_buff, ic - low_col_buff,
                                                     trimmed_elev, new_nodata); del temp_ds
@@ -799,8 +799,8 @@ def complete_export_tiled(export, all_simple_records, closing_dist, epsg, decima
                                                     trimmed_elev, new_nodata); del temp_ds
 
                 else:
-                    dist_array = generalize_tile(elevation_array, uncert_array, contrib_array,
-                                                                new_nodata, closing_dist, resolution, ext_progress=progress)
+                    dist_array = generalize_tile(elevation_array, uncert_array, contrib_array, new_nodata,
+                                                 closing_dist, resolution, ext_progress=progress, perform_closing = erode_flag)
                 dist_array = image_ops.trim_array(dist_array)
             else:
                 progress.update(5)

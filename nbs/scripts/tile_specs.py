@@ -45,6 +45,7 @@ class TileInfo:
         self.build = review_tile['build']
         self.locality = review_tile[self.LOCALITY]
         self.resolutions = review_tile["resolution"]
+        self.erode = review_tile["erode"]
 
         # convert from string if needed
         if isinstance(self.resolutions, str):
