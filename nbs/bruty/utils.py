@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timedelta
 
 import psutil
+import platform
 import numpy
 import rasterio.crs
 from osgeo import gdal, osr, ogr
@@ -1136,11 +1137,22 @@ class ProcessTracker:
         self.last_pid = self.find()
 
     def find(self):
+        if platform.system() == 'Windows':
+            separator = "&&"
+        else:
+            separator = ";"
         ret = None
         for p in psutil.pids():
             try:
                 if p not in self.ignore_pids:
-                    cmdline = psutil.Process(p).cmdline()
+                    cmdline_raw = psutil.Process(p).cmdline()
+                    # the cmdline comes back as a list of arguments, basically the commandline split by spaces
+                    # but some commands were separated by a && or ; (depending on platform) so we want to further split the strings
+                    # without this we were not finding 'python' correctly as it was appended to the end of the PYTHONPATH line.
+                    # Could have also done cmd=separator.join(cmds) then cmds=cmd.split(separator)
+                    cmdline = []
+                    for cmd in cmdline_raw:
+                        cmdline.extend(cmd.split(separator))
                     has_cmds = [cmd in cmdline for cmd in self.cmds]
                     is_excluding = [cmd not in cmdline for cmd in self.excludes]
                     has_cmds.extend(is_excluding)
