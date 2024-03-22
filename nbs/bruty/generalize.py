@@ -33,8 +33,7 @@ write_distance = False  # FIXME - this doesn't work if no generalization takes p
 
 
 def generalize_tile(elev_array, uncert_array, contrib_array, nodata, closing_distance, resolution, gen_contributor_idx=0,
-                     uncertainty_closing_distance_multiplier=.1, uncertainty_elevation_multiplier=.1, ext_progress=None, perform_closing = False):
-
+                     uncertainty_closing_distance_multiplier=.1, uncertainty_elevation_multiplier=.1, ext_progress=None):
     progress = ext_progress if ext_progress is not None else tqdm(desc="TileGen", total=5, leave=False)
     # interpolate the combined raster within the new coverage provided by a binary closing
     progress.set_description("Generalize")
@@ -45,11 +44,12 @@ def generalize_tile(elev_array, uncert_array, contrib_array, nodata, closing_dis
     progress.set_description("Closing")
     # LOGGER.info('generalized interpolation completed.  Begin closing.')
     # This step is to be moved to Xipe
-    if perform_closing:
-        for generalized_area in interpolation_coverage(raster, generalized_interpolation, resolution,
-                                                       closing_distances=[closing_distance], upsampled=True):  # support_filenames=[outfilepath]
-            generalized_data, closing_distance, not_present = generalized_area
-        generalized_dataset = generalized_data._dataset  # this is a fuse temp_dataset, so get the real gdal dataset
+    # if perform_closing:
+    #     raise NotImplementedError("Removed closing for Xipe to implement")
+    #     for generalized_area in interpolation_coverage(raster, generalized_interpolation, resolution,
+    #                                                    closing_distances=[closing_distance], upsampled=True):  # support_filenames=[outfilepath]
+    #         generalized_data, closing_distance, not_present = generalized_area
+    #     generalized_dataset = generalized_data._dataset  # this is a fuse temp_dataset, so get the real gdal dataset
     progress.update(1)
     # LOGGER.info('closing completed.  Begin uncertainty computation.')
     progress.set_description("Find Empties")
@@ -62,11 +62,11 @@ def generalize_tile(elev_array, uncert_array, contrib_array, nodata, closing_dis
     # so check contributor for being non-nan and non-generalization
 
     empty_data = numpy.logical_or(contrib_array == gen_contributor_idx, ~where_not_nodata(contrib_array, nodata))
-    if perform_closing:  # the closing function creates a mask of where interpolation was valid
-        # only has data where interp should be kept, nothing at real data and nothing at empty space too far from real data
-        changed_idx = numpy.where(where_not_nodata(generalized_array, nodata))
-    else:  # find the empty data in the original and make sure the generalize is not empty also
-        changed_idx = numpy.where(numpy.logical_and(empty_data, where_not_nodata(generalized_array, nodata)))
+    # if perform_closing:  # the closing function creates a mask of where interpolation was valid
+    #     # only has data where interp should be kept, nothing at real data and nothing at empty space too far from real data
+    #     changed_idx = numpy.where(where_not_nodata(generalized_array, nodata))
+    # else:  # find the empty data in the original and make sure the generalize is not empty also
+    changed_idx = numpy.where(numpy.logical_and(empty_data, where_not_nodata(generalized_array, nodata)))
 
     progress.update(1)
     progress.set_description("Distances")
@@ -97,7 +97,7 @@ def generalize_tile(elev_array, uncert_array, contrib_array, nodata, closing_dis
     return dist_to_data
 
 def generalize(raster_filename, closing_distance, output_crs=None, gen_contributor_idx=0,
-               uncertainty_closing_distance_multiplier=.1, uncertainty_elevation_multiplier=.1, perform_closing = False):
+               uncertainty_closing_distance_multiplier=.1, uncertainty_elevation_multiplier=.1, perform_closing=False):
     if _debug:
         import pickle
         fname = "e:\\debug\\generalize.pickle"
