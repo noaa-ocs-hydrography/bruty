@@ -448,9 +448,9 @@ def setup_export_raster(filename, tile_info, db):
     return dataset, dataset_score
 
 
-def complete_export(export, all_simple_records, closing_dist, epsg, decimals=None, erode_flag=False):
+def complete_export(export, all_simple_records, closing_dist, epsg, decimals=None):
     # return complete_export_sequential(export, all_simple_records, closing_dist, epsg, decimals)
-    return complete_export_tiled(export, all_simple_records, closing_dist, epsg, decimals, erode_flag=erode_flag)
+    return complete_export_tiled(export, all_simple_records, closing_dist, epsg, decimals)
 
 if has_numba:
     @jit(nopython=True)
