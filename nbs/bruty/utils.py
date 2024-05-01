@@ -22,12 +22,18 @@ if os.name == 'posix':
 
     char_cache = []
 
+
     def kbhit():  # Windows returns true if any characters are left in the buffer, so we are emulating that behavior
-        bytes_str = fcntl.ioctl(sys.stdin.fileno(), termios.FIONREAD, struct.pack('I', 0))
-        bytes_num = struct.unpack('I', bytes_str)[0]
-        if bytes_num > 0:
-            cache_chars()
+        try:
+            bytes_str = fcntl.ioctl(sys.stdin.fileno(), termios.FIONREAD, struct.pack('I', 0))
+        except OSError:  # linux services refuse the stdin connection
+            pass  # leave the cache empty on Linux when running as a service
+        else:
+            bytes_num = struct.unpack('I', bytes_str)[0]
+            if bytes_num > 0:
+                cache_chars()
         return len(char_cache) > 0
+
 
     # When a stdin.read is called the ioctl will return zero next time, so we need to cache the available characters now
     # We do this non-blocking since the read will wait forever otherwise
@@ -48,6 +54,7 @@ if os.name == 'posix':
             # resetting stdin to default flags
             fcntl.fcntl(fd, fcntl.F_SETFL, old_flags)
         return len(char_cache)
+
 
     # Windows gives one character at a time, so we are emulating that behavior either returning the cached characters or reading more
     def getch():
@@ -140,6 +147,7 @@ def make_mllw_height_wkt(horz_epsg):
         pass
     return wkt
 
+
 def make_wkt(horz_epsg, vert_epsg):
     """ Calls gdalsrsinfo with the epsgs supplied.  MLLW (5866) is the default vertical.
     down_to_up flag will change AXIS["Depth",DOWN] to AXIS["gravity-related height",UP]
@@ -154,6 +162,7 @@ def make_wkt(horz_epsg, vert_epsg):
         raise Exception("compound CRS not found: " + stderr)
 
     return wkt
+
 
 def onerr(func, path, info):
     r"""This is a helper function for shutil.rmtree to take care of something happening on (at least) my local machine.
@@ -377,12 +386,13 @@ def merge_array(pts, output_data, output_sort_key_values,
 
 def remake_tif(fname):
     """Tiffs that are updated don't compress properly, so move them to a temporary name, copy the data and delete the temporary name"""
-    os.rename(fname, fname+".old.tif")
-    ds = gdal.Open(fname+".old.tif")
+    os.rename(fname, fname + ".old.tif")
+    ds = gdal.Open(fname + ".old.tif")
     data = ds.ReadAsArray()
     driver = gdal.GetDriverByName('GTiff')
     if 0:
-        new_ds = driver.Create(fname, xsize=ds.RasterXSize, ysize=ds.RasterYSize, bands=ds.RasterCount, eType=gdal.GDT_Float32, options=['COMPRESS=LZW', "TILED=YES", "BIGTIFF=YES"])
+        new_ds = driver.Create(fname, xsize=ds.RasterXSize, ysize=ds.RasterYSize, bands=ds.RasterCount, eType=gdal.GDT_Float32,
+                               options=['COMPRESS=LZW', "TILED=YES", "BIGTIFF=YES"])
         new_ds.SetProjection(ds.GetProjection())
         new_ds.SetGeoTransform(ds.GetGeoTransform())
         for n in range(ds.RasterCount):
@@ -393,7 +403,9 @@ def remake_tif(fname):
 
     new_ds = None
     ds = None
-    os.remove(fname+".old.tif")
+    os.remove(fname + ".old.tif")
+
+
 # for (dirpath, dirnames, filenames) in os.walk(r'C:\data\nbs\test_data_output\test_pbc_19_db'):
 #     for fname in filenames:
 #         if fname.endswith(".tif"):
@@ -597,7 +609,7 @@ def iterate_gdal_buffered_image(dataset, col_buffer_size, row_buffer_size, band_
             read_rows = row_buffer_lower + rows + row_buffer_upper
 
             yield (ic, ir, cols, rows, col_buffer_lower, row_buffer_lower, nodata,
-                  [band.ReadAsArray(ic - col_buffer_lower, ir - row_buffer_lower, read_cols, read_rows) for band in bands])
+                   [band.ReadAsArray(ic - col_buffer_lower, ir - row_buffer_lower, read_cols, read_rows) for band in bands])
 
 
 class BufferedImageOps:
@@ -646,7 +658,7 @@ class BufferedImageOps:
             data = band.ReadAsArray(self.ic, self.ir, self.data_cols, self.data_rows)
         else:
             data = band.ReadAsArray(self.ic - self.col_buffer_lower, self.ir - self.row_buffer_lower,
-                             self.read_shape[1], self.read_shape[0])  # numpy shape is row, col while gdal wants col, row
+                                    self.read_shape[1], self.read_shape[0])  # numpy shape is row, col while gdal wants col, row
         return data
 
     def trim_buffer(self, array, buff_width):
@@ -912,17 +924,18 @@ def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, sh
         nodata = 1000000.0
     if not options:
         if driver.lower() == "gtiff":
-            options=['COMPRESS=LZW', "TILED=YES", "BIGTIFF=YES"]
+            options = ['COMPRESS=LZW', "TILED=YES", "BIGTIFF=YES"]
         if driver.lower() == 'bag':
             options = list(options)
-            options.insert(0, 'TEMPLATE=G:\\Pydro_new_svn_1\\Pydro21\\NOAA\\site-packages\\Python38\\git_repos\\hstb_resources\\HSTB\\resources\\gdal_bag_template.xml')
+            options.insert(0,
+                           'TEMPLATE=G:\\Pydro_new_svn_1\\Pydro21\\NOAA\\site-packages\\Python38\\git_repos\\hstb_resources\\HSTB\\resources\\gdal_bag_template.xml')
 
     try:
         num_bands = int(bands)
     except:
         num_bands = len(bands)
     dataset = gdal_driver.Create(str(fname), xsize=shape_x, ysize=shape_y, bands=num_bands, eType=etype,
-                            options=options)
+                                 options=options)
 
     # Set location
     gt = [min_x, res_x, 0, max_y, 0, -res_y]  # north up
@@ -939,7 +952,7 @@ def make_gdal_dataset_size(fname, bands, min_x, max_y, res_x, res_y, shape_x, sh
         # Set projection
         dataset.SetProjection(dest_wkt)
     for b in range(dataset.RasterCount):
-        band = dataset.GetRasterBand(b+1)
+        band = dataset.GetRasterBand(b + 1)
         band.SetNoDataValue(nodata)
         if driver == 'GTiff':
             break
@@ -1018,6 +1031,7 @@ def add_uncertainty_layer(infile, outfile, depth_mult=0.01, uncert_offset=0.5, d
     del tmp_ds
     del ds
 
+
 def transform_rect(x1, y1, x2, y2, transform_func):
     # convert a rectangle to the minimum fully enclosing rectangle in transformed coordinates
     # @todo if a transform is curved, then bisect to find the maximum which may not be the corners
@@ -1043,7 +1057,7 @@ def find_overrides_in_log(log_path):
 
 
 def remove_file(pth: (str, pathlib.Path), allow_permission_fail: bool = False, limit: int = 2, nth: int = 1, tdelay: float = 2,
-                silent: bool = False, raise_on_fail = False):
+                silent: bool = False, raise_on_fail=False):
     """ Try to remove a file and just print a warning if it doesn't work.
     Will retry 'nth' times every 'tdelay' seconds up to 'limit' times.
     Will not raise an error on FileNotFound but will for PermissionError unless allow_permission_fail is set to True.
@@ -1076,7 +1090,7 @@ def remove_file(pth: (str, pathlib.Path), allow_permission_fail: bool = False, l
     if allow_permission_fail:
         ok_except = (FileNotFoundError, PermissionError)
     else:
-        ok_except = (FileNotFoundError, )
+        ok_except = (FileNotFoundError,)
     success = False
     try:
         os.remove(pth)
@@ -1093,7 +1107,7 @@ def remove_file(pth: (str, pathlib.Path), allow_permission_fail: bool = False, l
                         print(f"File not found or permission error {type(ex)}, {pth}")
             else:
                 time.sleep(tdelay)
-                success = remove_file(pth, allow_permission_fail, nth=nth+1, silent=silent)
+                success = remove_file(pth, allow_permission_fail, nth=nth + 1, silent=silent)
     return success
 
 
@@ -1128,7 +1142,10 @@ def wait_for_processes(process_list, max_processes, ignore_pids, ordered=True):
 
 
 class ProcessTracker:
+    """ Do not supply cmds or excludes with strings in them"""
+
     def __init__(self, cmds, excludes=(), ignore_pids=()):
+        """ Do not supply cmds or excludes with strings in them"""
         self.cmds = cmds
         self.excludes = excludes
         self.ignore_pids = ignore_pids
@@ -1152,7 +1169,13 @@ class ProcessTracker:
                     # Could have also done cmd=separator.join(cmds) then cmds=cmd.split(separator)
                     cmdline = []
                     for cmd in cmdline_raw:
-                        cmdline.extend(cmd.split(separator))
+                        sub_cmds = cmd.split(separator)
+                        if platform.system() == "Windows":  # windows breaks command line arguments into separate list items
+                            cmdline.extend(sub_cmds)
+                        else:  # linux leaving the arguments as a combined string so split on spaces - may fail for search items with strings
+                            # FIXME - allow for quoted arguments to not get split so spaces in parameters would work
+                            for sub_cmd in sub_cmds:
+                                cmdline.extend(sub_cmd.split(" "))
                     has_cmds = [cmd in cmdline for cmd in self.cmds]
                     is_excluding = [cmd not in cmdline for cmd in self.excludes]
                     has_cmds.extend(is_excluding)
@@ -1161,6 +1184,15 @@ class ProcessTracker:
                         break
             except:  # permission errors and things end up here
                 pass
+        return ret
+
+    def is_zombie(self):
+        ret = False
+        if self.last_pid is None:
+            self.last_pid = self.find()
+        if self.last_pid is not None:
+            proc = psutil.Process(self.last_pid)
+            ret = proc.status() == psutil.STATUS_ZOMBIE
         return ret
 
     def is_running(self, timeout=300):
@@ -1173,7 +1205,7 @@ class ProcessTracker:
         if self.last_pid is not None:
             try:
                 proc = psutil.Process(self.last_pid)
-                running = proc.is_running()
+                running = proc.is_running() and not proc.status() == psutil.STATUS_ZOMBIE
             except psutil.NoSuchProcess:
                 running = False
         else:
@@ -1186,9 +1218,17 @@ class ProcessTracker:
 
 
 class ConsoleProcessTracker:
-    def __init__(self, cmds, excludes=(), ignore_pids=(), console_str='cmd.exe'):
+    def __init__(self, cmds, excludes=(), ignore_pids=(), console_str=None):
+        if console_str is None:
+            if platform.system() == "Windows":
+                console_str = "cmd.exe"
+            else:
+                console_str = 'sh'
         self.console = ProcessTracker(list(cmds) + [console_str], excludes, ignore_pids)
-        self.app = ProcessTracker(cmds, list(excludes) + [console_str])
+        if platform.system() == "Windows":
+            self.app = ProcessTracker(cmds, list(excludes) + [console_str])
+        else:  # linux is not showing a second process id like Windows is, so just track the sh process
+            self.app = self.console
 
     def is_running(self):
         console = self.console.is_running()
