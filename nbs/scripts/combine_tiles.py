@@ -260,6 +260,13 @@ def main(config):
                 time.sleep(10)
     except UserCancelled:
         pass
+    except Exception as e:
+        traceback.print_exc()
+        msg = f"combine_tiles.py had an unhandled exception - see message above"
+        print(msg)
+        LOGGER.error(traceback.format_exc())
+        LOGGER.error(msg)
+        ret = 99
 
     old = """
     db_path = pathlib.Path(config['combined_datapath'])
