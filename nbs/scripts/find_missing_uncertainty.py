@@ -4,6 +4,19 @@ from osgeo import gdal
 import numpy
 
 def find_missing_uncert(fname):
+    """ Find pixels where uncertainty is missing but depth is present
+    Parameters
+    ----------
+    fname
+        Path to the 3 band tif to check.  Band 1 is depth, band 2 is uncertainty, band 3 is contributor
+
+    Returns
+    -------
+    bad_indices, bad_positions, bad_contributors
+        bad_indices are the indices of the pixels where uncertainty is missing but depth is present
+        bad_positions are the x, y positions of the bad pixels
+        bad_contributors are the contributors of the bad pixels
+    """
     ds = gdal.Open(fname)
     print("load depths")
     depth = ds.GetRasterBand(1).ReadAsArray()
@@ -25,12 +38,20 @@ def find_missing_uncert(fname):
         bad_c = contrib[bad_indices]
         return bad_indices, numpy.vstack((bad_x, bad_y)).T, bad_c
     else:
-        return bad_indices, numpy.zeros([2,0]), bad_indices[0]
+        print("No mismatches found")
+        return bad_indices, numpy.zeros([2, 0]), bad_indices[0]
+
 
 if __name__ == "__main__":
+    r""" Use this script on an exported TIF file from Bruty or Xipe to find missing uncertainty values.
+     
+    Usage: python find_missing_uncertainty.py <path_to_file> 
+    e.g. python find_missing_uncertainty.py w:\buty_tile_exports\PBC19\file.tif"""
     file_path = sys.argv[1]
     if file_path:
         ind, bad_p, bad_c = find_missing_uncert(file_path)
         with numpy.printoptions(precision=9, suppress=True):
-            for i in range(len(bad_c)):
-                print(bad_p[i, 0], bad_p[i, 1], int(bad_c[i]), sep=", ")
+            for i in numpy.unique(bad_c):
+                pts = bad_p[numpy.where(bad_c == i)]
+                print(f"Total bad points for contributor {int(i)}:", len(pts))
+                print(f"    example point position:  {pts[0, 0]}, {pts[0, 1]} ")
