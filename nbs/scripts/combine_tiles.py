@@ -28,7 +28,7 @@ from nbs.bruty.world_raster_database import LockNotAcquired, AreaLock, FileLock,
 from nbs.bruty.nbs_locks import Lock, AlreadyLocked, LockFlags
 from nbs.bruty.utils import onerr, user_action, popen_kwargs, ConsoleProcessTracker, QUIT, HELP
 from nbs.scripts.tile_specs import TileInfo
-from nbs.configs import get_logger, run_command_line_configs, parse_multiple_values, show_logger_handlers
+from nbs.configs import get_logger, run_command_line_configs, parse_multiple_values, show_logger_handlers, make_family_of_logs
 # , iter_configs, set_stream_logging, log_config, parse_multiple_values, make_family_of_logs
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, connect_params_from_config, connection_with_retries
 from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, TileToProcess, TileProcess
@@ -173,6 +173,10 @@ def main(config):
     exclude = parse_multiple_values(config.get('exclude_ids', ''))
     # only keep X decimals - to help compression and storage size
     decimals = config.getint('decimals', None)
+    root, cfg_name = os.path.split(config._source_filename)
+    log_path=os.path.join(root, "logs", cfg_name)
+    # make a logger just for this process - the main log will have all the subprocesses in the file as well
+    make_family_of_logs("nbs", log_path + "_manager_" + str(os.getpid()), remove_other_file_loggers=False)
     if debug_config:
         show_logger_handlers(LOGGER)
     remaining_tiles = {}
@@ -240,14 +244,16 @@ def main(config):
                             do_keyboard_actions(remaining_tiles, tile_processes)
                             remove_finished_processes(tile_processes, remaining_tiles, max_tries)
 
-                        root, cfg_name = os.path.split(config._source_filename)
                         pid = launch(db, conn_info, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
                                      override_epsg=override, extra_debug=debug_config, lock=port, exclude=exclude, crop=(current_tile.dtype==ENC),
-                                     log_path=os.path.join(root, "logs", cfg_name), env_path=env_path, env_name=env_name, minimized=minimized,
+                                     log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
                                      fingerprint=fingerprint)
                         running_process = ConsoleProcessTracker(["python", fingerprint, "combine.py"])
                         if running_process.console.last_pid != pid:
                             LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
+                        else:
+                            LOGGER.info(f"Started PID {pid} for {tile_info} {current_tile.res}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
+                            
                         # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
                         tile_processes[current_tile] = TileProcess(running_process, tile_info, db, fingerprint, lock)
                     del lock  # unlocks if the lock wasn't stored in the tile_process

@@ -340,6 +340,12 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
                                                      transaction_id=trans_id, sorting_metadata=sort_info)
                             except BrutyError as e:
                                 failed_to_insert.append((str(e), survey))
+                            except IndexError as e:
+                                # Allow really large chart to fail 
+                                if "Chart 411" in path:
+                                    failed_to_insert.append((str(e), survey))
+                                else:
+                                    raise e
                             else:
                                 LOGGER.info(f'inserted {path}')
                             names_list.pop(i)
