@@ -38,23 +38,27 @@ def main(dryrun=True):
     # so after getting the two lists we have to see if the delete names are in the keep list
     # We are going to assume that we can compare using case insensitive (like windows) for if there is any overlap between the keep vs delete dicts
     # -- keep the lower case for comparison but the original for deletion (Linux is case sensitive but Windows is not)
-    for export_type in export_types:
+    for export_type in export_types:  # Bluetope, Navigation, Public etc
         all_keys = list(exports[export_type].keys())
         all_keys.sort()
         for k in all_keys:
             vals = exports[export_type][k]
             place_filename_in = keeps
             num_accepted = 0
+            # sort the exported files by descneing export time
             vals.sort(key=lambda r: r["export_time"], reverse=True)
             for rec in vals:
+                # count the number of approved exports so that we retain the most recent two and any non-accepted files that are newer than the last accepted file
                 if rec['approved']:
                     num_accepted += 1
                 # if the number of accepts is greater than the user selected number of files to keep, then add to the set of possible deletes
+                # This will include any non-accepted files that are older than the last accepted file
                 if num_accepted > retain:
                     place_filename_in = deletes
                 # keep the lower case for comparison but the original for deletion (Linux is case sensitive but Windows is not)
                 place_filename_in[rec['data_location'].lower()] = rec
     would_keep_overlap = set(deletes).intersection(set(keeps))
+    # If an export appears in both the keep and delete listings then keep those exports
     delete_keys = list(set(deletes).difference(set(keeps)))  # the set logic loses the ordering, so re-sort the data
     delete_keys.sort(key=lambda k: make_key(deletes[k])+(deletes[k]['export_time'],))
     print(f"Preparing to delete {len(delete_keys)} records and associated files")
@@ -81,7 +85,7 @@ def main(dryrun=True):
 
 
 def make_parser():
-    parser = argparse.ArgumentParser(description='Combine a NBS postgres table(s) into a Bruty dataset')
+    parser = argparse.ArgumentParser(description='This script will clean up old exports from the xbox table and the file system.\nThe most recent two APPROVED exports, and any not yet approved that are more recent than the two approved, will be kept and the older ones will be deleted.')
     parser.add_argument("-?", "--show_help", action="store_true",
                         help="show this help message and exit")
 
@@ -95,9 +99,7 @@ def make_parser():
 
 
 if __name__ == "__main__":
-    """ This is not really a command line app.
-    This is just a way to run the export in a new console so uses a pickle file to pass cached data.
-    Similar to running using multiprocessing.Process
+    """ This script will clean up old exports from the xbox table and the file system
     """
     parser = make_parser()
     args = parser.parse_args()
