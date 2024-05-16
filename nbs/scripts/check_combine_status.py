@@ -1,4 +1,6 @@
-""" Run combine.py on each tile listed in the combine_spec table as defined by the build flag and the config parameters specified
+""" This script checks if the last operation was a combine that succeeded.
+The intent is to check if there were errors (network failures) that caused the combines to crash.
+
 """
 import multiprocessing
 import os
@@ -117,12 +119,20 @@ def main(config):
                 last_action = v
         max_t = datetime(1, 1, 1); last_code=None
         for k, v in db.completion_codes.items():
-            if v.ttime > max_t: 
+            if v.ttime > max_t and v.ttype == "INSERT":
                 max_t = v.ttime
                 last_code = v
         if last_action is not None:
-            if last_action.ttype=="INSERT" and last_action.finished==1 and last_code.code == 0:
-                status="      done"
+            if last_action.ttype == "INSERT" and last_action.finished == 1:
+                if last_code is not None:
+                    if last_code.code == 0:
+                        status="      done"
+                    else:
+                        status = "UNFINISHED"
+                else:
+                    status = "UNSURE - Combine was last run before updates were made to Bruty"
+            elif last_action.ttype == "CLEAN":
+                status = "    UNSURE - Either there was no data or a crash occurred"
             else:
                 status="UNFINISHED"
             LOGGER.info(f"{status} {db.db.data_path} Last operations: Action {last_action.ttype} at {last_action.ttime}, Code {last_code.ttime} {last_code.code}")

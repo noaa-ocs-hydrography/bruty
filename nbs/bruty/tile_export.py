@@ -278,7 +278,7 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                 else:
                     if dataset is None:
                         dataset, dataset_score = setup_export_raster(cache_file, tile_info, db)
-                    all_times.extend([rec.ttime for rec in db.transaction_groups.values()])
+                    all_times.extend([rec.ttime for rec in db.transaction_groups.values() if rec.modified_data])
                     del db
         if not dataset:
             raise FileNotFoundError(f"No bruty data was found under{root_dir}")
@@ -1309,6 +1309,7 @@ if __name__ == "__main__":
                 db = create_world_db(config['data_dir'], tile_info, REVIEWED, True)
                 d = db.completion_codes.data_class()
                 d.ttime = datetime.datetime.now()
+                d.ttype = "EXPORT"
                 d.code = ret
                 d.fingerprint = args.fingerprint
                 db.completion_codes[args.fingerprint] = d

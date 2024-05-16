@@ -166,6 +166,7 @@ def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=
         data.ttype = "CLEAN"
         data.ttime = datetime.now()
         data.process_id = os.getpid()
+        data.modified_data = 0
         data.finished = 0
         data.user_quit = 0
         trans_id = db.transaction_groups.add_oid_record(data)  # ("CLEAN", datetime.now(), os.getpid(), 0, 0))
@@ -175,6 +176,7 @@ def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=
         removals.update(out_of_sync_surveys)
         removals.update(metadata_mismatch)
         if removals or len(db.reinserts.unfinished_records()) > 0:
+            db.transaction_groups.set_modified(trans_id)
             db.clean(removals, compare_callback=comp, transaction_id=trans_id, subprocesses=subprocesses)
         db.transaction_groups.set_finished(trans_id)
 
@@ -214,14 +216,12 @@ def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), 
     if ret == SUCCEEDED:
         sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, for_navigation_flag, exclude=exclude)
         clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=1)
-        if names_list:
-            ret = process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug, override_epsg, crop=crop)
-        else:
+        if not names_list:  # still call process_nbs_records to have it write the transaction group records
             LOGGER.warning(f"No matching records found in tables {conn_info.tablenames}")
             LOGGER.warning(f"  for_navigation_flag used:{for_navigation_flag[0]}")
             if for_navigation_flag[0]:
                 LOGGER.warning(f"  and for_navigation value must equal: {for_navigation_flag[1]}")
-            ret = SUCCEEDED  # this will leave a lot of windows open when a full production branch is done, so make it zero exit code
+        ret = process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug, override_epsg, crop=crop)
     return ret
 
 
@@ -243,6 +243,7 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
     unconverted_csars = []
     files_not_found = []
     failed_to_insert = []
+    has_modified = False
     db = WorldDatabase.open(world_db) if isinstance(world_db, str) else world_db
     try:
         if extra_debug:
@@ -255,6 +256,7 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
         data.ttime = datetime.now()
         data.process_id = os.getpid()
         data.finished = 0
+        data.modified_data = 0
         data.user_quit = 0
         trans_id = db.transaction_groups.add_oid_record(data)  # ("INSERT", datetime.now(), os.getpid(), 0, 0))
         # # fixme
@@ -332,6 +334,9 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
 
                 if not sid_in_db:
                     try:
+                        if not has_modified:
+                            db.transaction_groups.set_modified(trans_id)
+                            has_modified = True
                         lock = FileLock(path)  # this doesn't work with the file lock - just the multiprocessing locks
                         if lock.acquire():
                             try:
@@ -352,7 +357,7 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
                             except BrutyError as e:
                                 failed_to_insert.append((str(e), survey))
                             except IndexError as e:
-                                # Allow really large chart to fail 
+                                # Allow really large chart to fail due to geographic extent
                                 if "Chart 411" in path:
                                     failed_to_insert.append((str(e), survey))
                                 else:
@@ -465,6 +470,7 @@ if __name__ == "__main__":
                 db = WorldDatabase.open(args.bruty_path)
                 d = db.completion_codes.data_class()
                 d.ttime = datetime.now()
+                d.ttype = "INSERT"
                 d.code = ret
                 d.fingerprint = args.fingerprint
                 db.completion_codes[args.fingerprint] = d

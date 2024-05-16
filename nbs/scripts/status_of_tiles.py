@@ -1,3 +1,7 @@
+""" this script checks if tiles would need to re-combined
+It looks to see if there are new/changed surveys or oncs that have been removed.
+"""
+
 import multiprocessing
 import os
 import sys
@@ -113,6 +117,8 @@ def main(config):
 
 
 if __name__ == '__main__':
+    # this script checks if tiles would need to re-combined
+    # It looks to see if there are new/changed surveys or oncs that have been removed.
 
     # Runs the main function for each config specified in sys.argv
     run_command_line_configs(main, "Status")

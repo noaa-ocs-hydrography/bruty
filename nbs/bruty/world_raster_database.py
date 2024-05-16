@@ -371,6 +371,7 @@ class StartedMetadata(SqliteSurveyMetadata):
         # update the table structure if an old schema is found
         if not self.cur.execute(f"SELECT COUNT(*) AS CNTREC FROM pragma_table_info('{tablename}') WHERE name='transaction_id'").fetchone()[0]:
             self.cur.execute(f'ALTER TABLE {tablename} ADD column transaction_id integer;')
+            self.conn.commit()
 
 
 class StartedIds(StartedMetadata):
@@ -395,6 +396,7 @@ class TransactionGroups(SqliteSurveyMetadata):
         SQLDataField('process_id', 'integer'),
         SQLDataField('finished', 'integer'),
         SQLDataField('user_quit', 'integer'),
+        SQLDataField('modified_data', 'integer'),
     )
 
     def __init__(self, path_to_sqlite_db):
@@ -407,10 +409,20 @@ class TransactionGroups(SqliteSurveyMetadata):
             self.cur.execute("update transaction_groups set process_id =  0;")
             self.cur.execute("update transaction_groups set finished =  0;")
             self.cur.execute("update transaction_groups set user_quit =  0;")
+            self.conn.commit()
+        # update the table structure if an old schema is found
+        if not self.cur.execute(f"SELECT COUNT(*) AS CNTREC FROM pragma_table_info('transaction_groups') WHERE name='modified_data'").fetchone()[0]:
+            self.cur.execute(f'ALTER TABLE transaction_groups ADD column modified_data integer;')
+            self.cur.execute("update transaction_groups set modified_data = 1;")
+            self.conn.commit()
 
     def set_finished(self, oid):
         with SqlLock(self.conn):
             self.cur.execute(f"""update {self.tablename} set (finished)=(1) where {self.primary_key}=(?)""", [oid])
+
+    def set_modified(self, oid):
+        with SqlLock(self.conn):
+            self.cur.execute(f"""update {self.tablename} set (modified_data)=(1) where {self.primary_key}=(?)""", [oid])
 
     def set_quit(self, oid):
         with SqlLock(self.conn):
@@ -426,10 +438,15 @@ class CompletionCodes(SqliteSurveyMetadata):
         SQLDataField('fingerprint', 'TEXT PRIMARY KEY'),
         SQLDataField('ttime', 'TEXT', datetime.fromisoformat, datetime.isoformat),
         SQLDataField('code', 'integer'),
+        SQLDataField('ttype', 'TEXT'),
     )
 
     def __init__(self, path_to_sqlite_db):
         super().__init__(path_to_sqlite_db, "completion_codes", "fingerprint")
+        # update the table structure if an old schema is found
+        if not self.cur.execute(f"SELECT COUNT(*) AS CNTREC FROM pragma_table_info('completion_codes') WHERE name='ttype'").fetchone()[0]:
+            self.cur.execute(f'ALTER TABLE completion_codes ADD column ttype TEXT;')
+            # self.cur.execute("update transaction_groups set process_id =  ;")
 
 
 class StartFinishRecords(SqliteSurveyMetadata):  # fixme - rename one of these transaction classes so it's clearer
