@@ -1155,7 +1155,7 @@ class ProcessTracker:
 
     def find(self):
         if platform.system() == 'Windows':
-            separator = "&&"
+            separator = "&"
         else:
             separator = ";"
         ret = None

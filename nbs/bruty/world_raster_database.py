@@ -47,7 +47,7 @@ VERSION = (1, 0, 0)
 __version__ = '.'.join(map(str, VERSION))
 
 # Use this when I know only one process is running.
-from nbs.bruty.nbs_no_locks import LockNotAcquired, BaseLockException, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, current_address, Lock
+from nbs.bruty.nbs_no_locks import LockNotAcquired, BaseLockException, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, current_address, Lock, AdvisoryLock
 """
 #----------------------------------------------------
 from sqlalchemy.ext.automap import automap_base
@@ -100,14 +100,14 @@ res.from_filename
 
 
 def use_locks(port):
-    global LockNotAcquired, BaseLockException, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, NO_LOCK, current_address, Lock
+    global LockNotAcquired, BaseLockException, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, NO_LOCK, current_address, Lock, AdvisoryLock
     if port is None or port == "":
         from nbs.bruty.nbs_no_locks import LockNotAcquired, BaseLockException, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, \
-            SqlLock, NameLock, current_address, Lock
+            SqlLock, NameLock, current_address, Lock, AdvisoryLock
         NO_LOCK = True
     else:
         from nbs.bruty.nbs_locks import LockNotAcquired, BaseLockException, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, \
-            SqlLock, NameLock, start_server, current_address, Lock
+            SqlLock, NameLock, start_server, current_address, Lock, AdvisoryLock
         start_server(int(port))
         NO_LOCK = False
 

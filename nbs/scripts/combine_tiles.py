@@ -2,6 +2,7 @@
 """
 import multiprocessing
 import os
+import sqlite3
 import sys
 import time
 import traceback
@@ -32,7 +33,7 @@ from nbs.configs import get_logger, run_command_line_configs, parse_multiple_val
 # , iter_configs, set_stream_logging, log_config, parse_multiple_values, make_family_of_logs
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, connect_params_from_config, connection_with_retries
 from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, TileToProcess, TileProcess
-from nbs.scripts.combine import process_nbs_database
+from nbs.scripts.combine import process_nbs_database, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS
 
 interactive_debug = False
 if interactive_debug and sys.gettrace() is None:  # this only is set when a debugger is run (?)
@@ -103,11 +104,11 @@ def launch(world_db, conn_info, for_navigation_flag=(True, True), override_epsg=
                              "-p", '"'+conn_info.password+'"'])
         cmds.append(" ".join(combine_args))
         if platform.system() == 'Windows':
-            cmds.append("exiter.bat 0")  # exiter.bat closes the console if there was no error code, keeps it open if there was an error
-            args = 'cmd.exe /K ' + "&&".join(cmds)
+            cmds.append(f"exiter.bat {SUCCEEDED} {TILE_LOCKED}")  # exiter.bat closes the console if there was no error code, keeps it open if there was an error
+            args = 'cmd.exe /K ' + "&".join(cmds)  # note && only joins commands if they succeed = "0", so just use one ampersand so we can use different return codes
             kwargs = popen_kwargs(activate=False, minimize=minimized)  # windows specific flags start flags
         else:
-            cmds.extend(["exit", "0"])
+            cmds.extend(["exit", f"{SUCCEEDED}", f"{TILE_LOCKED}"])
             args = ['sh', '-c', ';'.join(cmds)]
             kwargs = {}
 
@@ -125,17 +126,34 @@ def launch(world_db, conn_info, for_navigation_flag=(True, True), override_epsg=
 def remove_finished_processes(tile_processes, remaining_tiles, max_tries):
     for key in list(tile_processes.keys()):
         if not tile_processes[key].console_process.is_running():
-            retry = False
-            if tile_processes[key].succeeded():
-                reason = "finished"
-            # 3 is the combine code for bad/missing data
-            elif tile_processes[key].finish_code() == 3:
-                reason = "ended with data errors"
-            elif remaining_tiles[key][1] + 1 >= max_tries:
-                reason = "failed too many times"
-            else:
-                reason = "failed and will retry"
+            try:
+                retry = False
+                if tile_processes[key].succeeded():
+                    reason = "finished"
+                # 3 is the combine code for bad/missing data
+                elif tile_processes[key].finish_code() == DATA_ERRORS:
+                    reason = "ended with data errors"
+                # 4 is the code for LOCKED
+                elif tile_processes[key].finish_code() == TILE_LOCKED:
+                    reason = "LOCKED"
+                    tile_processes[key].clear_finish_code()  # remove record so we don't just pile up a lot of needless records
+                    retry = True
+                    # reduce the counter by one so we don't stop trying just because the tile was locked
+                    remaining_tiles[key][1] -= 1
+                elif remaining_tiles[key][1] + 1 >= max_tries:
+                    reason = "failed too many times"
+                else:
+                    reason = "failed and will retry"
+                    retry = True
+            except sqlite3.OperationalError as e:
+                # this is happening when the network drive loses connection, not sure if it is recoverable.
+                # treat it like an unhandled exception in the subprocess - retry and increment the count
+                # also wait a moment to let the network recover in case that helps
+                msg = traceback.format_exc()
+                LOGGER.warning(f"Exception accessing bruty db for {remaining_tiles[key][0]} {key.dtype} res={key.res}:\n{msg}")
+                reason = "failed with a sqlite Operational error"
                 retry = True
+                time.sleep(5)
             LOGGER.info(f"Combine {reason} for {remaining_tiles[key][0]} {key.dtype} res={key.res}")
             if retry:
                 remaining_tiles[key][1] += 1  # set the tile to try again later and note that it is retrying
@@ -168,7 +186,7 @@ def main(config):
     use_locks(port)
     ignore_pids = psutil.pids()
     max_processes = config.getint('processes', 5)
-    max_tries = config.getint('processes', 2)
+    max_tries = config.getint('max_retries', 3)
     conn_info = connect_params_from_config(config)
     exclude = parse_multiple_values(config.get('exclude_ids', ''))
     # only keep X decimals - to help compression and storage size
@@ -225,40 +243,56 @@ def main(config):
                 # need to make a copy first
                 # tile_info.geometry, tile_info.tile = None, None
                 # full_db = create_world_db(config['data_dir'], tile_info, dtype, current_tile.nav_flag_value)
-                db = create_world_db(config['data_dir'], tile_info, current_tile.dtype, current_tile.nav_flag)
                 try:
-                    lock = Lock(db.metadata_filename().with_suffix(".lock"), fail_when_locked=True, flags=LockFlags.EXCLUSIVE|LockFlags.NON_BLOCKING)
-                    lock.acquire()
-                    override = db.db.epsg if config.getboolean('override', False) else NO_OVERRIDE
-                    conn_info.tablenames = [tile_info.metadata_table_name(current_tile.dtype)]
-                    fingerprint = str(current_tile.hash_id) + "_" + datetime.now().isoformat()
-                    if debug_launch:
-                        use_locks(port)
-                        ret = process_nbs_database(db, conn_info, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
-                                                   extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(current_tile.dtype==ENC))
+                    db = create_world_db(config['data_dir'], tile_info, current_tile.dtype, current_tile.nav_flag)
+                except sqlite3.OperationalError as e:
+                    # this happened as a network issue - we will skip it for now and come back and give the network some time to recover
+                    # but we will count it as a retry in case there is a corrupted file or something
+                    msg = traceback.format_exc()
+                    LOGGER.warning(f"Exception accessing bruty db for {tile_info} {current_tile.res}m {current_tile.dtype}:\n{msg}")
+                    time.sleep(5)
+                    remaining_tiles[current_tile][1] += 1
+                    if remaining_tiles[current_tile][1] > max_tries:
                         del remaining_tiles[current_tile]
-                    else:
-                        remove_finished_processes(tile_processes, remaining_tiles, max_tries)
-                        while len(tile_processes) >= max_processes:  # wait for at least one process to finish
-                            time.sleep(10)
-                            do_keyboard_actions(remaining_tiles, tile_processes)
-                            remove_finished_processes(tile_processes, remaining_tiles, max_tries)
-
-                        pid = launch(db, conn_info, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
-                                     override_epsg=override, extra_debug=debug_config, lock=port, exclude=exclude, crop=(current_tile.dtype==ENC),
-                                     log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
-                                     fingerprint=fingerprint)
-                        running_process = ConsoleProcessTracker(["python", fingerprint, "combine.py"])
-                        if running_process.console.last_pid != pid:
-                            LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
+                else:
+                    try:
+                        # Lock all the database so we can write safely
+                        # -- this is only effective on one OS
+                        # so if linux is combining and Windows tries to export they won't see each others locks.
+                        # We're adding a postgres lock which is cross platform inside the combine.py and tile_export.py
+                        # to help this problem (but network errors may lose the postgres connection)
+                        lock = Lock(db.metadata_filename().with_suffix(".lock"), fail_when_locked=True, flags=LockFlags.EXCLUSIVE|LockFlags.NON_BLOCKING)
+                        lock.acquire()
+                        override = db.db.epsg if config.getboolean('override', False) else NO_OVERRIDE
+                        conn_info.tablenames = [tile_info.metadata_table_name(current_tile.dtype)]
+                        fingerprint = str(current_tile.hash_id) + "_" + datetime.now().isoformat()
+                        if debug_launch:
+                            use_locks(port)
+                            ret = process_nbs_database(db, conn_info, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
+                                                       extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(current_tile.dtype==ENC))
+                            del remaining_tiles[current_tile]
                         else:
-                            LOGGER.info(f"Started PID {pid} for {tile_info} {current_tile.res}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
-                            
-                        # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
-                        tile_processes[current_tile] = TileProcess(running_process, tile_info, db, fingerprint, lock)
-                    del lock  # unlocks if the lock wasn't stored in the tile_process
-                except AlreadyLocked:
-                    LOGGER.info(f"delay combine due to data lock for {tile_info} {current_tile.res}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
+                            remove_finished_processes(tile_processes, remaining_tiles, max_tries)
+                            while len(tile_processes) >= max_processes:  # wait for at least one process to finish
+                                time.sleep(10)
+                                do_keyboard_actions(remaining_tiles, tile_processes)
+                                remove_finished_processes(tile_processes, remaining_tiles, max_tries)
+
+                            pid = launch(db, conn_info, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
+                                         override_epsg=override, extra_debug=debug_config, lock=port, exclude=exclude, crop=(current_tile.dtype==ENC),
+                                         log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
+                                         fingerprint=fingerprint)
+                            running_process = ConsoleProcessTracker(["python", fingerprint, "combine.py"])
+                            if running_process.console.last_pid != pid:
+                                LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
+                            else:
+                                LOGGER.info(f"Started PID {pid} for {tile_info} {current_tile.res}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
+
+                            # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
+                            tile_processes[current_tile] = TileProcess(running_process, tile_info, db, fingerprint, lock)
+                        del lock  # unlocks if the lock wasn't stored in the tile_process
+                    except AlreadyLocked:
+                        LOGGER.info(f"delay combine due to data lock for {tile_info} {current_tile.res}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
             # remove finished processes from the list or this becomes an infinite loop
             remove_finished_processes(tile_processes, remaining_tiles, max_tries)
 
@@ -272,7 +306,6 @@ def main(config):
         print(msg)
         LOGGER.error(traceback.format_exc())
         LOGGER.error(msg)
-        ret = 99
 
     old = """
     db_path = pathlib.Path(config['combined_datapath'])

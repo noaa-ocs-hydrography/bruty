@@ -15,6 +15,11 @@ from nbs.bruty.nbs_postgres import NOT_NAV, get_nbs_records, get_sorting_info, g
 from nbs.bruty.world_raster_database import WorldDatabase, use_locks, UTMTileBackendExactRes, NO_OVERRIDE
 from nbs.bruty.utils import ConsoleProcessTracker
 
+SUCCEEDED = 0
+DATA_ERRORS = 3
+TILE_LOCKED = 4
+UNHANDLED_EXCEPTION = 99
+
 _debug = False
 ogr.UseExceptions()
 LOGGER = get_logger('nbs.bruty.create_tiles')
@@ -169,6 +174,12 @@ class TileProcess:
     fingerprint: str
     lock: str = None
 
+    def clear_finish_code(self):
+        try:
+            del self.db.completion_codes[self.fingerprint]
+        except KeyError:
+            pass
+
     def finish_code(self):
         try:
             return self.db.completion_codes[self.fingerprint].code
@@ -176,7 +187,7 @@ class TileProcess:
             return None
 
     def succeeded(self):
-        return self.finish_code() == 0
+        return self.finish_code() == SUCCEEDED
 
 
 @dataclass(frozen=True)

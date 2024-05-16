@@ -1,5 +1,3 @@
-EXCLUSIVE, SHARED, NON_BLOCKING = 1, 1, 1
-
 
 def current_address():
     return (None, None)
@@ -66,4 +64,4 @@ class SqlLock:
         self.conn.commit()
 
 
-from nbs.bruty.nbs_locks import Lock, BaseLockException
+from nbs.bruty.nbs_locks import Lock, BaseLockException, AdvisoryLock, EXCLUSIVE, SHARED, NON_BLOCKING

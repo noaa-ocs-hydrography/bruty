@@ -16,20 +16,20 @@ from osgeo import gdal, osr, ogr
 from nbs.bruty import world_raster_database
 from nbs.bruty.world_raster_database import WorldDatabase, use_locks, UTMTileBackendExactRes, NO_OVERRIDE
 from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
-# import locks from world_raster_database in case we are in debug mode and have turned locks off
-from nbs.bruty.world_raster_database import LockNotAcquired, AreaLock, FileLock, BaseLockException, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, Lock
-# from nbs.bruty.nbs_locks import LockNotAcquired, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock
+from nbs.bruty.world_raster_database import LockNotAcquired, AreaLock, FileLock, BaseLockException, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, Lock, AdvisoryLock
 from nbs.bruty.utils import onerr, user_action, remove_file, QUIT, HELP
 from nbs.configs import get_logger, run_command_line_configs, make_family_of_logs, show_logger_handlers
 from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_metadata, ConnectionInfo, connect_params_from_config
 from nbs.scripts.convert_csar import convert_csar_python
-from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db
+from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS
 from nbs_utils.points_utils import to_npz
+
 
 interactive_debug = False
 if interactive_debug and sys.gettrace() is None:  # this only is set when a debugger is run (?)
     interactive_debug = False
 
+NOT_ENOUGH_ARGS = 1
 
 LOGGER = get_logger('nbs.bruty.insert')
 CONFIG_SECTION = 'insert'
@@ -201,16 +201,27 @@ def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), 
 
     """
     world_db_path = world_db if isinstance(world_db, (str, pathlib.Path)) else world_db.db.data_path
-    sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, for_navigation_flag, exclude=exclude)
-    clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=1)
-    if names_list:
-        ret = process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug, override_epsg, crop=crop)
-    else:
-        LOGGER.warning(f"No matching records found in tables {conn_info.tablenames}")
-        LOGGER.warning(f"  for_navigation_flag used:{for_navigation_flag[0]}")
-        if for_navigation_flag[0]:
-            LOGGER.warning(f"  and for_navigation value must equal: {for_navigation_flag[1]}")
-        ret = 0  # this will leave a lot of windows open when a full production branch is done, so make it zero exit code
+    ret = SUCCEEDED
+    if world_raster_database.NO_LOCK:  # NO_LOCK means that we are not allowing multiple processes to work on one Tile/database at the same time - so use an advisory lock on the whole thine
+        p = pathlib.Path(world_db_path)
+        if not p.is_dir():  # the path to the sqlite file?
+            p = p.parent
+        lck = AdvisoryLock(p.name, conn_info, EXCLUSIVE | NON_BLOCKING)
+        try:
+            lck.acquire()
+        except BaseLockException:
+            ret = TILE_LOCKED
+    if ret == SUCCEEDED:
+        sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, for_navigation_flag, exclude=exclude)
+        clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=1)
+        if names_list:
+            ret = process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug, override_epsg, crop=crop)
+        else:
+            LOGGER.warning(f"No matching records found in tables {conn_info.tablenames}")
+            LOGGER.warning(f"  for_navigation_flag used:{for_navigation_flag[0]}")
+            if for_navigation_flag[0]:
+                LOGGER.warning(f"  and for_navigation value must equal: {for_navigation_flag[1]}")
+            ret = SUCCEEDED  # this will leave a lot of windows open when a full production branch is done, so make it zero exit code
     return ret
 
 
@@ -367,11 +378,11 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
                 LOGGER.warning(f"file not found: {survey.sid}  {survey.data_path}")
             for (err_str, survey) in failed_to_insert:
                 LOGGER.warning(f"failed to process: {survey.sid}  {survey.data_path}\n    {err_str}")
-            ret = 3
+            ret = DATA_ERRORS
         else:
             LOGGER.info("\n\nAll files processed")
             db.transaction_groups.set_finished(trans_id)
-            ret = 0
+            ret = SUCCEEDED
         return ret
     except Exception as e:
         db.db.LOGGER.error(traceback.format_exc())
@@ -424,14 +435,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.show_help or not args.bruty_path or not args.tables:
         parser.print_help()
-        ret = 1
+        ret = NOT_ENOUGH_ARGS
 
     if args.bruty_path:
+        conn_info = ConnectionInfo(args.database, args.user, args.password, args.host, args.port, args.tables)
+        use_locks(args.lock_server)
+
         if args.logger_path:
             make_family_of_logs("nbs", args.logger_path, remove_other_file_loggers=False)
             make_family_of_logs("nbs", args.logger_path + "_" + str(os.getpid()), remove_other_file_loggers=False)
-        conn_info = ConnectionInfo(args.database, args.user, args.password, args.host, args.port, args.tables)
-        use_locks(args.lock_server)
         try:
             print(f"Processing {args.bruty_path} for_navigation_flag={(not args.ignore_for_nav, not args.not_for_nav)}")
             ret = process_nbs_database(args.bruty_path, conn_info, for_navigation_flag=(not args.ignore_for_nav, not args.not_for_nav),
@@ -447,7 +459,7 @@ if __name__ == "__main__":
                 c = c.parent
             LOGGER.error(traceback.format_exc())
             LOGGER.error(msg)
-            ret = 99
+            ret = UNHANDLED_EXCEPTION
         if args.fingerprint:
             try:
                 db = WorldDatabase.open(args.bruty_path)
@@ -458,5 +470,5 @@ if __name__ == "__main__":
                 db.completion_codes[args.fingerprint] = d
             except:
                 pass
-
+    print(f"Exiting with code {ret}")
     sys.exit(ret)

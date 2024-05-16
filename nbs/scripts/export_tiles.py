@@ -3,6 +3,8 @@
 import datetime
 import multiprocessing
 import tempfile
+import sqlite3
+import traceback
 
 import psutil
 
@@ -33,7 +35,7 @@ from nbs.bruty.world_raster_database import LockNotAcquired, AreaLock, FileLock,
 from nbs.bruty.utils import remove_file, user_action, popen_kwargs, ConsoleProcessTracker, QUIT, HELP
 from nbs.configs import get_logger, run_command_line_configs, parse_multiple_values
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, connect_params_from_config
-from nbs.bruty.tile_export import combine_and_export
+from nbs.bruty.tile_export import combine_and_export, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS
 from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, TileToProcess, TileProcess
 
 LOGGER = get_logger('nbs.bruty.export')
@@ -47,7 +49,7 @@ if interactive_debug and sys.gettrace() is None:  # this only is set when a debu
 # FIXME
 print("\nremove the hack setting the bruty and nbs directories into the python path\n")
 
-def launch(export_dir, bruty_dir, cache_file, tile_cache, export_time,
+def launch(config_path, cache_file, tile_cache, export_time,
            new_console=True, env_path=r'D:\languages\miniconda3\Scripts\activate', env_name='NBS', tile_id=(0, 0),
            decimals=None, minimized=False, remove_cache=False, fingerprint=""):
 
@@ -57,19 +59,20 @@ def launch(export_dir, bruty_dir, cache_file, tile_cache, export_time,
     if new_console:
         # spawn a new console, activate a python environment and run the combine.py script with appropriate arguments
         bruty_code = nbs.bruty.__path__._path[0]
-        bruty_code = str(pathlib.Path(bruty_code).parent.parent)
+        bruty_root = str(pathlib.Path(bruty_code).parent.parent)
         nbs_code = fuse_dev.__path__._path[0]
         nbs_code = str(pathlib.Path(nbs_code).parent)
         restore_dir = os.getcwd()
-        os.chdir(pathlib.Path(__file__).parent.joinpath("..", "bruty"))
+        # os.chdir(pathlib.Path(__file__).parent.joinpath("..", "bruty"))  # change directory so we can run the tile_export script
         # FIXME - hack overriding nbs and bruty paths
         # looks like activate is overwriting the pythonpath, so specify it after the activate command
-        args = ['cmd.exe', '/K', 'set', f'pythonpath=&&', 'set', 'TCL_LIBRARY=&&', 'set',
-                'TIX_LIBRARY=&&', 'set', 'TK_LIBRARY=&&', env_path, env_name, '&&',
-                'set', f'pythonpath={nbs_code};{bruty_code}&&', 'python']
+        args = ['cmd.exe', '/K', 'set', f'pythonpath=&', 'set', 'TCL_LIBRARY=&', 'set',
+                'TIX_LIBRARY=&', 'set', 'TK_LIBRARY=&', env_path, env_name, '&',
+                'set', f'pythonpath={nbs_code};{bruty_root}&', 'python']
         if profiling:
-            args.extend(["-m", "cProfile", "-o", f"{export_dir}\\timing{tile_id[0]}_{tile_id[1]}.profile"])
-        args.extend(["tile_export.py", "-b", bruty_dir, "-e", export_dir, "-t", export_time, "-c", cache_file, "-i", tile_cache])
+            args.extend(["-m", "cProfile", "-o", str(pathlib.Path(config_path).parent) + f"\\timing{tile_id[0]}_{tile_id[1]}.profile"])
+        script_path = os.path.join(bruty_code, "tile_export.py")
+        args.extend([script_path, "-b", config_path, "-t", export_time, "-c", cache_file, "-i", tile_cache])
         if remove_cache:
             args.extend(["--remove_cache"])
         if decimals is not None:
@@ -77,10 +80,13 @@ def launch(export_dir, bruty_dir, cache_file, tile_cache, export_time,
         if fingerprint:
             args.extend(['-f', fingerprint])
         # exiter closes the console if there was no error code, keeps it open if there was an error
-        args.extend(["&&", r"..\scripts\exiter.bat", "0"])
+        args.extend(["&", r"..\scripts\exiter.bat", f"{SUCCEEDED}", f"{TILE_LOCKED}"])  # note && only joins commands if they succeed, so just use one ampersand
+        # because we are launching separate windows we can't use the subprocess.poll and returncode.
+        # maybe we should switch to just logs and not leave a window on the screen for the user to see
+        # that would make it easier to check the returncode
         proc = subprocess.Popen(args, **popen_kwargs(activate=False, minimize=minimized))
-        os.chdir(restore_dir)
-        ret = proc.pid
+        # os.chdir(restore_dir)
+        ret = proc.pid, script_path
     else:
         raise Exception("same console multiprocessing is untested")
         # could actually do the same subprocess.Popen in the same console, or multiprocessing which would remove need for psutil, or use dask(?)
@@ -136,14 +142,31 @@ def get_metadata(tile_info, conn_info, use_bruty_cached="", use_caches={}):
 def remove_finished_processes(tile_processes, remaining_tiles, max_tries):
     for key in list(tile_processes.keys()):
         if not tile_processes[key].console_process.is_running():
-            retry = False
-            if tile_processes[key].succeeded():
-                reason = "finished"
-            elif remaining_tiles[key][1] + 1 >= max_tries:
-                reason = "failed too many times"
-            else:
-                reason = "failed and will retry"
+            try:
+                retry = False
+                if tile_processes[key].succeeded():
+                    reason = "finished"
+                # 4 is the code for LOCKED
+                elif tile_processes[key].finish_code() == TILE_LOCKED:
+                    reason = "LOCKED"
+                    tile_processes[key].clear_finish_code()  # remove record so we don't just pile up a lot of needless records
+                    retry = True
+                    # reduce the counter by one so we don't stop trying just because the tile was locked
+                    remaining_tiles[key][1] -= 1
+                elif remaining_tiles[key][1] + 1 >= max_tries:
+                    reason = "failed too many times"
+                else:
+                    reason = "failed and will retry"
+                    retry = True
+            except sqlite3.OperationalError as e:
+                # this is happening when the network drive loses connection, not sure if it is recoverable.
+                # treat it like an unhandled exception in the subprocess - retry and increment the count
+                # also wait a moment to let the network recover in case that helps
+                msg = traceback.format_exc()
+                LOGGER.warning(f"Exception accessing bruty db for {remaining_tiles[key][0]} {key.dtype} res={key.res}:\n{msg}")
+                reason = "failed with a sqlite Operational error"
                 retry = True
+                time.sleep(5)
             LOGGER.info(f"Export {reason} for {remaining_tiles[key][0]} {key.dtype} res={key.res}")
             if retry:
                 remaining_tiles[key][1] += 1  # set the tile to try again later and note that it is retrying
@@ -181,7 +204,7 @@ def main(config):
     conn_info.database = 'metadata'
     tile_list = list(iterate_tiles_table(config))
     tile_list.sort(key=lambda t: t.pb)
-    max_tries = config.getint('processes', 2)
+    max_tries = config.getint('max_tries', 3)
     max_processes = config.getint('processes', 5)
     try:
         if debug_config:
@@ -229,7 +252,10 @@ def main(config):
                 tile_info.res = current_tile.res  # set the specific resolution and closing distance for processing
                 tile_info.closing = current_tile.closing  # will be read by the export function (after pickling)
 
-                # Lock all the possible combine databases so we can export safely
+                # Lock all the possible combine databases so we can export safely -- this is only effective on one OS
+                # so if linux is combining and Windows tries to export they won't see each others locks.
+                # We're adding a postgres lock which is cross platform inside the combine.py and tile_export.py
+                # to help this problem (but network errors may lose the postgres connection)
                 locks = []
                 try:
                     for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
@@ -276,26 +302,39 @@ def main(config):
                     # full_db = create_world_db(config['data_dir'], tile_info, dtype, nav_flag_value)
                     if interactive_debug and debug_config and max_processes < 2:
                         comp = partial(nbs_survey_sort, sort_dict)
-                        combine_and_export(config['export_dir'], config['data_dir'], tile_info, all_simple_records, comp, export_time, decimals)
+                        combine_and_export(config, tile_info, all_simple_records, comp, export_time, decimals)
                         del remaining_tiles[current_tile]
                     else:
-                        fobj, tile_cache = tempfile.mkstemp(".tile.pickle")
-                        os.close(fobj)
-                        tile_cache_file = open(tile_cache, "wb")
-                        pickle.dump(tile_info, tile_cache_file)
-                        tile_cache_file.close()
-                        files_to_delete.append(tile_cache)
-                        LOGGER.info(f"exporting {tile_info.full_name}")
-                        fingerprint = str(current_tile.hash_id) + "_" + datetime.datetime.now().isoformat()
-                        pid = launch(config['export_dir'], config['data_dir'], cache_file, tile_cache, export_time, env_path=env_path,
-                                     env_name=env_name, tile_id=(tile_info.tile, tile_info.res), decimals=decimals, minimized=minimized,
-                                     remove_cache=use_cached_meta, fingerprint=fingerprint)
-                        running_process = ConsoleProcessTracker(["python", fingerprint, "tile_export.py"])
-                        if running_process.console.last_pid != pid:
-                            LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
-                        # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
-                        db = create_world_db(config['data_dir'], tile_info, REVIEWED, True)  # store+check the success code in the 'qualified for navigation' database
-                        tile_processes[current_tile] = TileProcess(running_process, tile_info, db, fingerprint, locks)
+                        try:
+                            # store+check the success code in the 'qualified for navigation' database
+                            db = create_world_db(config['data_dir'], tile_info, REVIEWED, True)
+                        except sqlite3.OperationalError as e:
+                            # this happened as a network issue - we will skip it for now and come back and give the network some time to recover
+                            # but we will count it as a retry in case there is a corrupted file or something
+                            msg = traceback.format_exc()
+                            LOGGER.warning(f"Exception accessing bruty db for {tile_info} {current_tile.res}m {current_tile.dtype}:\n{msg}")
+                            time.sleep(5)
+                            remaining_tiles[current_tile][1] += 1
+                            if remaining_tiles[current_tile][1] > max_tries:
+                                del remaining_tiles[current_tile]
+                        else:
+                            fobj, tile_cache = tempfile.mkstemp(".tile.pickle")
+                            os.close(fobj)
+                            tile_cache_file = open(tile_cache, "wb")
+                            pickle.dump(tile_info, tile_cache_file)
+                            tile_cache_file.close()
+                            files_to_delete.append(tile_cache)  # mark this to delete later
+                            LOGGER.info(f"exporting {tile_info.full_name}")
+                            fingerprint = str(current_tile.hash_id) + "_" + datetime.datetime.now().isoformat()
+
+                            pid, script_path = launch(config._source_filename, cache_file, tile_cache, export_time, env_path=env_path,
+                                         env_name=env_name, tile_id=(tile_info.tile, tile_info.res), decimals=decimals, minimized=minimized,
+                                         remove_cache=use_cached_meta, fingerprint=fingerprint)
+                            running_process = ConsoleProcessTracker(["python", fingerprint, script_path])
+                            if running_process.console.last_pid != pid:
+                                LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
+                            # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
+                            tile_processes[current_tile] = TileProcess(running_process, tile_info, db, fingerprint, locks)
                     del locks  # releases if not stored in the tile_processes
 
             # remove finished processes from the list or this becomes an infinite loop

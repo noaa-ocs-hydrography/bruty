@@ -5,6 +5,7 @@ import os
 import pathlib
 import random
 import functools
+import hashlib
 import sys
 import time
 import enum
@@ -645,3 +646,89 @@ class Lock:
         # this is called when Lock is assigned to a variable and is deleted
         self.release()
 
+try:
+    import psycopg2
+    from data_management.db_connection import connect_with_retries
+except ImportError:
+    print("postgres not found for advisory locks")
+    class AdvisoryLock:
+        def __init__(self, *args, **kwargs):
+            pass
+        def acquire(self, *args, **kwargs):
+            raise ImportError
+else:
+    class AdvisoryLock:
+        def __init__(self, identifier, conn_info,
+                timeout: float = DEFAULT_TIMEOUT,
+                check_interval: float = DEFAULT_CHECK_INTERVAL,
+                flags: LockFlags = LOCK_METHOD):
+            """Lock manager with build-in timeout.  Can be acquired multiple times.
+
+            identifier -- a string or integer.  Strings will be turned to lower case (for cross platform reasons) and hashed into an integer
+            timeout -- timeout when trying to acquire a lock
+            check_interval -- check interval while waiting
+            flags -- a combination of the bitflags EXCLUSIVE, SHARED, NON_BLOCKING (default is EXCLUSIVE | NON_BLOCKING)
+            """
+            self.raw_identifier = identifier
+            if isinstance(identifier, int):
+                self.identifier = identifier
+            else:
+                h = hashlib.blake2b(digest_size=8)
+                h.update(str(identifier).lower().encode("utf8"))
+                self.identifier = int.from_bytes(h.digest(), 'big', signed=True)  # need signed for the sql call
+            self.connection = connect_with_retries(database=conn_info.database, user=conn_info.username, password=conn_info.password,
+                                                   host=conn_info.hostname, port=conn_info.port)
+            self.cursor = self.connection.cursor()
+            self.conn_info = conn_info
+            self.connection.set_session(autocommit=True)
+            self.timeout: float = timeout
+            self.check_interval: float = check_interval
+            self.flags: LockFlags = flags
+            if flags == EXCLUSIVE:
+                self.acquire_func = "select pg_advisory_lock"
+                self.release_func = "select pg_advisory_unlock"
+            elif flags == EXCLUSIVE | NON_BLOCKING:
+                self.acquire_func = "select pg_try_advisory_lock"
+                self.release_func = "select pg_advisory_unlock"
+            elif flags == SHARED:
+                self.acquire_func = "select pg_advisory_lock_shared"
+                self.release_func = "select pg_advisory_unlock_shared"
+            elif flags == SHARED | NON_BLOCKING:
+                self.acquire_func = "select pg_try_advisory_lock_shared"
+                self.release_func = "select pg_advisory_unlock_shared"
+            ident_str = "(%d)" % self.identifier
+            self.acquire_func += ident_str
+            self.release_func += ident_str
+
+        def acquire(self, timeout: float = None, check_interval: float = None):
+            """Acquire the locked filehandle.
+            Will raise AlreadyLocked if a previous incompatible file lock is found.
+            Will raise OSError if too many files are opened at once (this is a system limit)."""
+            if timeout is None:
+                timeout = self.timeout
+            if timeout is None:
+                timeout = 0
+
+            if check_interval is None:
+                check_interval = self.check_interval
+
+            # Try till the timeout has passed
+            timeout_end = current_time() + timeout
+            exception = None
+            success = False
+            while timeout_end > current_time() and not success:
+                # Try to lock
+                self.cursor.execute(self.acquire_func)
+                success = self.cursor.fetchone()[0]
+                if not success:
+                    # Wait a bit
+                    time.sleep(check_interval)
+
+            if not success:
+                raise LockException(f"Failed to acquire lock for {self.raw_identifier}")
+
+            return True
+
+        def release(self):
+            """Releases the currently locked file handle"""
+            self.cursor.execute(self.release_func)

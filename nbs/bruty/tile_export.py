@@ -28,10 +28,11 @@ except ModuleNotFoundError:
 
 from data_management.db_connection import connect_with_retries
 from fuse_dev.fuse.meta_review import meta_review
+from nbs.configs import iter_configs
 from nbs.bruty.utils import affine, get_crs_transformer, make_mllw_height_wkt, user_action, tqdm, remove_file, iterate_gdal_image, BufferedImageOps, QUIT, HELP
 from nbs.bruty.nbs_postgres import id_to_scoring, get_nbs_records, nbs_survey_sort, ConnectionInfo, connect_params_from_config, make_contributor_csv
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, NOT_NAV, INTERNAL, NAVIGATION, PUBLIC, connect_params_from_config, connection_with_retries
-from nbs.bruty.world_raster_database import WorldDatabase, use_locks
+from nbs.bruty.world_raster_database import WorldDatabase, use_locks, AdvisoryLock, BaseLockException
 from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
 from nbs.configs import get_logger
 from nbs.bruty.nbs_locks import LockNotAcquired, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, start_server, current_address
@@ -42,7 +43,8 @@ from nbs.bruty.raster_data import LayersEnum
 from fuse_dev.fuse.fuse_processor import git_head_commit_id
 import nbs.scripts.combine
 from xipe_dev.xipe.raster import CONTRIBUTOR_BAND_NAME, ELEVATION_BAND_NAME, UNCERTAINTY_BAND_NAME, raster_band_name_index
-from nbs.scripts.tile_specs import create_world_db
+from nbs.scripts.tile_specs import create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS
+
 
 LOGGER = get_logger('nbs.bruty.export')
 VERSION = (1, 0, 0)
@@ -240,7 +242,11 @@ class RasterExport:
             remove_file(self.rat_filename, allow_permission_fail=allow_permission_fail, silent=silent)
 
 
-def combine_and_export(export_dir, bruty_dir, tile_info, all_simple_records, comp, export_time="", decimals=None):
+def combine_and_export(config, tile_info, all_simple_records, comp, export_time="", decimals=None):
+    conn_info = connect_params_from_config(config)
+    bruty_dir = config['data_dir']
+    export_dir = config['export_dir']
+
     ret_code = 0
     # 3) Extract data from all necessary Bruty DBs
     if tile_info.public or tile_info.internal or tile_info.navigation:
@@ -257,11 +263,12 @@ def combine_and_export(export_dir, bruty_dir, tile_info, all_simple_records, com
 
         # @todo if there is no sensitive then internal and bluetopo are the same (don't export twice)
 
-        # Find the latest data time available
+        # Find the latest data time available so we can tell if an existing export was recent enough
         dataset, dataset_score = None, None
         all_times = []
         root_dir = pathlib.Path(bruty_dir)
-        for datatype in [REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT]:
+        all_datatypes = [REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT]
+        for datatype in all_datatypes:
             for nav in (True, False):
                 db_name = root_dir.joinpath(tile_info.bruty_db_name(datatype, nav))
                 try:
@@ -320,68 +327,80 @@ def combine_and_export(export_dir, bruty_dir, tile_info, all_simple_records, com
                 if wanted:
                     exp.cleanup_tempfiles()
                     exp.cleanup_finalfiles()
-
-            databases = [tile_info.bruty_db_name(REVIEWED, True), tile_info.bruty_db_name(ENC, True), tile_info.bruty_db_name(GMRT, True)]
-            databases = [root_dir.joinpath(db_name) for db_name in databases]
-            base_cnt = add_databases(databases, dataset, dataset_score, comp)
-
-            if tile_info.navigation:
-                os.makedirs(nav_export.extracted_filename.parent, exist_ok=True)
-                nav_dataset = copy_dataset(dataset, nav_export.extracted_filename)
-                nav_score = copy_dataset(dataset_score, nav_export.score_filename)
-                # databases = [tile_info.bruty_db_name(SENSITIVE, True)]
-                # databases = [root_dir.joinpath(db_name) for db_name in databases]
-                # nav_sensitive_cnt = add_databases(databases, nav_dataset, nav_score, comp)
-                del nav_score, nav_dataset  # closes the files so they can be copied
-                complete_export(nav_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
-                navigation_id = write_export_record(nav_export, navigation=True)
-
-            if tile_info.public or tile_info.internal:
-                # @todo the counts returned by add_databases should allow to tell if any changes were added
-                #   or possibly the same export would apply to multiple configurations, like public and internal are the same
-                # add the not for navigation versions that were already added
-                databases = [tile_info.bruty_db_name(REVIEWED, False), tile_info.bruty_db_name(ENC, False), tile_info.bruty_db_name(GMRT, False)]
-                # add the prereview (unqualified data)
-                databases.extend([tile_info.bruty_db_name(PREREVIEW, True), tile_info.bruty_db_name(PREREVIEW, False)])
+            # @TODO acquire a shared lock for all the databases that may be used, if they are locked for exclusive then either block or return a code
+            locks = []
+            for datatype in all_datatypes:
+                for nav in (True, False):
+                    name = tile_info.bruty_db_name(datatype, nav)
+                    lck = AdvisoryLock(name,  conn_info, flags=SHARED|NON_BLOCKING)
+                    try:
+                        locks.append(lck.acquire())
+                    except BaseLockException:
+                        locks.append(False)
+            if all(locks):
+                databases = [tile_info.bruty_db_name(REVIEWED, True), tile_info.bruty_db_name(ENC, True), tile_info.bruty_db_name(GMRT, True)]
                 databases = [root_dir.joinpath(db_name) for db_name in databases]
-                prereview_cnt = add_databases(databases, dataset, dataset_score, comp)
+                base_cnt = add_databases(databases, dataset, dataset_score, comp)
 
-                if tile_info.public:
-                    os.makedirs(public_export.extracted_filename.parent, exist_ok=True)
-                    if prereview_cnt == 0 and nav_export.cog_filename.exists():
-                        shutil.copyfile(nav_export.cog_filename, public_export.cog_filename)
-                        shutil.copyfile(nav_export.rat_filename, public_export.rat_filename)
-                        update_export_record(navigation_id, public=True)
-                        public_id = navigation_id
-                    else:
-                        copy_dataset(dataset, public_export.extracted_filename)
-                        complete_export(public_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
-                        public_id = write_export_record(public_export, public=True)
+                if tile_info.navigation:
+                    os.makedirs(nav_export.extracted_filename.parent, exist_ok=True)
+                    nav_dataset = copy_dataset(dataset, nav_export.extracted_filename)
+                    nav_score = copy_dataset(dataset_score, nav_export.score_filename)
+                    # databases = [tile_info.bruty_db_name(SENSITIVE, True)]
+                    # databases = [root_dir.joinpath(db_name) for db_name in databases]
+                    # nav_sensitive_cnt = add_databases(databases, nav_dataset, nav_score, comp)
+                    del nav_score, nav_dataset  # closes the files so they can be copied
+                    complete_export(nav_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
+                    navigation_id = write_export_record(nav_export, navigation=True)
 
-                if tile_info.internal:
-                    os.makedirs(internal_export.extracted_filename.parent, exist_ok=True)
-                    # internal is the same as public with SENSITIVE added.
-                    databases = [tile_info.bruty_db_name(SENSITIVE, True), tile_info.bruty_db_name(SENSITIVE, False)]
+                if tile_info.public or tile_info.internal:
+                    # @todo the counts returned by add_databases should allow to tell if any changes were added
+                    #   or possibly the same export would apply to multiple configurations, like public and internal are the same
+                    # add the not for navigation versions that were already added
+                    databases = [tile_info.bruty_db_name(REVIEWED, False), tile_info.bruty_db_name(ENC, False), tile_info.bruty_db_name(GMRT, False)]
+                    # add the prereview (unqualified data)
+                    databases.extend([tile_info.bruty_db_name(PREREVIEW, True), tile_info.bruty_db_name(PREREVIEW, False)])
                     databases = [root_dir.joinpath(db_name) for db_name in databases]
-                    sensitive_cnt = add_databases(databases, dataset, dataset_score, comp)
-                    if sensitive_cnt == 0 and prereview_cnt == 0 and nav_export.cog_filename.exists():
-                        shutil.copyfile(nav_export.cog_filename, internal_export.cog_filename)
-                        shutil.copyfile(nav_export.rat_filename, internal_export.rat_filename)
-                        update_export_record(navigation_id, internal=True)
-                        internal_id = navigation_id
-                    elif sensitive_cnt == 0 and public_export.cog_filename.exists():
-                        shutil.copyfile(public_export.cog_filename, internal_export.cog_filename)
-                        shutil.copyfile(public_export.rat_filename, internal_export.rat_filename)
-                        update_export_record(public_id, internal=True)
-                        internal_id = public_id
-                    else:
-                        copy_dataset(dataset, internal_export.extracted_filename)
-                        complete_export(internal_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
-                        internal_id = write_export_record(internal_export, internal=True)
+                    prereview_cnt = add_databases(databases, dataset, dataset_score, comp)
 
-            for exp, wanted in ((nav_export, tile_info.navigation), (internal_export, tile_info.internal), (public_export, tile_info.public)):
-                if wanted:
-                    exp.cleanup_tempfiles(allow_permission_fail=True)
+                    if tile_info.public:
+                        os.makedirs(public_export.extracted_filename.parent, exist_ok=True)
+                        if prereview_cnt == 0 and nav_export.cog_filename.exists():
+                            shutil.copyfile(nav_export.cog_filename, public_export.cog_filename)
+                            shutil.copyfile(nav_export.rat_filename, public_export.rat_filename)
+                            update_export_record(conn_info, navigation_id, public=True)
+                            public_id = navigation_id
+                        else:
+                            copy_dataset(dataset, public_export.extracted_filename)
+                            complete_export(public_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
+                            public_id = write_export_record(public_export, public=True)
+
+                    if tile_info.internal:
+                        os.makedirs(internal_export.extracted_filename.parent, exist_ok=True)
+                        # internal is the same as public with SENSITIVE added.
+                        databases = [tile_info.bruty_db_name(SENSITIVE, True), tile_info.bruty_db_name(SENSITIVE, False)]
+                        databases = [root_dir.joinpath(db_name) for db_name in databases]
+                        sensitive_cnt = add_databases(databases, dataset, dataset_score, comp)
+                        if sensitive_cnt == 0 and prereview_cnt == 0 and nav_export.cog_filename.exists():
+                            shutil.copyfile(nav_export.cog_filename, internal_export.cog_filename)
+                            shutil.copyfile(nav_export.rat_filename, internal_export.rat_filename)
+                            update_export_record(conn_info, navigation_id, internal=True)
+                            internal_id = navigation_id
+                        elif sensitive_cnt == 0 and public_export.cog_filename.exists():
+                            shutil.copyfile(public_export.cog_filename, internal_export.cog_filename)
+                            shutil.copyfile(public_export.rat_filename, internal_export.rat_filename)
+                            update_export_record(conn_info, public_id, internal=True)
+                            internal_id = public_id
+                        else:
+                            copy_dataset(dataset, internal_export.extracted_filename)
+                            complete_export(internal_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
+                            internal_id = write_export_record(internal_export, internal=True)
+
+                for exp, wanted in ((nav_export, tile_info.navigation), (internal_export, tile_info.internal), (public_export, tile_info.public)):
+                    if wanted:
+                        exp.cleanup_tempfiles(allow_permission_fail=True)
+            else:
+                ret_code = TILE_LOCKED
         del dataset, dataset_score  # release the file handle for the score file
         remove_file(cache_file, allow_permission_fail=True, limit=4, tdelay=15)
         remove_file(cache_file.replace(".tif", ".score.tif"), allow_permission_fail=True, limit=4, tdelay=15)
@@ -1161,16 +1180,14 @@ def complete_export_sequential(export, all_simple_records, closing_dist, epsg, d
     export.cleanup_tempfiles(allow_permission_fail=True)
 
 
-def update_export_record(row_id, **to_update):
+def update_export_record(conn_info, row_id, **to_update):
     if interactive_debug:
         LOGGER.warning("Interactive debug doesn't update export records in XBOX table")
         return
-    # FIXME - this is hardcoded, need to pass from caller
-    from nbs.configs import iter_configs
-    config_filename, config_file = [x for x in iter_configs([r'D:\git_repos\bruty\nbs\scripts\base_configs\temp_xbox.config'])][0]
-    conn_info = connect_params_from_config(config_file['DEFAULT'])
+    cache = conn_info.database  # don't modify the incoming conn_info but temporarily set the database to tile_specifications
     conn_info.database = "tile_specifications"
     connection, cursor = connection_with_retries(conn_info)
+    conn_info.database = cache
     # @TODO this would insert a dictionary but the UPDATE command doesn't work the same.
     # columns = to_update.keys()
     # values = [to_update[column] for column in columns]
@@ -1219,10 +1236,10 @@ def make_parser():
     parser.add_argument("-?", "--show_help", action="store_true",
                         help="show this help message and exit")
 
-    parser.add_argument("-b", "--bruty_dir", type=str, metavar='bruty_dir', default="",
+    parser.add_argument("-b", "--config", type=str, metavar='bruty_dir', default="",
                         help="path to root folder of bruty data")
-    parser.add_argument("-e", "--export_dir", type=str, metavar='export_dir', default="",
-                        help="path to root folder of exports")
+    # parser.add_argument("-e", "--export_dir", type=str, metavar='export_dir', default="",
+    #                     help="path to root folder of exports")
     parser.add_argument("-c", "--cache", type=str, metavar='cache', default='',  # nargs="+"
                         help="path to pickle file holding all_simple_records and sort_dict")
     parser.add_argument("-i", "--tile_info", type=str, metavar='tile_info', default='',  # nargs="+"
@@ -1245,7 +1262,7 @@ if __name__ == "__main__":
     """
     parser = make_parser()
     args = parser.parse_args()
-    if args.show_help or not args.bruty_dir or not args.cache:
+    if args.show_help or not args.config or not args.cache:
         parser.print_help()
         ret = 1
     if False:
@@ -1265,7 +1282,9 @@ if __name__ == "__main__":
         complete_export_tiled(export, all_simple_records, closing_dist, epsg, decimals, debug_plots=True)
         raise Exception("testing")
 
-    if args.bruty_dir and args.cache:
+    if args.config and args.cache:
+        config_filename, config_file = [x for x in iter_configs([args.config])][0]
+        config = config_file['EXPORT']
         # use_locks(args.lock_server)
         tile_info = pickle.load(open(args.tile_info, 'rb'))
         cache = open(args.cache, 'rb')
@@ -1277,24 +1296,24 @@ if __name__ == "__main__":
         comp = partial(nbs_survey_sort, sort_dict)
         try:
             LOGGER.debug(f"Processing {tile_info.full_name}")
-            ret = combine_and_export(args.export_dir, args.bruty_dir, tile_info, all_simple_records, comp, args.export_time, args.decimals)
+            ret = combine_and_export(config, tile_info, all_simple_records, comp, args.export_time, args.decimals)
         except Exception as e:
             traceback.print_exc()
             msg = f"{tile_info.full_name} had an unhandled exception - see message above"
             print(msg)
             LOGGER.error(traceback.format_exc())
             LOGGER.error(msg)
-            ret = 99
+            ret = UNHANDLED_EXCEPTION
         if args.fingerprint:
             try:
-                db = create_world_db(args.bruty_dir, tile_info, REVIEWED, True)
+                db = create_world_db(config['data_dir'], tile_info, REVIEWED, True)
                 d = db.completion_codes.data_class()
                 d.ttime = datetime.datetime.now()
                 d.code = ret
                 d.fingerprint = args.fingerprint
                 db.completion_codes[args.fingerprint] = d
             except:
-                pass
+                traceback.print_exc()
 
     sys.exit(ret)
 
