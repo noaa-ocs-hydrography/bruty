@@ -1262,6 +1262,7 @@ if __name__ == "__main__":
     """
     parser = make_parser()
     args = parser.parse_args()
+    proc_start = time.time()
     if args.show_help or not args.config or not args.cache:
         parser.print_help()
         ret = 1
@@ -1315,7 +1316,7 @@ if __name__ == "__main__":
                 db.completion_codes[args.fingerprint] = d
             except:
                 traceback.print_exc()
-
+    LOGGER.info(f"Exiting with code {ret} after {int(time.time()-proc_start)} seconds")
     sys.exit(ret)
 
 

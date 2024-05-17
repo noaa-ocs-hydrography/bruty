@@ -900,6 +900,28 @@ class WorldDatabase(VABC):
         self.completion_codes = CompletionCodes(pth)
         self.to_file()
 
+    def _rmtree_on_error_handler(self, func, pth, info):
+        if "logs_" in str(pth):
+            pass
+        else:
+            raise PermissionError("failed to remove " + str(pth))
+
+    def clear_all(self):
+        """ Delete all files and truncate the tables.  Use with caution! """
+        print("deleting", self.db.data_path)
+        # remove the log subdirectories and geotiff directories in the data_path
+        # keep the files at the root, like wdb_metadata.sqlite, wdb_metadata.class, backend_metadata.json
+        for subdir in self.db.data_path.iterdir():
+            if subdir.is_dir():
+                if "logs_" not in str(subdir):
+                    shutil.rmtree(subdir)  # , onerror=self._rmtree_on_error_handler
+        for table in [self.included_surveys, self.included_ids, self.started_surveys, 
+                      self.started_ids, self.transaction_groups, self.removed_ids,
+                      self.reinserts, self.completion_codes]:
+            table.cur.execute(f'Delete from {table.tablename}')
+            table.conn.commit()
+        
+        
     @property
     def res_x(self):
         return self.db.tile_scheme.res_x

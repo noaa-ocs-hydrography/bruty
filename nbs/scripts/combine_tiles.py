@@ -48,7 +48,7 @@ print("\nremove the hack setting the bruty and nbs directories into the python p
 
 def launch(world_db, conn_info, for_navigation_flag=(True, True), override_epsg=NO_OVERRIDE, extra_debug=False, new_console=True,
            lock=None, exclude=None, crop=False, log_path=None, env_path=r'', env_name='', minimized=False,
-           fingerprint=""):
+           fingerprint="", delete_existing=False):
     """ for_navigation_flag = (use_nav_flag, nav_flag_value)
 
     fingerprint is being used to find the processes that are running.
@@ -94,6 +94,8 @@ def launch(world_db, conn_info, for_navigation_flag=(True, True), override_epsg=
             combine_args.extend(["-e", str(override_epsg)])
         if extra_debug:
             combine_args.append("--debug")
+        if delete_existing:
+            combine_args.append("--delete")
         if lock:
             combine_args.extend(["-l", lock])
         if log_path:
@@ -145,13 +147,13 @@ def remove_finished_processes(tile_processes, remaining_tiles, max_tries):
                 else:
                     reason = "failed and will retry"
                     retry = True
-            except sqlite3.OperationalError as e:
+            except (sqlite3.OperationalError, OSError) as e:
                 # this is happening when the network drive loses connection, not sure if it is recoverable.
                 # treat it like an unhandled exception in the subprocess - retry and increment the count
                 # also wait a moment to let the network recover in case that helps
                 msg = traceback.format_exc()
                 LOGGER.warning(f"Exception accessing bruty db for {remaining_tiles[key][0]} {key.dtype} res={key.res}:\n{msg}")
-                reason = "failed with a sqlite Operational error"
+                reason = "failed with a sqlite Operational error or OSError"
                 retry = True
                 time.sleep(5)
             LOGGER.info(f"Combine {reason} for {remaining_tiles[key][0]} {key.dtype} res={key.res}")
@@ -180,6 +182,7 @@ def main(config):
     quitter = False
     debug_config = config.getboolean('DEBUG', False)
     minimized = config.getboolean('MINIMIZED', False)
+    delete_existing = config.getboolean('delete_existing', False)
     env_path = config.get('environment_path')
     env_name = config.get('environment_name')
     port = config.get('lock_server_port', None)
@@ -245,7 +248,7 @@ def main(config):
                 # full_db = create_world_db(config['data_dir'], tile_info, dtype, current_tile.nav_flag_value)
                 try:
                     db = create_world_db(config['data_dir'], tile_info, current_tile.dtype, current_tile.nav_flag)
-                except sqlite3.OperationalError as e:
+                except (sqlite3.OperationalError, OSError) as e:
                     # this happened as a network issue - we will skip it for now and come back and give the network some time to recover
                     # but we will count it as a retry in case there is a corrupted file or something
                     msg = traceback.format_exc()
@@ -269,7 +272,8 @@ def main(config):
                         if debug_launch:
                             use_locks(port)
                             ret = process_nbs_database(db, conn_info, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
-                                                       extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(current_tile.dtype==ENC))
+                                                       extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(current_tile.dtype==ENC),
+                                                       delete_existing=delete_existing)
                             del remaining_tiles[current_tile]
                         else:
                             remove_finished_processes(tile_processes, remaining_tiles, max_tries)
@@ -281,7 +285,7 @@ def main(config):
                             pid = launch(db, conn_info, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
                                          override_epsg=override, extra_debug=debug_config, lock=port, exclude=exclude, crop=(current_tile.dtype==ENC),
                                          log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
-                                         fingerprint=fingerprint)
+                                         fingerprint=fingerprint, delete_existing=delete_existing)
                             running_process = ConsoleProcessTracker(["python", fingerprint, "combine.py"])
                             if running_process.console.last_pid != pid:
                                 LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")

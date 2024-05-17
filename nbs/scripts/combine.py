@@ -141,47 +141,49 @@ def get_postgres_processing_info(world_db_path, conn_info, for_navigation_flag=(
     return sorted_recs, names_list, sort_dict, comp, transform_metadata
 
 
-def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=5):
+def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=5, delete_existing=False):
     try:
         db = WorldDatabase.open(world_db_path)
     except FileNotFoundError:
         print(world_db_path, "not found")
     else:
+        if delete_existing:
+            db.clear_all()
+        else:
+            invalid_surveys, unfinished_surveys, out_of_sync_surveys, metadata_mismatch, new_surveys = find_surveys_to_update(db, sort_dict, names_list)
+            if unfinished_surveys:
+                LOGGER.info(f"Unfinished surveys detected\n{unfinished_surveys}")
+            if out_of_sync_surveys:
+                LOGGER.info(f"Out of sync surveys detected\n{out_of_sync_surveys}")
+            if invalid_surveys:
+                msg = f"There are surveys without valid scores in the bruty database\n{invalid_surveys}"
+                LOGGER.info(msg)
+            if metadata_mismatch:
+                msg = f"There are surveys whose sorting metadata has changed\n{metadata_mismatch}"
+                LOGGER.info(msg)
 
-        invalid_surveys, unfinished_surveys, out_of_sync_surveys, metadata_mismatch, new_surveys = find_surveys_to_update(db, sort_dict, names_list)
-        if unfinished_surveys:
-            LOGGER.info(f"Unfinished surveys detected\n{unfinished_surveys}")
-        if out_of_sync_surveys:
-            LOGGER.info(f"Out of sync surveys detected\n{out_of_sync_surveys}")
-        if invalid_surveys:
-            msg = f"There are surveys without valid scores in the bruty database\n{invalid_surveys}"
-            LOGGER.info(msg)
-        if metadata_mismatch:
-            msg = f"There are surveys whose sorting metadata has changed\n{metadata_mismatch}"
-            LOGGER.info(msg)
-
-        # surveys are only removed so this trans_id will not show up on any records in the metadata
-        # also this record will serve as a check point for validation so make this record even if there is no action to take.
-        data = db.transaction_groups.data_class()
-        data.ttype = "CLEAN"
-        data.ttime = datetime.now()
-        data.process_id = os.getpid()
-        data.modified_data = 0
-        data.finished = 0
-        data.user_quit = 0
-        trans_id = db.transaction_groups.add_oid_record(data)  # ("CLEAN", datetime.now(), os.getpid(), 0, 0))
-        removals = set()
-        removals.update(invalid_surveys)
-        removals.update(unfinished_surveys)
-        removals.update(out_of_sync_surveys)
-        removals.update(metadata_mismatch)
-        if removals or len(db.reinserts.unfinished_records()) > 0:
-            db.transaction_groups.set_modified(trans_id)
-            db.clean(removals, compare_callback=comp, transaction_id=trans_id, subprocesses=subprocesses)
-        db.transaction_groups.set_finished(trans_id)
+            # surveys are only removed so this trans_id will not show up on any records in the metadata
+            # also this record will serve as a check point for validation so make this record even if there is no action to take.
+            data = db.transaction_groups.data_class()
+            data.ttype = "CLEAN"
+            data.ttime = datetime.now()
+            data.process_id = os.getpid()
+            data.modified_data = 0
+            data.finished = 0
+            data.user_quit = 0
+            trans_id = db.transaction_groups.add_oid_record(data)  # ("CLEAN", datetime.now(), os.getpid(), 0, 0))
+            removals = set()
+            removals.update(invalid_surveys)
+            removals.update(unfinished_surveys)
+            removals.update(out_of_sync_surveys)
+            removals.update(metadata_mismatch)
+            if removals or len(db.reinserts.unfinished_records()) > 0:
+                db.transaction_groups.set_modified(trans_id)
+                db.clean(removals, compare_callback=comp, transaction_id=trans_id, subprocesses=subprocesses)
+            db.transaction_groups.set_finished(trans_id)
 
 
-def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), extra_debug=False, override_epsg=NO_OVERRIDE, exclude=None, crop=False):
+def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), extra_debug=False, override_epsg=NO_OVERRIDE, exclude=None, crop=False, delete_existing=False):
     """ Reads the NBS postgres metadata table to find all surveys in a region and insert them into a Bruty combined database.
 
     Parameters
@@ -215,7 +217,7 @@ def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), 
             ret = TILE_LOCKED
     if ret == SUCCEEDED:
         sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, for_navigation_flag, exclude=exclude)
-        clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=1)
+        clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=1, delete_existing=delete_existing)
         if not names_list:  # still call process_nbs_records to have it write the transaction group records
             LOGGER.warning(f"No matching records found in tables {conn_info.tablenames}")
             LOGGER.warning(f"  for_navigation_flag used:{for_navigation_flag[0]}")
@@ -416,6 +418,8 @@ def make_parser():
                         help="location to store Bruty data")
     parser.add_argument('--debug', action='store_true', dest='debug',
                         default=False, help="turn on debugging code")
+    parser.add_argument('--delete', action='store_true', dest='delete_existing',
+                        default=False, help="DELETE THE EXISTING DATA AND START FROM SCRATCH")
     parser.add_argument("-e", "--override_epsg", type=int, metavar='override_epsg', default=NO_OVERRIDE,
                         help="override incoming data epsg with this value")
     parser.add_argument("-l", "--lock_server", type=int, metavar='lock_server', default=None,
@@ -441,7 +445,7 @@ if __name__ == "__main__":
     if args.show_help or not args.bruty_path or not args.tables:
         parser.print_help()
         ret = NOT_ENOUGH_ARGS
-
+    proc_start = time.time()
     if args.bruty_path:
         conn_info = ConnectionInfo(args.database, args.user, args.password, args.host, args.port, args.tables)
         use_locks(args.lock_server)
@@ -452,7 +456,8 @@ if __name__ == "__main__":
         try:
             print(f"Processing {args.bruty_path} for_navigation_flag={(not args.ignore_for_nav, not args.not_for_nav)}")
             ret = process_nbs_database(args.bruty_path, conn_info, for_navigation_flag=(not args.ignore_for_nav, not args.not_for_nav),
-                                       extra_debug=args.debug, override_epsg=args.override_epsg, exclude=args.exclude, crop=args.crop)
+                                       extra_debug=args.debug, override_epsg=args.override_epsg, exclude=args.exclude, crop=args.crop,
+                                       delete_existing=args.delete_existing)
         except Exception as e:
             traceback.print_exc()
             msg = f"{args.bruty_path} for_navigation_flag={(not args.ignore_for_nav, not args.not_for_nav)} had an unhandled exception - see message above"
@@ -476,5 +481,5 @@ if __name__ == "__main__":
                 db.completion_codes[args.fingerprint] = d
             except:
                 pass
-    print(f"Exiting with code {ret}")
+    LOGGER.info(f"Exiting {args.bruty_path} with code {ret} after {int(time.time()-proc_start)} seconds")
     sys.exit(ret)
