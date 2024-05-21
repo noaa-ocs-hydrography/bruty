@@ -1155,28 +1155,30 @@ class WorldDatabase(VABC):
         -------
 
         """
+
         self.db.LOGGER.debug(f"attempt to insert {path_to_survey_data}")
         done = False
         extension = pathlib.Path(str(path_to_survey_data).lower()).suffix
+        data_modified = False  # track if the underlying tiffs were changed
         if extension == '.bag':
             try:
                 vr = bag.VRBag(path_to_survey_data, mode='r')
             except (bag.BAGError, ValueError):  # value error for single res of version < 1.6.  Maybe should change to BAGError in bag.py
                 pass  # allow gdal to read single res
             else:
-                self.insert_survey_vr(vr, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback, reverse_z=reverse_z,
+                data_modified = self.insert_survey_vr(vr, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback, reverse_z=reverse_z,
                                       limit_to_tiles=limit_to_tiles, force=force, survey_score=survey_score, flag=flag,
                                       transaction_id=transaction_id, sorting_metadata=sorting_metadata)
                 done = True
         if not done:
             if extension in ['.bag', '.tif', '.tiff']:
-                self.insert_raster_survey(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback,
+                data_modified = self.insert_raster_survey(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback,
                                         reverse_z=reverse_z, limit_to_tiles=limit_to_tiles, force=force, survey_score=survey_score, flag=flag,
                                         transaction_id=transaction_id, sorting_metadata=sorting_metadata)
                 done = True
         if not done:
             if extension in ['.txt', '.npy', '.csv', '.npz', '.gpkg']:
-                self.insert_points_survey(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback,
+                data_modified = self.insert_points_survey(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback,
                                        reverse_z=reverse_z, limit_to_tiles=limit_to_tiles, force=force, survey_score=survey_score, flag=flag,
                                        dformat=dformat, transaction_id=transaction_id, sorting_metadata=sorting_metadata, crop=crop)
                 done = True
@@ -1188,7 +1190,7 @@ class WorldDatabase(VABC):
                 # compare_callback=compare_callback, reverse_z=reverse_z)
                 done = True
                 raise ValueError("Filename ends in csar which needs to be eported to a different format first")
-
+        return data_modified
     def _get_transformer(self, srs, override_epsg, path_to_survey_data, inv=False):
         try:
             epsg = get_epsg_or_wkt(srs)
@@ -1362,7 +1364,9 @@ class WorldDatabase(VABC):
             if skip_as_disjoint:
                 self.insert_survey_as_outside_area_of_interest(path_to_survey_data, survey_score, flag, dformat, override_epsg,
                                                                contrib_id, reverse_z, transaction_id, sorting_metadata)
+                data_modified = False
             else:
+                data_modified = True
                 if limit_to_tiles is None and self.area_of_interest:
                     limit_to_tiles = self.tiles_of_interest
                 # npy and csv don't have coordinate system, so set up a default.  npz will set this later if needed
@@ -1460,6 +1464,7 @@ class WorldDatabase(VABC):
                             del storage_db
         else:
             raise Exception(f"Survey Exists already in database {contrib_id}")
+        return data_modified
 
     insert_txt_survey = insert_points_survey  # @TODO remove this alias for old function name for backwards compatibility
 
@@ -1898,7 +1903,9 @@ class WorldDatabase(VABC):
         if skip_as_disjoint:
             self.insert_survey_as_outside_area_of_interest(vr.filename, survey_score, flag, 'vr', override_epsg,
                                                            contrib_id, reverse_z, transaction_id, sorting_metadata)
+            data_modified = False
         else:
+            data_modified = True
             # @todo adjust tile_list for area_of_interest
             tile_list = self.db.get_tiles_indices(x1, y1, x2, y2)
             with AreaLock(tile_list, EXCLUSIVE | NON_BLOCKING, self.db.get_history_path_by_index) as lock:
@@ -1996,6 +2003,7 @@ class WorldDatabase(VABC):
                                                    transaction_id=transaction_id, sorting_metadata=sorting_metadata)
                 else:
                     raise Exception(f"Survey Exists already in database {contrib_id}")
+        return data_modified
 
     def insert_raster_survey(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, data_band=1, uncert_band=2,
                            contrib_id=numpy.nan, compare_callback=None, reverse_z=False, limit_to_tiles=None, force=False,
@@ -2047,7 +2055,9 @@ class WorldDatabase(VABC):
         if skip_as_disjoint:
             self.insert_survey_as_outside_area_of_interest(path_to_survey_data, survey_score, flag, 'gdal', override_epsg,
                                                            contrib_id, reverse_z, transaction_id, sorting_metadata)
+            data_modified = False
         else:
+            data_modified = True
             tile_list = self.db.get_tiles_indices(x1, y1, x2, y2)
             with AreaLock(tile_list, EXCLUSIVE | NON_BLOCKING, self.db.get_history_path_by_index) as lock:
                 if needs_processing:
@@ -2153,6 +2163,7 @@ class WorldDatabase(VABC):
                                                    dformat="gdal", transaction_id=transaction_id, sorting_metadata=sorting_metadata)
                 else:
                     raise Exception(f"Survey Exists already in database {contrib_id}")
+        return data_modified
 
     insert_survey_gdal = insert_raster_survey  # @TODO remove this alias for old function for backward compatibility
 
@@ -2508,7 +2519,7 @@ class WorldDatabase(VABC):
         # removals.update(invalid_score_surveys)
         # removals.update(unfinished_surveys)
         # removals.update(out_of_sync)
-        self.remove_and_recompute(removals, compare_callback=compare_callback, transaction_id=transaction_id, subprocesses=subprocesses)
+        return self.remove_and_recompute(removals, compare_callback=compare_callback, transaction_id=transaction_id, subprocesses=subprocesses)
 
     def remove_survey(self, contributor, transaction_id=-1):
         """ Will remove a survey from all the tiles it had been appled to.
@@ -2628,7 +2639,7 @@ class WorldDatabase(VABC):
                 # self.to_file(locked_file=metadata_file)
 
         self.db.LOGGER.debug(f"removing contributor {contributor} will affect {len(contributor_tiles)} contributors: {contributor_tiles}")
-        return contributor_tiles
+        return not tile_list, contributor_tiles
 
     def reinsert_from_sqlite(self, comp_callback=None):
         """ Use the metadata to try and reinsert contributors from disk.
@@ -2744,10 +2755,13 @@ class WorldDatabase(VABC):
         self.db.LOGGER.info(f"removing and recomputing for contributors: {contributors}")
         affected_contributors = {}
         unfinished_removals = []
+        modified_data = False
         for contributor in contributors:
             try:
-                contributors_tiles = self.remove_survey(contributor, transaction_id=transaction_id)
-                for contrib, tiles in contributors_tiles.items():
+                affected_tiles, contributors_and_tiles = self.remove_survey(contributor, transaction_id=transaction_id)
+                if affected_tiles:
+                    modified_data = True
+                for contrib, tiles in contributors_and_tiles.items():
                     affected_contributors.setdefault(contrib, set())
                     affected_contributors[contrib].update(tiles)
             except LockNotAcquired:
@@ -2759,7 +2773,7 @@ class WorldDatabase(VABC):
 
         # @todo - figure out if this is right.  If a removal was locked then we are reinserting everything else then raising an error.
         #    This seems best as otherwise we could remove data but not replace it so we'd have partially inserted data and not know it.
-        # 1) Make a sqlite database of the contibutors and tiles to work on
+        # 1) Make a sqlite database of the contributors and tiles to work on
         self.add_reinserts(affected_contributors)
         if len(self.reinserts.unfinished_records()) > 0:
             if NO_LOCK or subprocesses == 1:
@@ -2793,6 +2807,7 @@ class WorldDatabase(VABC):
         if unfinished_removals:
             raise RuntimeError(
                 f"some removal were locked, make sure all bruty combines are closed and lock server is restarted {unfinished_removals}")
+        return modified_data
 
     def revise_survey(self, survey_id, path_to_survey_file):
         # we are not going to trust that the data was only edited for height/depth but that the scoring may have been adjusted too

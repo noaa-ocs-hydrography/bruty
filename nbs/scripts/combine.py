@@ -178,8 +178,9 @@ def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=
             removals.update(out_of_sync_surveys)
             removals.update(metadata_mismatch)
             if removals or len(db.reinserts.unfinished_records()) > 0:
-                db.transaction_groups.set_modified(trans_id)
-                db.clean(removals, compare_callback=comp, transaction_id=trans_id, subprocesses=subprocesses)
+                did_modify = db.clean(removals, compare_callback=comp, transaction_id=trans_id, subprocesses=subprocesses)
+                if did_modify:
+                    db.transaction_groups.set_modified(trans_id)
             db.transaction_groups.set_finished(trans_id)
 
 
@@ -336,26 +337,26 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
 
                 if not sid_in_db:
                     try:
-                        if not has_modified:
-                            db.transaction_groups.set_modified(trans_id)
-                            has_modified = True
                         lock = FileLock(path)  # this doesn't work with the file lock - just the multiprocessing locks
                         if lock.acquire():
                             try:
                                 if path.endswith(".csv"):
                                     if os.path.exists(path):
                                         # points are in opposite convention as BAGs and exported CSAR tiffs, so reverse the z component
-                                        db.insert_txt_survey(path, dformat=[('x', 'f8'), ('y', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')],
+                                        did_modify = db.insert_txt_survey(path, dformat=[('x', 'f8'), ('y', 'f8'), ('depth', 'f4'), ('uncertainty', 'f4')],
                                                              override_epsg=override_epsg, contrib_id=sid, compare_callback=comp, reverse_z=True,
                                                              transaction_id=trans_id, sorting_metadata=sort_info)
 
                                 elif path.endswith(".npy") or path.endswith(".npz"):
-                                    db.insert_txt_survey(path, dformat=[('x', 'f8'), ('y', 'f8'), ('depth', 'f8'), ('uncertainty', 'f8')],
+                                    did_modify = db.insert_txt_survey(path, dformat=[('x', 'f8'), ('y', 'f8'), ('depth', 'f8'), ('uncertainty', 'f8')],
                                                          override_epsg=override_epsg, contrib_id=sid, compare_callback=comp,
                                                          transaction_id=trans_id, sorting_metadata=sort_info, crop=crop)
                                 else:
-                                    db.insert_survey(path, override_epsg=override_epsg, contrib_id=sid, compare_callback=comp,
+                                    did_modify = db.insert_survey(path, override_epsg=override_epsg, contrib_id=sid, compare_callback=comp,
                                                      transaction_id=trans_id, sorting_metadata=sort_info)
+                                if not has_modified and did_modify:
+                                    db.transaction_groups.set_modified(trans_id)
+                                    has_modified = True
                             except BrutyError as e:
                                 failed_to_insert.append((str(e), survey))
                             except IndexError as e:
