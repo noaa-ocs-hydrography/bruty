@@ -1,0 +1,4 @@
+ELEVATION_BAND_NAME = 'Elevation'
+UNCERTAINTY_BAND_NAME = 'Uncertainty'
+CONTRIBUTOR_BAND_NAME = 'Contributor'
+

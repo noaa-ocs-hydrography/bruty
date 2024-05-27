@@ -246,6 +246,10 @@ class SqliteSurveyMetadata(MutableMapping):
             proc_records = [self.to_python(record) for record in raw_records]
         return proc_records
 
+    def __contains__(self, key):
+        recs = self.cur.execute(f"select * from {self.tablename} where {self.primary_key} = (?)", [key]).fetchall()
+        return len(recs) > 0
+
     def __getitem__(self, key):
         recs = self.cur.execute(f"select * from {self.tablename} where {self.primary_key} = (?)", [key]).fetchall()
         if len(recs) > 1:
