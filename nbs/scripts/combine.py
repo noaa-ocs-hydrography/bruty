@@ -147,41 +147,40 @@ def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=
     except FileNotFoundError:
         print(world_db_path, "not found")
     else:
-        if delete_existing:
-            db.clear_all()
-        else:
-            invalid_surveys, unfinished_surveys, out_of_sync_surveys, metadata_mismatch, new_surveys = find_surveys_to_update(db, sort_dict, names_list)
-            if unfinished_surveys:
-                LOGGER.info(f"Unfinished surveys detected\n{unfinished_surveys}")
-            if out_of_sync_surveys:
-                LOGGER.info(f"Out of sync surveys detected\n{out_of_sync_surveys}")
-            if invalid_surveys:
-                msg = f"There are surveys without valid scores in the bruty database\n{invalid_surveys}"
-                LOGGER.info(msg)
-            if metadata_mismatch:
-                msg = f"There are surveys whose sorting metadata has changed\n{metadata_mismatch}"
-                LOGGER.info(msg)
+        invalid_surveys, unfinished_surveys, out_of_sync_surveys, metadata_mismatch, new_surveys = find_surveys_to_update(db, sort_dict, names_list)
+        if unfinished_surveys:
+            LOGGER.info(f"Unfinished surveys detected\n{unfinished_surveys}")
+        if out_of_sync_surveys:
+            LOGGER.info(f"Out of sync surveys detected\n{out_of_sync_surveys}")
+        if invalid_surveys:
+            msg = f"There are surveys without valid scores in the bruty database\n{invalid_surveys}"
+            LOGGER.info(msg)
+        if metadata_mismatch:
+            msg = f"There are surveys whose sorting metadata has changed\n{metadata_mismatch}"
+            LOGGER.info(msg)
 
-            # surveys are only removed so this trans_id will not show up on any records in the metadata
-            # also this record will serve as a check point for validation so make this record even if there is no action to take.
-            data = db.transaction_groups.data_class()
-            data.ttype = "CLEAN"
-            data.ttime = datetime.now()
-            data.process_id = os.getpid()
-            data.modified_data = 0
-            data.finished = 0
-            data.user_quit = 0
-            trans_id = db.transaction_groups.add_oid_record(data)  # ("CLEAN", datetime.now(), os.getpid(), 0, 0))
-            removals = set()
-            removals.update(invalid_surveys)
-            removals.update(unfinished_surveys)
-            removals.update(out_of_sync_surveys)
-            removals.update(metadata_mismatch)
-            if removals or len(db.reinserts.unfinished_records()) > 0:
-                did_modify = db.clean(removals, compare_callback=comp, transaction_id=trans_id, subprocesses=subprocesses)
-                if did_modify:
-                    db.transaction_groups.set_modified(trans_id)
-            db.transaction_groups.set_finished(trans_id)
+        # surveys are only removed so this trans_id will not show up on any records in the metadata
+        # also this record will serve as a check point for validation so make this record even if there is no action to take.
+        data = db.transaction_groups.data_class()
+        data.ttype = "CLEAN"
+        data.ttime = datetime.now()
+        data.process_id = os.getpid()
+        data.modified_data = 0
+        data.finished = 0
+        data.user_quit = 0
+        trans_id = db.transaction_groups.add_oid_record(data)  # ("CLEAN", datetime.now(), os.getpid(), 0, 0))
+        removals = set()
+        removals.update(invalid_surveys)
+        removals.update(unfinished_surveys)
+        removals.update(out_of_sync_surveys)
+        removals.update(metadata_mismatch)
+        if removals or len(db.reinserts.unfinished_records()) > 0:
+            if delete_existing:
+                db.clear_all()
+            else:
+                db.transaction_groups.set_modified(trans_id)
+                db.clean(removals, compare_callback=comp, transaction_id=trans_id, subprocesses=subprocesses)
+        db.transaction_groups.set_finished(trans_id)
 
 
 def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), extra_debug=False, override_epsg=NO_OVERRIDE, exclude=None, crop=False, delete_existing=False):
@@ -420,7 +419,7 @@ def make_parser():
     parser.add_argument('--debug', action='store_true', dest='debug',
                         default=False, help="turn on debugging code")
     parser.add_argument('--delete', action='store_true', dest='delete_existing',
-                        default=False, help="DELETE THE EXISTING DATA AND START FROM SCRATCH")
+                        default=False, help="DELETE THE EXISTING DATA AND START FROM SCRATCH IF ANY CLEANUP WAS NEEDED")
     parser.add_argument("-e", "--override_epsg", type=int, metavar='override_epsg', default=NO_OVERRIDE,
                         help="override incoming data epsg with this value")
     parser.add_argument("-l", "--lock_server", type=int, metavar='lock_server', default=None,

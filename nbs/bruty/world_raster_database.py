@@ -176,7 +176,29 @@ def make_data_class(fields):
             return [sql_data_field.to_sql(v) for v, sql_data_field in zip(self._data, self._fields)]
     return SQLDataRecordType
 
-
+class CursorWithRetries:
+    def __init__(self, cur):
+        self.cur = cur
+    
+    def execute(self, *args, **kwargs):
+        retries = 3
+        for retry in range(retries):
+            try:
+                val = self.cur.execute(*args, **kwargs)
+                return val
+            except sqlite3.OperationalError as e:
+                print(f"\n*********************SQLITE oeprational error, try {retry+1}*********************"*10)
+                time.sleep(0.25)  # wait and see if it clears
+            except Exception as e:
+                raise e  # end immediately if not a file access issue
+        raise sqlite3.OperationalError(f"Retried {retries} times and failed for {args}")
+    
+    def __getattr__(self, key):
+        if key in self.__dict__:
+            return self.__dict__[key]
+        else:
+            return self.cur.__getattribute__(key)
+    
 class SqliteSurveyMetadata(MutableMapping):
     """ Class to store survey metadata into an sqlite3 database.  This is to replace the pickle file that replaced the json.
     The file will have two tables to store the dictionaries from included_ids, started_ids, included_surveys, started_surveys
@@ -205,7 +227,8 @@ class SqliteSurveyMetadata(MutableMapping):
         # Connection to a SQLite database
         self.conn = sqlite3.connect(path_to_sqlite_db, timeout=timeout)
         # Cursor object
-        self.cur = self.conn.cursor()
+        # Override the execute command as we are seeing sqlite3.OperationalError
+        self.cur = CursorWithRetries(self.conn.cursor())
         # sqliteDropTable = "DROP TABLE IF EXISTS parts"
         if not self.cur.execute(f'''SELECT count(name) FROM sqlite_master WHERE type='table' AND name='{self.tablename}' ''').fetchone()[0]:
             self.create_table()

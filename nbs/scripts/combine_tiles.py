@@ -182,7 +182,7 @@ def main(config):
     quitter = False
     debug_config = config.getboolean('DEBUG', False)
     minimized = config.getboolean('MINIMIZED', False)
-    delete_existing = config.getboolean('delete_existing', False)
+    delete_existing = config.getboolean('delete_existing_if_cleanup_needed', False)
     env_path = config.get('environment_path')
     env_name = config.get('environment_name')
     port = config.get('lock_server_port', None)
