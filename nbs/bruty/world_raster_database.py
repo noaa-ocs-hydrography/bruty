@@ -595,7 +595,7 @@ class WorldTilesBackend(VABC):
     def __del__(self):
         # only delete the log handlers this instance opened as other instances may have loggers with the same name open
         # and we don't want to accidentally close them
-        close_logs(self.LOGGER, self._log_handlers, show_open_logs=True)  # clean up logs opened by _make_logger
+        close_logs(self.LOGGER, self._log_handlers, show_open_logs=False)  # clean up logs opened by _make_logger
 
     @staticmethod
     def from_file(data_dir, filename="backend_metadata.json"):
