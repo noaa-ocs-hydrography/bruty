@@ -576,11 +576,12 @@ class WorldTilesBackend(VABC):
         self.data_class = data_class
         self.history_class = history_class
         self.storage_class = storage_class
+        self._log_handlers = []
         if data_path:
             os.makedirs(self.data_path, exist_ok=True)
             self._make_logger()
         self.to_file()  # store parameters so it can be loaded back from disk
-        self._log_handlers = []
+
     @property
     def log_name(self):
         return __name__ + "." + self.data_path.name
