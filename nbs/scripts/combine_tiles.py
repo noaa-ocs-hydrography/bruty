@@ -196,8 +196,6 @@ def main(config):
     decimals = config.getint('decimals', None)
     root, cfg_name = os.path.split(config._source_filename)
     log_path=os.path.join(root, "logs", cfg_name)
-    # make a logger just for this process - the main log will have all the subprocesses in the file as well
-    make_family_of_logs("nbs", log_path + "_manager_" + str(os.getpid()), remove_other_file_loggers=False)
     if debug_config:
         show_logger_handlers(LOGGER)
     remaining_tiles = {}
@@ -401,7 +399,7 @@ if __name__ == '__main__':
     #         LOGGER.debug(f.getvalue()[:-1])  # strip the newline at the end
 
     # Runs the main function for each config specified in sys.argv
-    run_command_line_configs(main, "Insert", section="COMBINE")
+    run_command_line_configs(main, "Insert", section="COMBINE", log_suffix="_combine_tiles")
 
 
 # "V:\NBS_Data\PBA_Alaska_UTM03N_Modeling"

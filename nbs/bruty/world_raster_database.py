@@ -36,7 +36,7 @@ from nbs.bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator, G
     ExactUTMTiles, ExactTilingScheme
 from nbs.bruty import morton
 from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
-from nbs.configs import get_logger, set_file_logging, make_family_of_logs  # , iter_configs, log_config, parse_multiple_values
+from nbs.configs import get_logger, set_file_logging, make_family_of_logs, close_logs  # , iter_configs, log_config, parse_multiple_values
 
 geo_debug = False
 _debug = False
@@ -580,12 +580,21 @@ class WorldTilesBackend(VABC):
             os.makedirs(self.data_path, exist_ok=True)
             self._make_logger()
         self.to_file()  # store parameters so it can be loaded back from disk
+        self._log_handlers = []
+    @property
+    def log_name(self):
+        return __name__ + "." + self.data_path.name
 
     def _make_logger(self):
-        log_name = __name__ + "." + self.data_path.name
-        self.LOGGER = get_logger(log_name)
-        make_family_of_logs(log_name, self.data_path.joinpath("log"), remove_other_file_loggers=False,
+        self.LOGGER = get_logger(self.log_name)
+        added = make_family_of_logs(self.log_name, self.data_path.joinpath("log"), remove_other_file_loggers=False,
                             log_format=f'[%(asctime)s] {__name__} %(levelname)-8s: %(message)s')
+        self._log_handlers.extend(added)
+
+    def __del__(self):
+        # only delete the log handlers this instance opened as other instances may have loggers with the same name open
+        # and we don't want to accidentally close them
+        close_logs(self.LOGGER, self._log_handlers, show_open_logs=True)  # clean up logs opened by _make_logger
 
     @staticmethod
     def from_file(data_dir, filename="backend_metadata.json"):
@@ -627,6 +636,7 @@ class WorldTilesBackend(VABC):
         self.history_class = eval(json_dict['history_class'])
         self.storage_class = eval(json_dict['storage_class'])
         self.data_path = pathlib.Path(json_dict['data_path'])
+        self._log_handlers = []
         self._make_logger()
         # do any version updates here
         self._loaded_from_version = json_dict['version']

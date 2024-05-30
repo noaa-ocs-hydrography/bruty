@@ -243,6 +243,7 @@ def iter_configs(config_filenames: Union[list, str, os.PathLike], log_files: boo
 
 
 def make_family_of_logs(name, root_filename, log_format=None, remove_other_file_loggers=True, weekly=True):
+    added_handlers = []
     # sets the parent logger to output to files
     if weekly:
         # truncated division by weeks so that we start on the same day of week every time
@@ -254,12 +255,53 @@ def make_family_of_logs(name, root_filename, log_format=None, remove_other_file_
         os.makedirs(weekly_path, exist_ok=True)
         root_filename = weekly_path.joinpath(orig_filename.name)
 
-    set_file_logging(name, str(root_filename) + ".debug.log", log_format=log_format,
+    h1 = set_file_logging(name, str(root_filename) + ".debug.log", log_format=log_format,
                      file_level=logging.DEBUG, remove_other_file_loggers=remove_other_file_loggers)
-    set_file_logging(name, str(root_filename) + ".log", log_format=log_format,
+    added_handlers.extend(h1)
+    h2 = set_file_logging(name, str(root_filename) + ".log", log_format=log_format,
                      file_level=logging.INFO, remove_other_file_loggers=False)
-    set_file_logging(name, str(root_filename) + ".warnings.log", log_format=log_format,
+    added_handlers.extend(h2)
+    h3 = set_file_logging(name, str(root_filename) + ".warnings.log", log_format=log_format,
                      file_level=logging.WARNING, remove_other_file_loggers=False)
+    added_handlers.extend(h3)
+    return added_handlers
+
+def close_logs(logger, specific_handlers: list = None, show_open_logs: bool = False):
+    """ Close the log files and remove the handlers from the logger.
+    This should be called in a pairing with make_family_of_logs() to close the log files and remove the handlers.
+
+    Parameters
+    ----------
+    logger: str, logging.Logger
+        name to pass to logging.getLogger() or a logger object itself to close file and stream handlers from
+    specific_handlers
+        list of logging.Handler instances to close, if None then all handlers are closed
+    show_open_logs
+        prints open handlers to the console for all loggers if True
+
+    Returns
+    -------
+
+    """
+    if isinstance(logger, str):
+        logger = logging.getLogger(logger)
+    if show_open_logs:  # show all loggers
+        for k, v in logging.Logger.manager.loggerDict.items():
+            if "nbs" in k:
+                print('+ [%s] {%s} ' % (str.ljust(k, 20), str(v.__class__)[8:-2]))
+            if not isinstance(v, logging.PlaceHolder):
+                for h in v.handlers:
+                    print('     +++', str(h.__class__)[8:-2])
+    if not specific_handlers:
+        specific_handlers = list(logger.handlers)
+    for h in specific_handlers:  # cache a list since we will be editing the handlers in the loop
+        try:
+            if isinstance(h, (logging.FileHandler, logging.StreamHandler)):
+                # if h.stream not in (sys.stderr, sys.stdout):
+                logger.removeHandler(h)
+                h.close()
+        except:
+            pass  # don't fail because logger already closed or something
 
 
 def log_config(config_file, logger, absolute=True):
@@ -367,6 +409,7 @@ def set_stream_logging(logger_name: str, file_level: int = None, log_format: str
 
 def set_file_logging(logger_name: str, log_file: Union[str, pathlib.Path, logging.StreamHandler] = None, file_level: int = None,
                      log_format: str = None, remove_other_file_loggers: bool = True):
+    added_handlers = []
     logger = logging.getLogger(logger_name)
     logger.debug(f"{logger.name} saving to {log_file}")
     if remove_other_file_loggers:  # remove string and file loggers except for the default stderr, stdout
@@ -386,19 +429,20 @@ def set_file_logging(logger_name: str, log_file: Union[str, pathlib.Path, loggin
         log_formatter = logging.Formatter(log_format)
         file_handler.setFormatter(log_formatter)
         logger.addHandler(file_handler)
-
+        added_handlers.append(file_handler)
+    return added_handlers
 
 default_logger = get_logger("nbs.bruty.scripts")
 
 
-def run_configs(func, title, use_configs, section="DEFAULT", logger=default_logger):
+def run_configs(func, title, use_configs, section="DEFAULT", logger=default_logger, log_suffix=""):
     """ use_configs as a string denotes a directory to search for all configs.
     use_configs as a list specifies config files to use.
     """
     all_warnings = []
 
     for config_filename, config_file in iter_configs(use_configs):
-        make_family_of_logs("nbs", config_filename.parent.joinpath("logs", config_filename.name + "_" + str(os.getpid())),
+        make_family_of_logs("nbs", config_filename.parent.joinpath("logs", config_filename.name + "_" + str(os.getpid()) + log_suffix),
                             remove_other_file_loggers=False)
         # @TODO expose the stringio_warnings to the caller
         stringio_warnings = set_stream_logging("bruty", file_level=logging.WARNING, remove_other_file_loggers=False)
@@ -413,14 +457,14 @@ def run_configs(func, title, use_configs, section="DEFAULT", logger=default_logg
     return all_warnings
 
 
-def run_command_line_configs(func, title="", section="DEFAULT", logger=default_logger):
+def run_command_line_configs(func, title="", section="DEFAULT", logger=default_logger, log_suffix=""):
     """ run configs specified on the command line (sys.argv) or search the directory where func is located (uses inspect module)
     """
     if len(sys.argv) > 1:
         use_configs = sys.argv[1:]
     else:
         use_configs = pathlib.Path(inspect.getfile(func)).parent.resolve()  # (os.path.dirname(os.path.abspath(__file__))
-    return run_configs(func, title, use_configs, section, logger)
+    return run_configs(func, title, use_configs, section, logger, log_suffix=log_suffix)
 
 
 def show_logger_handlers(logger):
