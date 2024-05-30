@@ -181,14 +181,14 @@ class CursorWithRetries:
         self.cur = cur
     
     def execute(self, *args, **kwargs):
-        retries = 3
+        retries = 6
         for retry in range(retries):
             try:
                 val = self.cur.execute(*args, **kwargs)
                 return val
             except sqlite3.OperationalError as e:
                 print(f"\n*********************SQLITE oeprational error, try {retry+1}*********************"*10)
-                time.sleep(0.25)  # wait and see if it clears
+                time.sleep(0.33)  # wait and see if it clears
             except Exception as e:
                 raise e  # end immediately if not a file access issue
         raise sqlite3.OperationalError(f"Retried {retries} times and failed for {args}")
