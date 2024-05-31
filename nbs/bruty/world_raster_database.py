@@ -553,7 +553,7 @@ class WorldTilesBackend(VABC):
     Access should then be provided by returning a Tile object.
     """
 
-    def __init__(self, tile_scheme, history_class, storage_class, data_class, data_path):
+    def __init__(self, tile_scheme, history_class, storage_class, data_class, data_path, log_level=logging.INFO):
         """
 
         Parameters
@@ -570,6 +570,7 @@ class WorldTilesBackend(VABC):
             Root directory to store file structure under, if applicable.
         """
         self._version = 1
+        self.log_level = log_level
         self._loaded_from_version = None
         self.tile_scheme = tile_scheme
         self.data_path = pathlib.Path(data_path)
@@ -589,7 +590,7 @@ class WorldTilesBackend(VABC):
     def _make_logger(self):
         self.LOGGER = get_logger(self.log_name)
         added = make_family_of_logs(self.log_name, self.data_path.joinpath("log"), remove_other_file_loggers=False,
-                            log_format=f'[%(asctime)s] {__name__} %(levelname)-8s: %(message)s')
+                            log_format=f'[%(asctime)s] {__name__} %(levelname)-8s: %(message)s', log_level=self.log_level)
         self._log_handlers.extend(added)
 
     def __del__(self):
@@ -598,12 +599,12 @@ class WorldTilesBackend(VABC):
         close_logs(self.LOGGER, self._log_handlers, show_open_logs=False)  # clean up logs opened by _make_logger
 
     @staticmethod
-    def from_file(data_dir, filename="backend_metadata.json"):
+    def from_file(data_dir, filename="backend_metadata.json", log_level=logging.INFO):
         data_path = pathlib.Path(data_dir).joinpath(filename)
         infile = open(data_path, 'r')
         data = json.load(infile)
         data['data_path'] = pathlib.Path(data_dir)  # overridde in case the user copied the data to a different path
-        return WorldTilesBackend.create_from_json(data)
+        return WorldTilesBackend.create_from_json(data, log_level=log_level)
 
     def to_file(self, data_path=None):
         if not data_path:
@@ -624,10 +625,11 @@ class WorldTilesBackend(VABC):
         return json_dict
 
     @staticmethod
-    def create_from_json(json_dict):
+    def create_from_json(json_dict, log_level=logging.INFO):
         cls = eval(json_dict['class'])
         # bypasses the init function as we will use 'from_json' to initialize - like what pickle does
         obj = cls.__new__(cls)
+        obj.log_level = log_level
         obj.from_json(json_dict)
         return obj
 
@@ -682,7 +684,7 @@ class WorldTilesBackend(VABC):
         # Use the same tile_scheme (which is just geographic parameters) with an AccumulationHistory to allow multiple passes
         # on the same dataset to be added to the main database at one time
         use_history = AccumulationHistory
-        new_db = WorldTilesBackend(self.tile_scheme, use_history, self.storage_class, self.data_class, data_path)
+        new_db = WorldTilesBackend(self.tile_scheme, use_history, self.storage_class, self.data_class, data_path, log_level=self.log_level)
         return new_db
 
     def remove_accumulation_db(self, storage_db):
@@ -837,7 +839,7 @@ class LatLonBackend(WorldTilesBackend):
 
 class GoogleLatLonTileBackend(WorldTilesBackend):
     # https://gist.githubusercontent.com/maptiler/fddb5ce33ba995d5523de9afdf8ef118/raw/d7565390d2480bfed3c439df5826f1d9e4b41761/globalmaptiles.py
-    def __init__(self, history_class, storage_class, data_class, data_path, zoom_level=13):
+    def __init__(self, history_class, storage_class, data_class, data_path, zoom_level=13, log_level=logging.INFO):
         tile_scheme = GoogleTilesLatLon(zoom=zoom_level)
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
 
@@ -845,25 +847,25 @@ class GoogleLatLonTileBackend(WorldTilesBackend):
 class UTMTileBackend(WorldTilesBackend):
     def __init__(self, utm_epsg, history_class, storage_class, data_class, data_path, zoom_level=13):
         tile_scheme = UTMTiles(zoom=zoom_level, epsg=utm_epsg)
-        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
+        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path, log_level=log_level)
 
 
 class UTMTileBackendExactRes(WorldTilesBackend):
-    def __init__(self, res_x, res_y, utm_epsg, history_class, storage_class, data_class, data_path, zoom_level=13, offset_x=0, offset_y=0):
+    def __init__(self, res_x, res_y, utm_epsg, history_class, storage_class, data_class, data_path, zoom_level=13, offset_x=0, offset_y=0, log_level=logging.INFO):
         tile_scheme = ExactUTMTiles(res_x, res_y, zoom=zoom_level, epsg=utm_epsg, offset_x=offset_x, offset_y=offset_y)
-        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
+        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path, log_level=log_level)
 
 
 class GoogleMercatorTileBackend(WorldTilesBackend):
-    def __init__(self, history_class, storage_class, data_class, data_path, zoom_level=13):
+    def __init__(self, history_class, storage_class, data_class, data_path, zoom_level=13, log_level=logging.INFO):
         tile_scheme = GoogleTilesMercator(zoom=zoom_level)
-        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
+        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path, log_level=log_level)
 
 
 class TMSMercatorTileBackend(WorldTilesBackend):
-    def __init__(self, history_class, storage_class, data_class, data_path, zoom_level=13):
+    def __init__(self, history_class, storage_class, data_class, data_path, zoom_level=13, log_level=logging.INFO):
         tile_scheme = TMSTilesMercator(zoom=zoom_level)
-        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
+        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path, log_level=log_level)
 
 
 def poly_from_pts(area_of_interest, transformer=None):
@@ -911,7 +913,7 @@ class WorldDatabase(VABC):
     """
     METACLASS_NAME = "wdb_metadata.class"
 
-    def __init__(self, backend, area_of_interest: (ogr.Geometry, list, numpy.array)=None):
+    def __init__(self, backend, area_of_interest: (ogr.Geometry, list, numpy.array)=None, log_level=logging.INFO):
         """
         Parameters
         ----------
@@ -925,6 +927,7 @@ class WorldDatabase(VABC):
             Pass in: the two corners of a rectangle OR a list of points to make a polygon OR a premade ogr.Geometry
         """
         self.db = backend
+        self.log_level = log_level
         self.area_of_interest = area_of_interest
         pth = self.metadata_filename().with_suffix(".sqlite")
         self.write_aoi(pth)
@@ -987,7 +990,7 @@ class WorldDatabase(VABC):
             self.tiles_of_interest = None
 
     @staticmethod
-    def open(data_dir):
+    def open(data_dir, log_level=logging.INFO):
         """
         Parameters
         ----------
@@ -1005,6 +1008,7 @@ class WorldDatabase(VABC):
         data['data_path'] = pathlib.Path(data_dir)  # override in case the user copied the data to a different path
         cls = eval(data['class'])
         obj = cls.__new__(cls)
+        obj.log_level = log_level
         obj.from_dict(data)
         return obj
 
@@ -1130,7 +1134,7 @@ class WorldDatabase(VABC):
 
     def from_dict(self, json_dict):
         """Build the entire object from json"""
-        self.db = WorldTilesBackend.from_file(json_dict['data_path'])
+        self.db = WorldTilesBackend.from_file(json_dict['data_path'], log_level=self.log_level)
         self.update_metadata_from_dict(json_dict)
 
     def write_aoi(self, pth=None):

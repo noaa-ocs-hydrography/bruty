@@ -1,6 +1,7 @@
 import os
 import pathlib
 from dataclasses import dataclass
+import logging
 
 import numpy
 from osgeo import ogr
@@ -199,11 +200,11 @@ class TileToProcess:
     closing: float = 0
 
 
-def create_world_db(root_path, tile_info: TileInfo, dtype: str, for_nav: bool):
+def create_world_db(root_path, tile_info: TileInfo, dtype: str, for_nav: bool, log_level=logging.INFO):
     full_path = pathlib.Path(root_path).joinpath(tile_info.bruty_db_name(dtype, for_nav))
 
     try:  # see if there is an exising Bruty database
-        db = WorldDatabase.open(full_path)
+        db = WorldDatabase.open(full_path, log_level=log_level)
     except FileNotFoundError:  # create an empty bruty database
         epsg = tile_info.epsg
         if tile_info.geometry is not None:
@@ -223,7 +224,7 @@ def create_world_db(root_path, tile_info: TileInfo, dtype: str, for_nav: bool):
         db = WorldDatabase(
             UTMTileBackendExactRes(tile_info.res, tile_info.res, epsg, RasterHistory, DiskHistory, TiffStorage, full_path,
                                    offset_x=tile_info.res / 2, offset_y=tile_info.res / 2,
-                                   zoom_level=zoom), aoi)
+                                   zoom_level=zoom, log_level=log_level), aoi, log_level=log_level)
     if db.res_x > tile_info.res:
         raise BrutyError(f"Existing Bruty data has resolution of {db.res_x} but requested Tile {tile_info.full_name} wants at least {tile_info.res}")
     return db

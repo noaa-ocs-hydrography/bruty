@@ -230,19 +230,20 @@ def iter_configs(config_filenames: Union[list, str, os.PathLike], log_files: boo
             if not base_config_path.exists():
                 base_config_path = None  # use the local directory default
         os.makedirs(os.path.join(config_path, "logs"), exist_ok=True)
-        if log_files:
-            # sets the parent logger to output to files
-            make_family_of_logs("nbs", os.path.join(config_path, 'logs', just_cfg_filename))
         if default_config_name:
             initial_config = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
             initial_config.read(os.path.join(config_path, default_config_name))
         else:
             initial_config = {}
         config_file = load_config(config_filename, base_config_path, initial_config)
+        if log_files:
+            # sets the parent logger to output to files
+            log_level = get_log_level(config_file)
+            make_family_of_logs("nbs", os.path.join(config_path, 'logs', just_cfg_filename), log_level=log_level)
         yield config_filename, config_file
 
 
-def make_family_of_logs(name, root_filename, log_format=None, remove_other_file_loggers=True, weekly=True):
+def make_family_of_logs(name, root_filename, log_format=None, remove_other_file_loggers=True, weekly=True, log_level=logging.DEBUG):
     added_handlers = []
     # sets the parent logger to output to files
     if weekly:
@@ -250,20 +251,21 @@ def make_family_of_logs(name, root_filename, log_format=None, remove_other_file_
         # result will be '2022-11-27'
         log_week = datetime.date.fromordinal((datetime.date.today().toordinal() // 7) * 7).isoformat()
         orig_filename = pathlib.Path(root_filename)
-        del root_filename  # paranoia - don't accidentally modify an object if root_filename wasn't a string
         weekly_path = orig_filename.parent.joinpath("logs_" + log_week)
         os.makedirs(weekly_path, exist_ok=True)
-        root_filename = weekly_path.joinpath(orig_filename.name)
-
-    h1 = set_file_logging(name, str(root_filename) + ".debug.log", log_format=log_format,
-                     file_level=logging.DEBUG, remove_other_file_loggers=remove_other_file_loggers)
-    added_handlers.extend(h1)
-    h2 = set_file_logging(name, str(root_filename) + ".log", log_format=log_format,
-                     file_level=logging.INFO, remove_other_file_loggers=False)
-    added_handlers.extend(h2)
-    h3 = set_file_logging(name, str(root_filename) + ".warnings.log", log_format=log_format,
-                     file_level=logging.WARNING, remove_other_file_loggers=False)
-    added_handlers.extend(h3)
+        root = weekly_path.joinpath(orig_filename.name)
+    if log_level <= logging.DEBUG:
+        h1 = set_file_logging(name, str(root) + ".debug.log", log_format=log_format,
+                         file_level=logging.DEBUG, remove_other_file_loggers=remove_other_file_loggers)
+        added_handlers.extend(h1)
+    if log_level <= logging.INFO:
+        h2 = set_file_logging(name, str(root) + ".log", log_format=log_format,
+                         file_level=logging.INFO, remove_other_file_loggers=False)
+        added_handlers.extend(h2)
+    if log_level <= logging.WARNING:
+        h3 = set_file_logging(name, str(root) + ".warnings.log", log_format=log_format,
+                         file_level=logging.WARNING, remove_other_file_loggers=False)
+        added_handlers.extend(h3)
     return added_handlers
 
 def close_logs(logger, specific_handlers: list = None, show_open_logs: bool = False):
@@ -435,6 +437,52 @@ def set_file_logging(logger_name: str, log_file: Union[str, pathlib.Path, loggin
 default_logger = get_logger("nbs.bruty.scripts")
 
 
+def convert_to_logging_level(config_level):
+    try:
+        log_level = int(config_level)
+    except ValueError:
+        config_level = config_level.upper()
+        if config_level == "WARNING":
+            log_level = logging.WARNING
+        elif config_level == "INFO":
+            log_level = logging.INFO
+        elif config_level == "DEBUG":
+            log_level = logging.DEBUG
+        else:
+            log_level = logging.WARNING
+    return log_level
+
+
+def get_log_level(config, def_level="WARNING", section="DEFAULT"):
+    """ Get a logging level from the config file under the name 'LOG_LEVEL'.
+    If the value is an integer then it is used directly.
+    If the value is a string then it is converted to an integer based on the logging module's levels.
+
+    Acceptable strings are "WARNING", "INFO", "DEBUG".
+
+    Parameters
+    ----------
+    config_file
+        configparser.ConfigParser or section instance
+    def_level
+        default logging level if 'LOG_LEVEL' is not in the section
+    section
+        section of the config file to look in
+
+    Returns
+    -------
+    int
+        logging level (based on logging module's levels like logging.INFO, logging.DEBUG, etc.)
+
+    """
+    if isinstance(config, configparser.ConfigParser):
+        config_sect = config[section]
+    else:
+        config_sect = config
+    config_level = config_sect.get('LOG_LEVEL', def_level)
+    return convert_to_logging_level(config_level)
+
+
 def run_configs(func, title, use_configs, section="DEFAULT", logger=default_logger, log_suffix=""):
     """ use_configs as a string denotes a directory to search for all configs.
     use_configs as a list specifies config files to use.
@@ -442,8 +490,9 @@ def run_configs(func, title, use_configs, section="DEFAULT", logger=default_logg
     all_warnings = []
 
     for config_filename, config_file in iter_configs(use_configs):
+        log_level = get_log_level(config_file, section=section)
         make_family_of_logs("nbs", config_filename.parent.joinpath("logs", config_filename.name + "_" + str(os.getpid()) + log_suffix),
-                            remove_other_file_loggers=False)
+                            remove_other_file_loggers=False, log_level=log_level)
         # @TODO expose the stringio_warnings to the caller
         stringio_warnings = set_stream_logging("bruty", file_level=logging.WARNING, remove_other_file_loggers=False)
         logger.info(f'***************************** Start {title}  *****************************')

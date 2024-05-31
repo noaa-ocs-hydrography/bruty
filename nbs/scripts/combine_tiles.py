@@ -29,7 +29,7 @@ from nbs.bruty.world_raster_database import LockNotAcquired, AreaLock, FileLock,
 from nbs.bruty.nbs_locks import Lock, AlreadyLocked, LockFlags
 from nbs.bruty.utils import onerr, user_action, popen_kwargs, ConsoleProcessTracker, QUIT, HELP
 from nbs.scripts.tile_specs import TileInfo
-from nbs.configs import get_logger, run_command_line_configs, parse_multiple_values, show_logger_handlers, make_family_of_logs
+from nbs.configs import get_logger, run_command_line_configs, parse_multiple_values, show_logger_handlers, get_log_level
 # , iter_configs, set_stream_logging, log_config, parse_multiple_values, make_family_of_logs
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, connect_params_from_config, connection_with_retries
 from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, TileToProcess, TileProcess
@@ -48,7 +48,7 @@ print("\nremove the hack setting the bruty and nbs directories into the python p
 
 def launch(world_db, conn_info, for_navigation_flag=(True, True), override_epsg=NO_OVERRIDE, extra_debug=False, new_console=True,
            lock=None, exclude=None, crop=False, log_path=None, env_path=r'', env_name='', minimized=False,
-           fingerprint="", delete_existing=False):
+           fingerprint="", delete_existing=False, log_level=logging.INFO):
     """ for_navigation_flag = (use_nav_flag, nav_flag_value)
 
     fingerprint is being used to find the processes that are running.
@@ -88,6 +88,7 @@ def launch(world_db, conn_info, for_navigation_flag=(True, True), override_epsg=
         else:  # using the navigation flag, so  see if it should be True (default) or False (needs arg)
             if not for_navigation_flag[1]:
                 combine_args.append("-n")
+        combine_args.extend(['--log_level', str(log_level)])
         if crop:
             combine_args.append('-c')
         if override_epsg != NO_OVERRIDE:
@@ -191,6 +192,7 @@ def main(config):
     max_processes = config.getint('processes', 5)
     max_tries = config.getint('max_retries', 3)
     conn_info = connect_params_from_config(config)
+    log_level = get_log_level(config)
     exclude = parse_multiple_values(config.get('exclude_ids', ''))
     # only keep X decimals - to help compression and storage size
     decimals = config.getint('decimals', None)
@@ -235,7 +237,8 @@ def main(config):
                     continue
                 tile_info.res = current_tile.res  # set this each time for each resolution listed in the data object
 
-                LOGGER.info(f"start combine for {tile_info} {current_tile.res}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
+                LOGGER.info(f"starting combine for {tile_info} {current_tile.res}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}" +
+                            f"\n  {len(remaining_tiles)} remain including the {len(tile_processes) + 1} currently running")
                 if not current_tile.nav_flag and current_tile.dtype == ENC:
                     LOGGER.info(f"  Skipping ENC with for_navigation=False since all ENC data must be for navigation")
                     del remaining_tiles[current_tile]
@@ -245,7 +248,7 @@ def main(config):
                 # tile_info.geometry, tile_info.tile = None, None
                 # full_db = create_world_db(config['data_dir'], tile_info, dtype, current_tile.nav_flag_value)
                 try:
-                    db = create_world_db(config['data_dir'], tile_info, current_tile.dtype, current_tile.nav_flag)
+                    db = create_world_db(config['data_dir'], tile_info, current_tile.dtype, current_tile.nav_flag, log_level=log_level)
                 except (sqlite3.OperationalError, OSError) as e:
                     # this happened as a network issue - we will skip it for now and come back and give the network some time to recover
                     # but we will count it as a retry in case there is a corrupted file or something
@@ -271,7 +274,7 @@ def main(config):
                             use_locks(port)
                             ret = process_nbs_database(db, conn_info, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
                                                        extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(current_tile.dtype==ENC),
-                                                       delete_existing=delete_existing)
+                                                       delete_existing=delete_existing, log_level=log_level)
                             del remaining_tiles[current_tile]
                         else:
                             remove_finished_processes(tile_processes, remaining_tiles, max_tries)
@@ -283,7 +286,7 @@ def main(config):
                             pid = launch(db, conn_info, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
                                          override_epsg=override, extra_debug=debug_config, lock=port, exclude=exclude, crop=(current_tile.dtype==ENC),
                                          log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
-                                         fingerprint=fingerprint, delete_existing=delete_existing)
+                                         fingerprint=fingerprint, delete_existing=delete_existing, log_level=log_level)
                             running_process = ConsoleProcessTracker(["python", fingerprint, "combine.py"])
                             if running_process.console.last_pid != pid:
                                 LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")

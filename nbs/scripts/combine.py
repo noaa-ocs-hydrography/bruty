@@ -18,7 +18,7 @@ from nbs.bruty.world_raster_database import WorldDatabase, use_locks, UTMTileBac
 from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
 from nbs.bruty.world_raster_database import LockNotAcquired, AreaLock, FileLock, BaseLockException, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, Lock, AdvisoryLock
 from nbs.bruty.utils import onerr, user_action, remove_file, QUIT, HELP
-from nbs.configs import get_logger, run_command_line_configs, make_family_of_logs, show_logger_handlers
+from nbs.configs import get_logger, run_command_line_configs, make_family_of_logs, show_logger_handlers, convert_to_logging_level
 from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_metadata, ConnectionInfo, connect_params_from_config
 from nbs.scripts.convert_csar import convert_csar_python
 from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS
@@ -141,9 +141,9 @@ def get_postgres_processing_info(world_db_path, conn_info, for_navigation_flag=(
     return sorted_recs, names_list, sort_dict, comp, transform_metadata
 
 
-def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=5, delete_existing=False):
+def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=5, delete_existing=False, log_level=logging.INFO):
     try:
-        db = WorldDatabase.open(world_db_path)
+        db = WorldDatabase.open(world_db_path, log_level=log_level)
     except FileNotFoundError:
         print(world_db_path, "not found")
     else:
@@ -183,7 +183,7 @@ def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=
         db.transaction_groups.set_finished(trans_id)
 
 
-def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), extra_debug=False, override_epsg=NO_OVERRIDE, exclude=None, crop=False, delete_existing=False):
+def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), extra_debug=False, override_epsg=NO_OVERRIDE, exclude=None, crop=False, delete_existing=False, log_level=logging.INFO):
     """ Reads the NBS postgres metadata table to find all surveys in a region and insert them into a Bruty combined database.
 
     Parameters
@@ -217,13 +217,13 @@ def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), 
             ret = TILE_LOCKED
     if ret == SUCCEEDED:
         sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, for_navigation_flag, exclude=exclude)
-        clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=1, delete_existing=delete_existing)
+        clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=1, delete_existing=delete_existing, log_level=log_level)
         if not names_list:  # still call process_nbs_records to have it write the transaction group records
             LOGGER.warning(f"No matching records found in tables {conn_info.tablenames}")
             LOGGER.warning(f"  for_navigation_flag used:{for_navigation_flag[0]}")
             if for_navigation_flag[0]:
                 LOGGER.warning(f"  and for_navigation value must equal: {for_navigation_flag[1]}")
-        ret = process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug, override_epsg, crop=crop)
+        ret = process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug, override_epsg, crop=crop, log_level=log_level)
     return ret
 
 
@@ -241,12 +241,12 @@ def get_converted_csar(path, transform_metadata, sid):
     return path
 
 
-def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug=False, override_epsg=NO_OVERRIDE, crop=False):
+def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug=False, override_epsg=NO_OVERRIDE, crop=False, log_level=logging.INFO):
     unconverted_csars = []
     files_not_found = []
     failed_to_insert = []
     has_modified = False
-    db = WorldDatabase.open(world_db) if isinstance(world_db, str) else world_db
+    db = WorldDatabase.open(world_db, log_level=log_level) if isinstance(world_db, str) else world_db
     try:
         if extra_debug:
             print("Logs for the opened Bruty DB")
@@ -434,6 +434,8 @@ def make_parser():
                         help="location to store logger messages")
     parser.add_argument("-f", "--fingerprint", type=str, metavar='fingerprint', default="",
                         help="fingerprint to store success/fail code with in sqlite db")
+    parser.add_argument("--log_level", type=str, metavar='log_level', default="INFO",
+                        help="logging level to save to disk")
 
 
     return parser
@@ -450,14 +452,16 @@ if __name__ == "__main__":
         conn_info = ConnectionInfo(args.database, args.user, args.password, args.host, args.port, args.tables)
         use_locks(args.lock_server)
 
+        log_level = convert_to_logging_level(args.log_level)
+        print("using log level", log_level)
         if args.logger_path:
-            make_family_of_logs("nbs", args.logger_path, remove_other_file_loggers=False)
-            make_family_of_logs("nbs", args.logger_path + "_" + str(os.getpid()), remove_other_file_loggers=False)
+            make_family_of_logs("nbs", args.logger_path, remove_other_file_loggers=False, log_level=log_level)
+            make_family_of_logs("nbs", args.logger_path + "_" + str(os.getpid()), remove_other_file_loggers=False, log_level=log_level)
         try:
             print(f"Processing {args.bruty_path} for_navigation_flag={(not args.ignore_for_nav, not args.not_for_nav)}")
             ret = process_nbs_database(args.bruty_path, conn_info, for_navigation_flag=(not args.ignore_for_nav, not args.not_for_nav),
                                        extra_debug=args.debug, override_epsg=args.override_epsg, exclude=args.exclude, crop=args.crop,
-                                       delete_existing=args.delete_existing)
+                                       delete_existing=args.delete_existing, log_level=log_level)
         except Exception as e:
             traceback.print_exc()
             msg = f"{args.bruty_path} for_navigation_flag={(not args.ignore_for_nav, not args.not_for_nav)} had an unhandled exception - see message above"
