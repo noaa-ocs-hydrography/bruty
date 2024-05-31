@@ -476,7 +476,7 @@ def get_log_level(config, def_level="WARNING", section="DEFAULT"):
 
     """
     if isinstance(config, configparser.ConfigParser):
-        config_sect = config[section]
+        config_sect = config[section if section in config else 'DEFAULT']
     else:
         config_sect = config
     config_level = config_sect.get('LOG_LEVEL', def_level)
