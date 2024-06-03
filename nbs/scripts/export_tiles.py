@@ -267,7 +267,7 @@ def main(config):
                             lock.acquire()
                             locks.append(lock)
                 except AlreadyLocked:  # release locks but don't remove from the list so we come back to it later
-                    LOGGER.info(f"Tile currently locked - {tile_info.full_name}")
+                    LOGGER.debug(f"Tile currently locked - {tile_info.full_name}")
                     for lock in locks:
                         lock.release()
                 else:  # try to export since all the combines locked

@@ -1316,7 +1316,7 @@ if __name__ == "__main__":
                 db.completion_codes[args.fingerprint] = d
             except:
                 traceback.print_exc()
-    LOGGER.info(f"Exiting with code {ret} after {int(time.time()-proc_start)} seconds")
+    LOGGER.debug(f"Exiting with code {ret} after {int(time.time()-proc_start)} seconds")
     sys.exit(ret)
 
 

@@ -138,8 +138,8 @@ def generalize(raster_filename, closing_distance, output_crs=None, gen_contribut
         if _debug and os.path.exists(cache_name):
             generalized_dataset = gdal.Open(cache_name)
         else:
-            LOGGER.info(f'performing generalized interpolation on "{raster_filename}"')
-            LOGGER.info(f'Using a closing distance of {closing_distance} meters for {raster_filename}')
+            LOGGER.debug(f'performing generalized interpolation on "{raster_filename}"')
+            LOGGER.debug(f'Using a closing distance of {closing_distance} meters for {raster_filename}')
             generalized_interpolation = raster_interp.process.RasterInterpolator().interpolate(raster, 'linear', buffer=closing_distance / resolution)
             driver = gdal.GetDriverByName('GTiff')
 
@@ -151,7 +151,7 @@ def generalize(raster_filename, closing_distance, output_crs=None, gen_contribut
                     new_ds = driver.CreateCopy(r"C:\Data\nbs\Tile12_temp_generalize_interp.tif", generalized_interpolation,
                                                options=['COMPRESS=LZW', "TILED=YES", "BIGTIFF=YES"])
                 del new_ds
-            LOGGER.info('generalized interpolation completed.  Begin closing.')
+            LOGGER.debug('generalized interpolation completed.  Begin closing.')
             # This step is to be moved to Xipe
             if perform_closing:
                 for generalized_area in interpolation_coverage(raster, generalized_interpolation, resolution,
@@ -166,7 +166,7 @@ def generalize(raster_filename, closing_distance, output_crs=None, gen_contribut
                     del new_ds
             else:
                 generalized_dataset = generalized_interpolation._dataset
-        LOGGER.info('closing completed.  Begin uncertainty computation.')
+        LOGGER.debug('closing completed.  Begin uncertainty computation.')
         if write_distance:
             # create an image to store the distance values in
             dst_ds = driver.Create(str(raster_filename) + ".distance.tif", generalized_dataset.RasterXSize, generalized_dataset.RasterYSize, bands=1,

@@ -35,7 +35,7 @@ from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, co
 from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, TileToProcess, TileProcess
 from nbs.scripts.combine import process_nbs_database, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS
 
-interactive_debug = False
+interactive_debug = True
 if interactive_debug and sys.gettrace() is None:  # this only is set when a debugger is run (?)
     interactive_debug = False
 
@@ -240,7 +240,7 @@ def main(config):
                 LOGGER.info(f"starting combine for {tile_info} {current_tile.res}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}" +
                             f"\n  {len(remaining_tiles)} remain including the {len(tile_processes) + 1} currently running")
                 if not current_tile.nav_flag and current_tile.dtype == ENC:
-                    LOGGER.info(f"  Skipping ENC with for_navigation=False since all ENC data must be for navigation")
+                    LOGGER.debug(f"  Skipping ENC with for_navigation=False since all ENC data must be for navigation")
                     del remaining_tiles[current_tile]
                     continue
                 # to make a full utm zone database, take the tile_info and set geometry and tile to None.
@@ -291,13 +291,13 @@ def main(config):
                             if running_process.console.last_pid != pid:
                                 LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
                             else:
-                                LOGGER.info(f"Started PID {pid} for {tile_info} {current_tile.res}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
+                                LOGGER.debug(f"Started PID {pid} for {tile_info} {current_tile.res}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
 
                             # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
                             tile_processes[current_tile] = TileProcess(running_process, tile_info, db, fingerprint, lock)
                         del lock  # unlocks if the lock wasn't stored in the tile_process
                     except AlreadyLocked:
-                        LOGGER.info(f"delay combine due to data lock for {tile_info} {current_tile.res}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
+                        LOGGER.debug(f"delay combine due to data lock for {tile_info} {current_tile.res}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
             # remove finished processes from the list or this becomes an infinite loop
             remove_finished_processes(tile_processes, remaining_tiles, max_tries)
 

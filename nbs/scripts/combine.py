@@ -61,7 +61,7 @@ def find_surveys_to_update(db, sort_dict, names_list):
     for sid in db.started_ids.keys():
         # find any surveys in the WorldDatabase that are no longer in the Postgres list
         if sid not in sort_dict:
-            db.db.LOGGER.info(f"found {sid} in the bruty data but not valid in postgres database - will remove")
+            db.db.LOGGER.debug(f"found {sid} in the bruty data but not valid in postgres database - will remove")
             invalid_surveys.append(sid)
         else:
             # this call checks for a conversion of csar that is newer than the csar itself
@@ -70,12 +70,12 @@ def find_surveys_to_update(db, sort_dict, names_list):
             # then mark for removal
             # raw_path comes from metadata tables while started_ids are from the processed bruty sqlite
             if raw_pth != db.started_ids[sid].survey_path:
-                db.db.LOGGER.info(f"found {sid} in the bruty data but path changed in database - will remove")
-                db.db.LOGGER.info(f"\t{raw_pth} vs {db.started_ids[sid].survey_path}")
+                db.db.LOGGER.debug(f"found {sid} in the bruty data but path changed in database - will remove")
+                db.db.LOGGER.debug(f"\t{raw_pth} vs {db.started_ids[sid].survey_path}")
                 # Track the partial inserts by listing that it is started - and when it crashes it will not be in included_ids
                 invalid_surveys.append(sid)
         if sid not in db.included_ids:
-            db.db.LOGGER.info(f"found {sid} in the bruty data but was not finished - consider removal (is another process adding it now?)")
+            db.db.LOGGER.debug(f"found {sid} in the bruty data but was not finished - consider removal (is another process adding it now?)")
             unfinished_surveys.append(sid)
 
     # if the file modification time on disk doesn't match the recorded time then mark for removal
@@ -235,7 +235,7 @@ def get_converted_csar(path, transform_metadata, sid):
         lock_name = path + ".conversion.lock"
         with Lock(lock_name, 'w', fail_when_locked=True) as _lck:
             meta = transform_metadata[sid]
-            LOGGER.info(f"Trying to perform csar conversion for nbs_id={sid}, {path}")
+            LOGGER.debug(f"Trying to perform csar conversion for nbs_id={sid}, {path}")
             path = convert_csar_python(path, meta)
         remove_file(lock_name)
     return path
@@ -313,7 +313,7 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
                             unconverted_csars.append(names_list.pop(i))
                             continue
                     except (LockNotAcquired, BaseLockException):
-                        LOGGER.info(f"{path} is locked and is probably being converted by another process")
+                        LOGGER.debug(f"{path} is locked and is probably being converted by another process")
                         continue
 
                 if not os.path.exists(path):
@@ -485,5 +485,5 @@ if __name__ == "__main__":
                 db.completion_codes[args.fingerprint] = d
             except:
                 pass
-    LOGGER.info(f"Exiting {args.bruty_path} with code {ret} after {int(time.time()-proc_start)} seconds")
+    LOGGER.debug(f"Exiting {args.bruty_path} with code {ret} after {int(time.time()-proc_start)} seconds")
     sys.exit(ret)
