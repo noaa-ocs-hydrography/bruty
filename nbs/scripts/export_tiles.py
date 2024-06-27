@@ -97,7 +97,7 @@ def launch(config_path, cache_file, tile_cache, export_time,
 def get_metadata(tile_info, conn_info, use_bruty_cached="", use_caches={}):
     metadata_fields = []
     metadata_records = []
-    conn_info.database = "metadata"
+    # conn_info.database = "metadata"
     for dtype in (PREREVIEW, REVIEWED, ENC, GMRT, SENSITIVE):
         query_database = False
         tablename = tile_info.metadata_table_name(dtype)
@@ -201,7 +201,7 @@ def main(config):
     use_cached_meta = config.getboolean('USE_CACHED_METADATA', False)
     use_cached_enc_meta = config.getboolean('USE_CACHED_ENC_METADATA', True)
     conn_info = connect_params_from_config(config)
-    conn_info.database = 'metadata'
+    # conn_info.database = 'metadata'
     tile_list = list(iterate_tiles_table(config))
     tile_list.sort(key=lambda t: t.pb)
     max_tries = config.getint('max_tries', 3)
