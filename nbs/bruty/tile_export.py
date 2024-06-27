@@ -242,6 +242,59 @@ class RasterExport:
             remove_file(self.rat_filename, allow_permission_fail=allow_permission_fail, silent=silent)
 
 
+def make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav):
+    """ Look through all the records and find the ones that are not reviewed and make a note of them.
+    This is used to populate the xbox table with the unreviewed data that is being included or excluded from the export.
+
+    Parameters
+    ----------
+    all_simple_records
+        list of the records from the nbs database
+    tile_info
+        A tile_info object that has the information about the tile being exported so the tablename can be found
+    dtypes_and_for_nav
+        list of tuples of (datatype, for_nav) that are to be included in the notes.
+        ex: [(REVIEWED, True), (ENC, True), (GMRT, True)]
+
+    Returns
+    -------
+    str
+        A string that has the count of records which were unreviewed and then a list of the unreviewed filenames
+
+    """
+    # Find all the records that are not reviewed and make a dictionary of lists of them
+    unreviewed = {}
+    unreviewed_notes = ""
+    IGNORED = 1
+    COMBINED = 0
+    labels = {IGNORED: "Skipped due to never_post=True", COMBINED: "Included in combined data (never_post=False)"}
+    for datatype, for_nav in dtypes_and_for_nav:
+        database_name = tile_info.metadata_table_name(datatype)
+        for key, rec in all_simple_records.items():
+            if rec.get('nbs_reviewed', False):  # when simple_records had a null in postgres they end up as a missing key, so treat null as False
+                if rec['tablename'] == database_name:
+                    if rec.get('for_navigation', False) == for_nav:
+                        index = IGNORED if rec.get('never_post', False) else COMBINED
+                        table = unreviewed.setdefault((rec['tablename']), [[], []])
+                        table[index].append(rec)
+    # Make a description of the amount of unreviewed data and then list the survey names
+    total_unreviewed = 0
+    for tablename, record_groups in unreviewed.items():
+        for records in record_groups:
+            total_unreviewed += len(records)
+    if total_unreviewed:
+        unreviewed_notes = f"Unreviewed data found: {total_unreviewed} records (nbs_reviewed=False)\n"
+        # Now list the records that are unreviewed, first the ones that are included and then the ones that are skipped
+        for tablename, record_groups in unreviewed.items():
+            for index in (COMBINED, IGNORED):
+                records = record_groups[index]
+                if records:
+                    unreviewed_notes += f"  {tablename} - {len(records)} records {labels[index]}\n"
+                    for record in records:
+                        unreviewed_notes += f"    {record['from_filename']}\n"
+    return unreviewed_notes
+
+
 def combine_and_export(config, tile_info, all_simple_records, comp, export_time="", decimals=None):
     conn_info = connect_params_from_config(config)
     bruty_dir = config['data_dir']
@@ -338,8 +391,8 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                     except BaseLockException:
                         locks.append(False)
             if all(locks):
-                databases = [tile_info.bruty_db_name(REVIEWED, True), tile_info.bruty_db_name(ENC, True), tile_info.bruty_db_name(GMRT, True)]
-                databases = [root_dir.joinpath(db_name) for db_name in databases]
+                dtypes_and_for_nav = [(REVIEWED, True), (ENC, True), (GMRT, True)]
+                databases = [root_dir.joinpath(tile_info.bruty_db_name(datatype, for_nav)) for datatype, for_nav in dtypes_and_for_nav]
                 base_cnt = add_databases(databases, dataset, dataset_score, comp)
 
                 if tile_info.navigation:
@@ -351,50 +404,54 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                     # nav_sensitive_cnt = add_databases(databases, nav_dataset, nav_score, comp)
                     del nav_score, nav_dataset  # closes the files so they can be copied
                     complete_export(nav_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
-                    navigation_id = write_export_record(nav_export, navigation=True)
+                    unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav)
+                    navigation_id = write_export_record(nav_export, navigation=True, notes=unreviewed_notes)
 
                 if tile_info.public or tile_info.internal:
                     # @todo the counts returned by add_databases should allow to tell if any changes were added
                     #   or possibly the same export would apply to multiple configurations, like public and internal are the same
                     # add the not for navigation versions that were already added
-                    databases = [tile_info.bruty_db_name(REVIEWED, False), tile_info.bruty_db_name(ENC, False), tile_info.bruty_db_name(GMRT, False)]
-                    # add the prereview (unqualified data)
-                    databases.extend([tile_info.bruty_db_name(PREREVIEW, True), tile_info.bruty_db_name(PREREVIEW, False)])
-                    databases = [root_dir.joinpath(db_name) for db_name in databases]
+                    # also add the prereview (unqualified data)
+                    add_dtypes_and_for_nav = [(REVIEWED, False), (ENC, False), (GMRT, False), (PREREVIEW, True), (PREREVIEW, False)]
+                    dtypes_and_for_nav.extend(add_dtypes_and_for_nav)
+                    databases = [root_dir.joinpath(tile_info.bruty_db_name(datatype, for_nav)) for datatype, for_nav in add_dtypes_and_for_nav]
                     prereview_cnt = add_databases(databases, dataset, dataset_score, comp)
 
                     if tile_info.public:
                         os.makedirs(public_export.extracted_filename.parent, exist_ok=True)
+                        unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav)
                         if prereview_cnt == 0 and nav_export.cog_filename.exists():
                             shutil.copyfile(nav_export.cog_filename, public_export.cog_filename)
                             shutil.copyfile(nav_export.rat_filename, public_export.rat_filename)
-                            update_export_record(conn_info, navigation_id, public=True)
+                            update_export_record(conn_info, navigation_id, public=True, notes=unreviewed_notes)
                             public_id = navigation_id
                         else:
                             copy_dataset(dataset, public_export.extracted_filename)
                             complete_export(public_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
-                            public_id = write_export_record(public_export, public=True)
+                            public_id = write_export_record(public_export, public=True, notes=unreviewed_notes)
 
                     if tile_info.internal:
                         os.makedirs(internal_export.extracted_filename.parent, exist_ok=True)
                         # internal is the same as public with SENSITIVE added.
-                        databases = [tile_info.bruty_db_name(SENSITIVE, True), tile_info.bruty_db_name(SENSITIVE, False)]
-                        databases = [root_dir.joinpath(db_name) for db_name in databases]
+                        add_dtypes_and_for_nav = [(SENSITIVE, True), (SENSITIVE, False)]
+                        dtypes_and_for_nav.extend(add_dtypes_and_for_nav)
+                        databases = [root_dir.joinpath(tile_info.bruty_db_name(datatype, for_nav)) for datatype, for_nav in add_dtypes_and_for_nav]
                         sensitive_cnt = add_databases(databases, dataset, dataset_score, comp)
+                        unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav)
                         if sensitive_cnt == 0 and prereview_cnt == 0 and nav_export.cog_filename.exists():
                             shutil.copyfile(nav_export.cog_filename, internal_export.cog_filename)
                             shutil.copyfile(nav_export.rat_filename, internal_export.rat_filename)
-                            update_export_record(conn_info, navigation_id, internal=True)
+                            update_export_record(conn_info, navigation_id, internal=True, notes=unreviewed_notes)
                             internal_id = navigation_id
                         elif sensitive_cnt == 0 and public_export.cog_filename.exists():
                             shutil.copyfile(public_export.cog_filename, internal_export.cog_filename)
                             shutil.copyfile(public_export.rat_filename, internal_export.rat_filename)
-                            update_export_record(conn_info, public_id, internal=True)
+                            update_export_record(conn_info, public_id, internal=True, notes=unreviewed_notes)
                             internal_id = public_id
                         else:
                             copy_dataset(dataset, internal_export.extracted_filename)
                             complete_export(internal_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
-                            internal_id = write_export_record(internal_export, internal=True)
+                            internal_id = write_export_record(internal_export, internal=True, notes=unreviewed_notes)
 
                 for exp, wanted in ((nav_export, tile_info.navigation), (internal_export, tile_info.internal), (public_export, tile_info.public)):
                     if wanted:
@@ -1182,10 +1239,12 @@ def complete_export_sequential(export, all_simple_records, closing_dist, epsg, d
 
 def update_export_record(conn_info, row_id, **to_update):
     if interactive_debug:
-        LOGGER.warning("Interactive debug doesn't update export records in XBOX table")
-        return
+        LOGGER.warning("Interactive debug uses the test_tile_specifications database to update export records in XBOX table")
     cache = conn_info.database  # don't modify the incoming conn_info but temporarily set the database to tile_specifications
-    conn_info.database = "tile_specifications"
+    if interactive_debug:
+        conn_info.database = "test_tile_specifications"
+    else:
+        conn_info.database = "tile_specifications"
     connection, cursor = connection_with_retries(conn_info)
     conn_info.database = cache
     # @TODO this would insert a dictionary but the UPDATE command doesn't work the same.
@@ -1199,15 +1258,17 @@ def update_export_record(conn_info, row_id, **to_update):
     connection.close()
 
 
-def write_export_record(export: RasterExport, internal: bool = False, navigation: bool = False, public: bool = False):
+def write_export_record(export: RasterExport, internal: bool = False, navigation: bool = False, public: bool = False, notes=""):
     if interactive_debug:
-        LOGGER.warning("Interactive debug doesn't update export records in XBOX table")
-        return
+        LOGGER.warning("Interactive debug uses the test_tile_specifications database to update export records in XBOX table")
     # FIXME - this is hardcoded, need to pass from caller
     from nbs.configs import iter_configs
     config_filename, config_file = [x for x in iter_configs([r'D:\git_repos\bruty\nbs\scripts\base_configs\temp_xbox.config'])][0]
     conn_info = connect_params_from_config(config_file['DEFAULT'])
-    conn_info.database = "tile_specifications"
+    if interactive_debug:
+        conn_info.database = "test_tile_specifications"
+    else:
+        conn_info.database = "tile_specifications"
     connection, cursor = connection_with_retries(conn_info)
     ti = export.tile_info
     pri_key = [ti.tile, ti.utm, ti.hemi.upper(), ti.datum, ti.pb, ti.locality]
@@ -1219,11 +1280,11 @@ def write_export_record(export: RasterExport, internal: bool = False, navigation
     #   make or find a wrapper which is like: con.execute(insert into table (dict.keys()) values (dict.values()))
     record = [ti.tile, ti.utm, ti.hemi.upper(), ti.datum, ti.pb, ti.locality, ti.res,
               str(export.cog_filename), str(export.rat_filename), export.data_time, export.export_time,
-              geometry, internal, navigation, public]
+              geometry, internal, navigation, public, notes]
     q_str = ", ".join(["%s"] * len(record))
     cursor.execute(f"""INSERT INTO xbox (tile, utm, hemisphere, datum, production_branch, locality, resolution, 
         data_location, data_aux_location, combine_time, export_time, 
-        geometry, internal, navigation, public) VALUES ({q_str}) RETURNING id""", record)
+        geometry, internal, navigation, public, notes) VALUES ({q_str}) RETURNING id""", record)
 
     id_of_new_row = cursor.fetchone()[0]
     connection.commit()

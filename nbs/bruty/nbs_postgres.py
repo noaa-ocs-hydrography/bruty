@@ -463,7 +463,7 @@ def get_nbs_records(table_name, conn_info, geom_name=None, order="", query_field
         records = cursor.fetchall()
         # the DictCursor makes an _index object that is shared by all rows which describes the mapping of name to index.
         # We will add a tablename entry at the end of the row and add the table_name to every record so it can be accessed later.
-        if records:
+        if records:  # Fixme -- this should have a unittest to make sure this behavior doesn't break in the future
             records[0]._index['tablename'] = max(list(records[0]._index.values())) + 1
             for r in records:
                 r.append(table_name)
