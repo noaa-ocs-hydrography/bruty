@@ -271,7 +271,7 @@ def make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav):
     for datatype, for_nav in dtypes_and_for_nav:
         database_name = tile_info.metadata_table_name(datatype)
         for key, rec in all_simple_records.items():
-            if rec.get('nbs_reviewed', False):  # when simple_records had a null in postgres they end up as a missing key, so treat null as False
+            if not rec.get('nbs_reviewed', False):  # when simple_records had a null in postgres they end up as a missing key, so treat null as False
                 if rec['tablename'] == database_name:
                     if rec.get('for_navigation', False) == for_nav:
                         index = IGNORED if rec.get('never_post', False) else COMBINED
