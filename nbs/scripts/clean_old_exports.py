@@ -9,7 +9,7 @@ from nbs.bruty.utils import remove_file
 import nbs.scripts
 
 script_dir = pathlib.Path(nbs.scripts.__path__[0])
-config_filename, config_file = [x for x in iter_configs([script_dir.joinpath(r'base_configs\temp_xbox.config')])][0]
+config_filename, config_file = [x for x in iter_configs([script_dir.joinpath(r'base_configs\nbs_postgres.config')])][0]
 conn_info = connect_params_from_config(config_file['DEFAULT'])
 conn_info.database = "tile_specifications"
 fields, recs = get_nbs_records("xbox", conn_info, exclude_fields=['geometry', 'geometry_modified'])

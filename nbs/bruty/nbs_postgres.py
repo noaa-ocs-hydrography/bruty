@@ -266,38 +266,27 @@ def create_identity_column(table_name, start_val, conn_info: ConnectionInfo, col
         # cursor.execute(f"update {table_name} set sid=sid+{start_val}")
 
 
-def get_debug_connection():
-    for config_filename, config_file in iter_configs([r'D:\git_repos\bruty_dev_debugging\nbs\scripts\barry.gallagher.la\bg_dbg.config']):
-        config = config_file['DEFAULT']
-        conn_info = connect_params_from_config(config)
-        connection, cursor = connection_with_retries(conn_info)
-    return conn_info, connection, cursor, config
-
-
 def get_tablenames(cursor):
     cursor.execute("""SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE';""")
     tablenames = list(cursor.fetchall())
     return tablenames
 
 
-def make_all_serial_columns(print_results=False):
-    """ to run:
+def make_all_serial_columns(conn_info: ConnectionInfo, print_results: bool = False):
+    """ Checks all tables that match the nbs pattern of PBx_locality_UTMxx_datum_datatype.
+    Adds an nbs_id column if missing.  Modifies the nbs_id to be a unique sequence if it's not already.
+    Fills the column with values starting after the last filled value or none are filled then the start value computed for the table.
+    Parameters
+    ----------
+    conn_info
+        ConnectionInfo object with database, username, password, hostname, port, tablenames
+    print_results
+        print the last nbs_id for each table
+    Returns
+    -------
 
-    from nbs.bruty import nbs_postgres
-    nbs_postgres.make_all_serial_columns(True)
-
-    or to revise a table:
-
-    from nbs.bruty import nbs_postgres
-    from nbs.configs import parse_multiple_values, iter_configs
-    for config_filename, config_file in iter_configs([r'C:\git_repos\bruty\nbs\scripts\debug.config']):
-        config = config_file['DEFAULT']
-    _t, database, hostname, port, username, password = nbs_postgres.connect_params_from_config(config)
-    for update_table in ('pbd_california_utm11n_mllw_qualified', 'pbd_california_utm11n_mllw_unqualified'):
-        start = nbs_postgres.start_integer(update_table)
-        nbs_postgres.create_identity_column(update_table, start, database, username, password, hostname, port, force_restart=True)
     """
-    conn_info, connection, cursor, config = get_debug_connection()
+    connection, cursor = connection_with_retries(conn_info)
     tablenames = get_tablenames(cursor)
     for (tablename,) in tablenames:
         try:

@@ -297,6 +297,9 @@ def make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav):
 
 def combine_and_export(config, tile_info, all_simple_records, comp, export_time="", decimals=None):
     conn_info = connect_params_from_config(config)
+    conn_info_exports = connect_params_from_config(config)
+    conn_info_exports.database = config.get('export_database', None)
+    conn_info_exports.tablenames = [config.get('export_table', "")]
     bruty_dir = config['data_dir']
     export_dir = config['export_dir']
 
@@ -405,7 +408,7 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                     del nav_score, nav_dataset  # closes the files so they can be copied
                     complete_export(nav_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
                     unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav)
-                    navigation_id = write_export_record(nav_export, navigation=True, notes=unreviewed_notes)
+                    navigation_id = write_export_record(conn_info_exports, nav_export, navigation=True, notes=unreviewed_notes)
 
                 if tile_info.public or tile_info.internal:
                     # @todo the counts returned by add_databases should allow to tell if any changes were added
@@ -423,12 +426,12 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                         if prereview_cnt == 0 and nav_export.cog_filename.exists():
                             shutil.copyfile(nav_export.cog_filename, public_export.cog_filename)
                             shutil.copyfile(nav_export.rat_filename, public_export.rat_filename)
-                            update_export_record(conn_info, navigation_id, public=True, notes=unreviewed_notes)
+                            update_export_record(conn_info_exports, navigation_id, public=True, notes=unreviewed_notes)
                             public_id = navigation_id
                         else:
                             copy_dataset(dataset, public_export.extracted_filename)
                             complete_export(public_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
-                            public_id = write_export_record(public_export, public=True, notes=unreviewed_notes)
+                            public_id = write_export_record(conn_info_exports, public_export, public=True, notes=unreviewed_notes)
 
                     if tile_info.internal:
                         os.makedirs(internal_export.extracted_filename.parent, exist_ok=True)
@@ -441,17 +444,17 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                         if sensitive_cnt == 0 and prereview_cnt == 0 and nav_export.cog_filename.exists():
                             shutil.copyfile(nav_export.cog_filename, internal_export.cog_filename)
                             shutil.copyfile(nav_export.rat_filename, internal_export.rat_filename)
-                            update_export_record(conn_info, navigation_id, internal=True, notes=unreviewed_notes)
+                            update_export_record(conn_info_exports, navigation_id, internal=True, notes=unreviewed_notes)
                             internal_id = navigation_id
                         elif sensitive_cnt == 0 and public_export.cog_filename.exists():
                             shutil.copyfile(public_export.cog_filename, internal_export.cog_filename)
                             shutil.copyfile(public_export.rat_filename, internal_export.rat_filename)
-                            update_export_record(conn_info, public_id, internal=True, notes=unreviewed_notes)
+                            update_export_record(conn_info_exports, public_id, internal=True, notes=unreviewed_notes)
                             internal_id = public_id
                         else:
                             copy_dataset(dataset, internal_export.extracted_filename)
                             complete_export(internal_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
-                            internal_id = write_export_record(internal_export, internal=True, notes=unreviewed_notes)
+                            internal_id = write_export_record(conn_info_exports, internal_export, internal=True, notes=unreviewed_notes)
 
                 for exp, wanted in ((nav_export, tile_info.navigation), (internal_export, tile_info.internal), (public_export, tile_info.public)):
                     if wanted:
@@ -1237,60 +1240,45 @@ def complete_export_sequential(export, all_simple_records, closing_dist, epsg, d
     export.cleanup_tempfiles(allow_permission_fail=True)
 
 
-def update_export_record(conn_info, row_id, **to_update):
-    if interactive_debug:
-        LOGGER.warning("Interactive debug uses the test_tile_specifications database to update export records in XBOX table")
-    cache = conn_info.database  # don't modify the incoming conn_info but temporarily set the database to tile_specifications
-    if interactive_debug:
-        conn_info.database = "test_tile_specifications"
-    else:
-        conn_info.database = "tile_specifications"
-    connection, cursor = connection_with_retries(conn_info)
-    conn_info.database = cache
-    # @TODO this would insert a dictionary but the UPDATE command doesn't work the same.
-    # columns = to_update.keys()
-    # values = [to_update[column] for column in columns]
-    # insert_statement = 'INSERT INTO xbox (%s) values (%s) where id = %s '
-    # cursor.execute(insert_statement, (AsIs(','.join(columns)), tuple(values), row_id))
-    for key, val in to_update.items():
-        cursor.execute(f"UPDATE xbox SET {key}=%s WHERE id=%s", (val, row_id))
-    connection.commit()
-    connection.close()
+def update_export_record(conn_info: ConnectionInfo, row_id: int, **to_update):
+    if conn_info.database is not None:
+        connection, cursor = connection_with_retries(conn_info)
+        # @TODO this would insert a dictionary but the UPDATE command doesn't work the same.
+        # columns = to_update.keys()
+        # values = [to_update[column] for column in columns]
+        # insert_statement = 'INSERT INTO xbox (%s) values (%s) where id = %s '
+        # cursor.execute(insert_statement, (AsIs(','.join(columns)), tuple(values), row_id))
+        for key, val in to_update.items():
+            for tablename in conn_info.tablenames:
+                cursor.execute(f"UPDATE {tablename} SET {key}=%s WHERE id=%s", (val, row_id))
+        connection.commit()
+        connection.close()
 
 
-def write_export_record(export: RasterExport, internal: bool = False, navigation: bool = False, public: bool = False, notes=""):
-    if interactive_debug:
-        LOGGER.warning("Interactive debug uses the test_tile_specifications database to update export records in XBOX table")
-    # FIXME - this is hardcoded, need to pass from caller
-    from nbs.configs import iter_configs
-    config_filename, config_file = [x for x in iter_configs([r'D:\git_repos\bruty\nbs\scripts\base_configs\temp_xbox.config'])][0]
-    conn_info = connect_params_from_config(config_file['DEFAULT'])
-    if interactive_debug:
-        conn_info.database = "test_tile_specifications"
-    else:
-        conn_info.database = "tile_specifications"
-    connection, cursor = connection_with_retries(conn_info)
-    ti = export.tile_info
-    pri_key = [ti.tile, ti.utm, ti.hemi.upper(), ti.datum, ti.pb, ti.locality]
-    cursor.execute(f"""select geometry FROM combine_spec 
-    WHERE tile=%s AND utm=%s AND UPPER(hemisphere)=%s AND datum=%s AND production_branch=%s AND locality=%s""", pri_key)
-    geometry = cursor.fetchone()[0]
+def write_export_record(conn_info: ConnectionInfo, export: RasterExport, internal: bool = False, navigation: bool = False, public: bool = False, notes=""):
+    id_of_new_row = None
+    if conn_info.database is not None:
+        connection, cursor = connection_with_retries(conn_info)
+        ti = export.tile_info
+        pri_key = [ti.tile, ti.utm, ti.hemi.upper(), ti.datum, ti.pb, ti.locality]
+        cursor.execute(f"""select geometry FROM combine_spec 
+        WHERE tile=%s AND utm=%s AND UPPER(hemisphere)=%s AND datum=%s AND production_branch=%s AND locality=%s""", pri_key)
+        geometry = cursor.fetchone()[0]
 
-    # @TODO this should be a dictionary but there is no clear syntax for writing dicts directly.
-    #   make or find a wrapper which is like: con.execute(insert into table (dict.keys()) values (dict.values()))
-    record = [ti.tile, ti.utm, ti.hemi.upper(), ti.datum, ti.pb, ti.locality, ti.res,
-              str(export.cog_filename), str(export.rat_filename), export.data_time, export.export_time,
-              geometry, internal, navigation, public, notes]
-    q_str = ", ".join(["%s"] * len(record))
-    cursor.execute(f"""INSERT INTO xbox (tile, utm, hemisphere, datum, production_branch, locality, resolution, 
-        data_location, data_aux_location, combine_time, export_time, 
-        geometry, internal, navigation, public, notes) VALUES ({q_str}) RETURNING id""", record)
+        # @TODO this should be a dictionary but there is no clear syntax for writing dicts directly.
+        #   make or find a wrapper which is like: con.execute(insert into table (dict.keys()) values (dict.values()))
+        record = [ti.tile, ti.utm, ti.hemi.upper(), ti.datum, ti.pb, ti.locality, ti.res,
+                  str(export.cog_filename), str(export.rat_filename), export.data_time, export.export_time,
+                  geometry, internal, navigation, public, notes]
+        q_str = ", ".join(["%s"] * len(record))
+        cursor.execute(f"""INSERT INTO xbox (tile, utm, hemisphere, datum, production_branch, locality, resolution, 
+            data_location, data_aux_location, combine_time, export_time, 
+            geometry, internal, navigation, public, notes) VALUES ({q_str}) RETURNING id""", record)
 
-    id_of_new_row = cursor.fetchone()[0]
-    connection.commit()
-    connection.close()
+        id_of_new_row = cursor.fetchone()[0]
+        connection.commit()
+        connection.close()
     return id_of_new_row
-
 
 def make_parser():
     parser = argparse.ArgumentParser(description='Combine a NBS postgres table(s) into a Bruty dataset')

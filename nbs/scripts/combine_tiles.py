@@ -194,8 +194,6 @@ def main(config):
     conn_info = connect_params_from_config(config)
     log_level = get_log_level(config)
     exclude = parse_multiple_values(config.get('exclude_ids', ''))
-    # only keep X decimals - to help compression and storage size
-    decimals = config.getint('decimals', None)
     root, cfg_name = os.path.split(config._source_filename)
     log_path=os.path.join(root, "logs", cfg_name)
     if debug_config:
