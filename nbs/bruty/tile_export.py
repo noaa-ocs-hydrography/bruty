@@ -1256,15 +1256,18 @@ def update_export_record(conn_info: ConnectionInfo, row_id: int, **to_update):
 
 
 def write_export_record(conn_info: ConnectionInfo, export: RasterExport, internal: bool = False, navigation: bool = False, public: bool = False, notes=""):
+    spec_table = "combine_spec"
     id_of_new_row = None
     if conn_info.database is not None:
         connection, cursor = connection_with_retries(conn_info)
         ti = export.tile_info
         pri_key = [ti.tile, ti.utm, ti.hemi.upper(), ti.datum, ti.pb, ti.locality]
-        cursor.execute(f"""select geometry FROM combine_spec 
+        cursor.execute(f"""select geometry FROM {spec_table} 
         WHERE tile=%s AND utm=%s AND UPPER(hemisphere)=%s AND datum=%s AND production_branch=%s AND locality=%s""", pri_key)
-        geometry = cursor.fetchone()[0]
-
+        try:
+            geometry = cursor.fetchone()[0]
+        except (TypeError, IndexError):
+            raise BrutyError(f"Could not find {spec_table} record for {pri_key}")
         # @TODO this should be a dictionary but there is no clear syntax for writing dicts directly.
         #   make or find a wrapper which is like: con.execute(insert into table (dict.keys()) values (dict.values()))
         record = [ti.tile, ti.utm, ti.hemi.upper(), ti.datum, ti.pb, ti.locality, ti.res,
@@ -1279,6 +1282,7 @@ def write_export_record(conn_info: ConnectionInfo, export: RasterExport, interna
         connection.commit()
         connection.close()
     return id_of_new_row
+
 
 def make_parser():
     parser = argparse.ArgumentParser(description='Combine a NBS postgres table(s) into a Bruty dataset')
