@@ -98,7 +98,28 @@ res.script_to_filename
 res.from_filename
 """
 
-
+"""
+to convert blob from sqlite after copying value from sqlite browser in the edite cell area
+# sample string from sqlite browser gui
+a = '''024dfd0186944d3e024dfd0186944d34
+024dfc0186944d3f024dfc0186944d43
+...
+'''
+def blob_to_py(a):
+    import pickle
+    b = a.replace("\n", "")
+    c = []
+    for i in range(0, len(b), 2):
+        c.append(int(b[i:i+2], 16))
+    return pickle.loads(bytes(c))
+    
+returns:     
+[(572, 509),
+ (574, 509),
+ (564, 508),
+ ...
+ 
+"""
 def use_locks(port):
     global LockNotAcquired, BaseLockException, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, NO_LOCK, current_address, Lock, AdvisoryLock
     if port is None or port == "":

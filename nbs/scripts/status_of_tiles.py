@@ -1,5 +1,5 @@
 """ this script checks if tiles would need to re-combined
-It looks to see if there are new/changed surveys or oncs that have been removed.
+It looks to see if there are new/changed surveys or ones that have been removed.
 """
 
 import multiprocessing
@@ -26,7 +26,6 @@ from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, Bruty
 # import locks from world_raster_database in case we are in debug mode and have turned locks off
 from nbs.bruty.world_raster_database import LockNotAcquired, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock
 # from nbs.bruty.nbs_locks import LockNotAcquired, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock
-from nbs.bruty.utils import onerr, user_quit, wait_for_processes
 from nbs.configs import get_logger, run_command_line_configs
 # , iter_configs, set_stream_logging, log_config, parse_multiple_values, make_family_of_logs
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, connect_params_from_config, connection_with_retries
