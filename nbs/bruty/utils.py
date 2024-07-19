@@ -153,13 +153,18 @@ def make_wkt(horz_epsg, vert_epsg):
     down_to_up flag will change AXIS["Depth",DOWN] to AXIS["gravity-related height",UP]
     see:  https://docs.opengeospatial.org/is/18-010r7/18-010r7.html#47
     """
-    cmd = f"gdalsrsinfo EPSG:{horz_epsg}+{vert_epsg} -o WKT1 --single-line"
-    srs_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    srs_process.wait()
-    wkt = srs_process.stdout.read().decode().strip()
-    stderr = srs_process.stderr.read().decode().strip()
+    # cmd = f"gdalsrsinfo EPSG:{horz_epsg}+{vert_epsg} -o WKT1 --single-line"
+    # srs_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # srs_process.wait()
+    # wkt_old = srs_process.stdout.read().decode().strip()
+    # stderr = srs_process.stderr.read().decode().strip()
+
+    srs = osr.SpatialReference()
+    srs.SetFromUserInput(f"EPSG:{horz_epsg}+{vert_epsg}")
+    # srs.ExportToWkt(["FORMAT=WKT2"])
+    wkt = srs.ExportToWkt(["FORMAT=WKT1"])
     if "COMPD_CS" not in wkt:
-        raise Exception("compound CRS not found: " + stderr)
+        raise Exception("compound CRS not found")
 
     return wkt
 

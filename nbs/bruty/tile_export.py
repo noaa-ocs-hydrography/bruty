@@ -79,13 +79,17 @@ if interactive_debug and sys.gettrace() is None:  # this only is set when a debu
 #   For resource efficiency the exports are broken up by hand.
 #   Does navigation then appends data to make public then appends again for internal.
 #   We could spend the time to get fancy and automate ways to build efficiently or go back to building all separately.
+# each datasets is a tuple of (datatype, for_nav)
+# NOTE:  It is assumed that public builds on navigation and internal builds on public by using set differences in the combine_and_export function
 export_definitions = {
-    PUBLIC: {REVIEWED: True, PREREVIEW: True, SENSITIVE: False, ENC: True, NOT_NAV: True,
-                 GMRT: True, "name": PUBLIC},  # public use
-    NAVIGATION: {REVIEWED: True, PREREVIEW: False, SENSITIVE: False, ENC: True, NOT_NAV: False,
-                  GMRT: True, "name": NAVIGATION},  # MCD charting use
-    INTERNAL: {REVIEWED: True, PREREVIEW: True, SENSITIVE: True, ENC: True, NOT_NAV: True,
-                GMRT: True, "name": INTERNAL},  # HSD planning use
+    PUBLIC: {'datasets': {(REVIEWED, True), (PREREVIEW, True), (ENC, True), (GMRT, True),
+                          (REVIEWED, False), (PREREVIEW, False), (ENC, False), (GMRT, False)},
+             "name": PUBLIC},  # public use
+    NAVIGATION: {'datasets': {(REVIEWED, True), (ENC, True), (GMRT, True)},
+                 "name": NAVIGATION},  # MCD charting use
+    INTERNAL: {'datasets': {(REVIEWED, True), (PREREVIEW, True), (SENSITIVE, True), (ENC, True), (GMRT, True),
+                            (REVIEWED, False), (PREREVIEW, False), (SENSITIVE, False), (ENC, False), (GMRT, False)},
+               "name": INTERNAL},  # HSD planning use
 }
 
 
@@ -351,28 +355,36 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
         current_version = BrutyExportVersion()
         done = []
         # Check all files with any export time listed in its name and see if it was made with the current Bruty algorithms
-        for exp, wanted in ((NAVIGATION, tile_info.navigation), (INTERNAL, tile_info.internal), (PUBLIC, tile_info.public)):
+        for exp, wanted, kwargs in ((NAVIGATION, tile_info.navigation, {'navigation': True}),
+                                    (PUBLIC, tile_info.public, {'public': True}),
+                                    (INTERNAL, tile_info.internal, {'internal': True})):
             success = False
             if wanted:
-                for possible_file in glob.glob(str(find_export.filename_with_type_root(exp)) + "*"):
-                    if possible_file.lower().endswith(find_export.COG_SUFFIX.lower()):
-                        try:
-                            # If this fails, we don't care - just check remaining files
-                            stored_version = BrutyExportVersion.from_gdal(possible_file)
-                        except:  # file didn't load or no bruty version info was in it
-                            pass  # keep looking
-                        else:  # the version info is in the file
-                            if current_version >= stored_version and os.path.exists(possible_file + find_export.EXTRA_RAT_SUFFIX):
-                                success = (exp, possible_file)
-                                break
+                # FIXME - instead of checking the export directory we should check all the export table records for the nav/internal/public=True (as appropriate) and see if the files match the pattern of the name (not the folder so much as nav might be used for all 3 exports)
+                # note, there should only be one tablename but for completeness we'll allow for multiples
+                for tablename, recs in zip(conn_info_exports.tablenames, get_tile_records(conn_info_exports, tile_info, select="id,data_location", combine_time=timestamp, **kwargs)):
+                    for rec_id, possible_file in recs:
+                        if os.path.exists(possible_file):
+                            try:
+                                # If this fails, we don't care - just check remaining files
+                                stored_version = BrutyExportVersion.from_gdal(possible_file)
+                            except:  # file didn't load or no bruty version info was in it
+                                pass  # keep looking
+                            else:  # the version info is in the file
+                                if current_version >= stored_version and os.path.exists(possible_file + find_export.EXTRA_RAT_SUFFIX):
+                                    success = (exp, possible_file, rec_id)
+                                    break
             else:  # not wanted
                 continue
             done.append(success)
 
         if all(done):
             LOGGER.info(f"Already exported - {timestamp} data located at:")
-            for exp, loc in done:
+            for exp, loc, exp_rec_id in done:
                 LOGGER.info(f"  {exp}  --  {loc}")
+                unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, export_definitions[exp]['datasets'])
+                # update the notes fields in case the nbs_reviewed column has changed which wouldn't change the actual data
+                update_export_record(conn_info_exports, exp_rec_id, notes=unreviewed_notes)
         else:
             # re-export in case the previous export didn't finish
             nav_export = RasterExport(export_dir, tile_info, NAVIGATION, timestamp, export_time)
@@ -394,7 +406,7 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                     except BaseLockException:
                         locks.append(False)
             if all(locks):
-                dtypes_and_for_nav = [(REVIEWED, True), (ENC, True), (GMRT, True)]
+                dtypes_and_for_nav = export_definitions[NAVIGATION]['datasets']  # [(REVIEWED, True), (ENC, True), (GMRT, True)]
                 databases = [root_dir.joinpath(tile_info.bruty_db_name(datatype, for_nav)) for datatype, for_nav in dtypes_and_for_nav]
                 base_cnt = add_databases(databases, dataset, dataset_score, comp)
 
@@ -415,8 +427,11 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                     #   or possibly the same export would apply to multiple configurations, like public and internal are the same
                     # add the not for navigation versions that were already added
                     # also add the prereview (unqualified data)
-                    add_dtypes_and_for_nav = [(REVIEWED, False), (ENC, False), (GMRT, False), (PREREVIEW, True), (PREREVIEW, False)]
-                    dtypes_and_for_nav.extend(add_dtypes_and_for_nav)
+                    add_dtypes_and_for_nav = export_definitions[PUBLIC]['datasets'] - export_definitions[NAVIGATION]['datasets']
+                    if export_definitions[NAVIGATION]['datasets'] - export_definitions[PUBLIC]['datasets']:
+                        raise ValueError("PUBLIC export must include all NAVIGATION datasets")
+                    # [(REVIEWED, False), (ENC, False), (GMRT, False), (PREREVIEW, True), (PREREVIEW, False)]
+                    dtypes_and_for_nav = export_definitions[PUBLIC]['datasets']
                     databases = [root_dir.joinpath(tile_info.bruty_db_name(datatype, for_nav)) for datatype, for_nav in add_dtypes_and_for_nav]
                     prereview_cnt = add_databases(databases, dataset, dataset_score, comp)
 
@@ -424,8 +439,6 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                         os.makedirs(public_export.extracted_filename.parent, exist_ok=True)
                         unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav)
                         if prereview_cnt == 0 and nav_export.cog_filename.exists():
-                            shutil.copyfile(nav_export.cog_filename, public_export.cog_filename)
-                            shutil.copyfile(nav_export.rat_filename, public_export.rat_filename)
                             update_export_record(conn_info_exports, navigation_id, public=True, notes=unreviewed_notes)
                             public_id = navigation_id
                         else:
@@ -436,19 +449,17 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                     if tile_info.internal:
                         os.makedirs(internal_export.extracted_filename.parent, exist_ok=True)
                         # internal is the same as public with SENSITIVE added.
-                        add_dtypes_and_for_nav = [(SENSITIVE, True), (SENSITIVE, False)]
-                        dtypes_and_for_nav.extend(add_dtypes_and_for_nav)
+                        add_dtypes_and_for_nav = export_definitions[INTERNAL]['datasets'] - export_definitions[PUBLIC]['datasets']
+                        if export_definitions[PUBLIC]['datasets'] - export_definitions[INTERNAL]['datasets']:
+                            raise ValueError("INTERNAL export must include all PUBLIC datasets")
+                        dtypes_and_for_nav = export_definitions[INTERNAL]['datasets']
                         databases = [root_dir.joinpath(tile_info.bruty_db_name(datatype, for_nav)) for datatype, for_nav in add_dtypes_and_for_nav]
                         sensitive_cnt = add_databases(databases, dataset, dataset_score, comp)
                         unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav)
                         if sensitive_cnt == 0 and prereview_cnt == 0 and nav_export.cog_filename.exists():
-                            shutil.copyfile(nav_export.cog_filename, internal_export.cog_filename)
-                            shutil.copyfile(nav_export.rat_filename, internal_export.rat_filename)
                             update_export_record(conn_info_exports, navigation_id, internal=True, notes=unreviewed_notes)
                             internal_id = navigation_id
                         elif sensitive_cnt == 0 and public_export.cog_filename.exists():
-                            shutil.copyfile(public_export.cog_filename, internal_export.cog_filename)
-                            shutil.copyfile(public_export.rat_filename, internal_export.rat_filename)
                             update_export_record(conn_info_exports, public_id, internal=True, notes=unreviewed_notes)
                             internal_id = public_id
                         else:
@@ -1239,6 +1250,66 @@ def complete_export_sequential(export, all_simple_records, closing_dist, epsg, d
     # remove the score and extracted files
     export.cleanup_tempfiles(allow_permission_fail=True)
 
+def get_tile_records(conn_info: ConnectionInfo, tile_info, select="id", **kwargs):
+    """ Return a list of the record values for the given tile_info and kwargs.  Returns a list for each tablename in conn_info.tablenames.
+
+    Parameters
+    ----------
+    conn_info
+        user, password, database, port for the postgres connection and tablenames to query from.
+    tile_info
+        Uses the tile, utm, hemi, datum, pb (product_branch), locality, res for the query.
+    select
+        String of columns to retrieve.  Ex: "id" or "id, data_location"
+    kwargs
+        keys and values to use in the sql statement.  All use "equals" for the comparison.
+    Returns
+    -------
+    list of lists
+    """
+    connection, cursor = connection_with_retries(conn_info)
+    rids = []
+    for tablename in conn_info.tablenames:
+        record = [tile_info.tile, tile_info.utm, tile_info.hemi.upper(), tile_info.datum, tile_info.pb, tile_info.locality, tile_info.res, tile_info.closing]
+        query = f"""select {select} FROM {tablename} WHERE tile=%s AND utm=%s AND hemisphere=%s AND datum=%s AND production_branch=%s AND locality=%s AND resolution=%s AND closing_dist=%s"""
+        for key, val in kwargs.items():
+            query += f" AND {key}=%s"
+            record.append(val)
+        cursor.execute(query, record)
+        try:
+            rid = cursor.fetchall()
+        except (TypeError, IndexError):
+            rid = None
+        rids.append(rid)
+    return rids
+
+def fill_xbox_closing_dist(conn_info: ConnectionInfo):
+    """ Fill any empth closing_dist values with the value parsed from the filename.
+    This was helpful since the closing dist was not originally in the table but only encoded in the filename
+
+    Parameters
+    ----------
+    conn_info
+        ConnectionInfo object with the database connection information and tablenames to query from.
+
+    Returns
+    -------
+    None
+
+    """
+    connection, cursor = connection_with_retries(conn_info)
+    for tablename in conn_info.tablenames:
+        query = f"""select id,data_location FROM {tablename} WHERE closing_dist IS NULL"""
+        cursor.execute(query)
+        rids = cursor.fetchall()
+        for rid, pth in rids:
+            v = re.search(r"\dm_(Navigation|Internal|Public)_\d{8}_\d{6}_(?P<close>\d+)m", pth)
+            if v:
+                cursor.execute(f"UPDATE {tablename} SET closing_dist=%s WHERE id=%s", (int(v.group("close")), rid))
+            else:
+                print('failed', pth)
+    connection.commit()
+    connection.close()
 
 def update_export_record(conn_info: ConnectionInfo, row_id: int, **to_update):
     if conn_info.database is not None:
@@ -1270,11 +1341,11 @@ def write_export_record(conn_info: ConnectionInfo, export: RasterExport, interna
             raise BrutyError(f"Could not find {spec_table} record for {pri_key}")
         # @TODO this should be a dictionary but there is no clear syntax for writing dicts directly.
         #   make or find a wrapper which is like: con.execute(insert into table (dict.keys()) values (dict.values()))
-        record = [ti.tile, ti.utm, ti.hemi.upper(), ti.datum, ti.pb, ti.locality, ti.res,
+        record = [ti.tile, ti.utm, ti.hemi.upper(), ti.datum, ti.pb, ti.locality, ti.res, ti.closing,
                   str(export.cog_filename), str(export.rat_filename), export.data_time, export.export_time,
                   geometry, internal, navigation, public, notes]
         q_str = ", ".join(["%s"] * len(record))
-        cursor.execute(f"""INSERT INTO xbox (tile, utm, hemisphere, datum, production_branch, locality, resolution, 
+        cursor.execute(f"""INSERT INTO xbox (tile, utm, hemisphere, datum, production_branch, locality, resolution, closing_dist, 
             data_location, data_aux_location, combine_time, export_time, 
             geometry, internal, navigation, public, notes) VALUES ({q_str}) RETURNING id""", record)
 
