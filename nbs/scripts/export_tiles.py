@@ -199,7 +199,7 @@ def main(config):
     decimals = config.getint('decimals', None)
     minimized = config.getboolean('MINIMIZED', False)
     use_cached_meta = config.getboolean('USE_CACHED_METADATA', False)
-    use_cached_enc_meta = config.getboolean('USE_CACHED_ENC_METADATA', True)
+    use_cached_enc_meta = config.getboolean('USE_CACHED_ENC_METADATA', False)
     conn_info = connect_params_from_config(config)
     # conn_info.database = 'metadata'
     tile_list = list(iterate_tiles_table(config))
