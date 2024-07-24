@@ -1,5 +1,6 @@
 import argparse
 import os
+from stat import S_IREAD, S_IRGRP, S_IROTH
 import time
 import datetime
 import tempfile
@@ -299,6 +300,24 @@ def make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav):
     return unreviewed_notes
 
 
+def make_read_only(fname):
+    """ Change the read only attribute of a file and ignore any errors
+
+    Parameters
+    ----------
+    fname
+        str or pathlib.Path to file
+
+    Returns
+    -------
+    None
+    """
+    try:
+        os.chmod(fname, S_IREAD | S_IRGRP | S_IROTH)
+    except Exception:
+        pass
+
+
 def combine_and_export(config, tile_info, all_simple_records, comp, export_time="", decimals=None):
     conn_info = connect_params_from_config(config)
     conn_info_exports = connect_params_from_config(config)
@@ -439,6 +458,8 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                         os.makedirs(public_export.extracted_filename.parent, exist_ok=True)
                         unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav)
                         if prereview_cnt == 0 and nav_export.cog_filename.exists():
+                            os.link(nav_export.cog_filename, public_export.cog_filename)
+                            os.link(nav_export.rat_filename, public_export.rat_filename)
                             update_export_record(conn_info_exports, navigation_id, public=True, notes=unreviewed_notes)
                             public_id = navigation_id
                         else:
@@ -457,9 +478,13 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                         sensitive_cnt = add_databases(databases, dataset, dataset_score, comp)
                         unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav)
                         if sensitive_cnt == 0 and prereview_cnt == 0 and nav_export.cog_filename.exists():
+                            os.link(nav_export.cog_filename, internal_export.cog_filename)
+                            os.link(nav_export.rat_filename, internal_export.rat_filename)
                             update_export_record(conn_info_exports, navigation_id, internal=True, notes=unreviewed_notes)
                             internal_id = navigation_id
                         elif sensitive_cnt == 0 and public_export.cog_filename.exists():
+                            os.link(public_export.cog_filename, internal_export.cog_filename)
+                            os.link(public_export.rat_filename, internal_export.rat_filename)
                             update_export_record(conn_info_exports, public_id, internal=True, notes=unreviewed_notes)
                             internal_id = public_id
                         else:
@@ -472,7 +497,9 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                         exp.cleanup_tempfiles(allow_permission_fail=True)
             else:
                 ret_code = TILE_LOCKED
-        del dataset, dataset_score  # release the file handle for the score file
+            del dataset, dataset_score  # release the file handle for the score file
+            for fname in (nav_export.cog_filename, internal_export.cog_filename,public_export.cog_filename):
+                make_read_only(fname)
         remove_file(cache_file, allow_permission_fail=True, limit=4, tdelay=15)
         remove_file(cache_file.replace(".tif", ".score.tif"), allow_permission_fail=True, limit=4, tdelay=15)
     return ret_code

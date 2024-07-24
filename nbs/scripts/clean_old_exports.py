@@ -1,6 +1,7 @@
 import os
 import argparse
 import pathlib
+import shutil
 
 from nbs.bruty.nbs_postgres import id_to_scoring, get_nbs_records, nbs_survey_sort, ConnectionInfo, connect_params_from_config, make_contributor_csv
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, NOT_NAV, INTERNAL, NAVIGATION, PUBLIC, connect_params_from_config, connection_with_retries
@@ -19,10 +20,62 @@ keeps = {}
 deletes = {}
 retain = config_file['DEFAULT'].getint('retain', 2)
 
+def cmppath(pth):
+    pathobj = pathlib.Path(pth)
+    return os.path.join(pathobj.parent.parent.name, pathobj.parent.name, pathobj.name).lower()
+
+def move_orphans(in_dir, out_dir, dry_run=True):
+    # FIXME - This will move the hardlinks that are now being created by the export script
+    """ FIXME - This will move the hardlinks that are now being created by the export script
+
+    Find files that are not referenced in the xbox table and move them to a new location.
+    The out_dir will replace the in_dir so that the rest of the directory structure is preserved.
+    All directories will be created as needed.
+
+    Ex: move_orphans(r'W:\bruty_tile_exports', r'W:\bruty_tile_exports_orphans', dry_run=True)
+
+    Parameters
+    ----------
+    in_dir
+        Directory to search for orphan files
+    out_dir
+        Directory to move orphan files to
+    dry_run
+        If True, only print the files that would be moved
+
+    Returns
+    -------
+    None
+    """
+    disk_files = [str(pth) for pth in pathlib.Path(in_dir).rglob('*') if pth.is_file()]
+
+    db_paths = set()
+    for rec in recs:
+        for pth in (rec['data_location'], rec['data_aux_location']):
+            recdir = pathlib.Path(pth)
+            rel_path = cmppath(recdir)
+            db_paths.add(rel_path)
+
+    for disk_file in disk_files:
+        rel_path = cmppath(disk_file)
+        if rel_path not in db_paths:
+            print(f"Orphan file: {disk_file}")
+            new_path = disk_file.replace(in_dir, out_dir)
+            if dry_run:
+                print(f"    Would move to {new_path}")
+            else:
+                print(f"    Moving to {new_path}")
+                os.makedirs(pathlib.Path(new_path).parent, exist_ok=True)
+                shutil.move(disk_file, new_path)
+        else:
+            print(f"File in database: {disk_file}")
+
+
 def make_key(r):
     return tuple(r[k] for k in ('production_branch', 'utm', 'hemisphere', 'tile', 'datum', 'resolution'))
 
-
+# TODO - The export was making files that were not captured in the xbox table.
+#  We should look at the ouptut directories to remove files not referenced in the xbox table
 def main(dryrun=True):
     # We'll keep all the row records in groups.  Each distinct export category should keep it's own files on disk
     # First we'll gather all exported files into dictionaries of lists that specify all the exports that exist for a utm zone/product branch/datum/res/tile
