@@ -458,8 +458,11 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                         os.makedirs(public_export.extracted_filename.parent, exist_ok=True)
                         unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav)
                         if prereview_cnt == 0 and nav_export.cog_filename.exists():
-                            os.link(nav_export.cog_filename, public_export.cog_filename)
-                            os.link(nav_export.rat_filename, public_export.rat_filename)
+                            try:
+                                os.symlink(nav_export.cog_filename, public_export.cog_filename)
+                                os.symlink(nav_export.rat_filename, public_export.rat_filename)
+                            except OSError:
+                                LOGGER.warning("Symlinks failed, only the Navigation file will exist, public will not")
                             update_export_record(conn_info_exports, navigation_id, public=True, notes=unreviewed_notes)
                             public_id = navigation_id
                         else:
@@ -478,13 +481,19 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                         sensitive_cnt = add_databases(databases, dataset, dataset_score, comp)
                         unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav)
                         if sensitive_cnt == 0 and prereview_cnt == 0 and nav_export.cog_filename.exists():
-                            os.link(nav_export.cog_filename, internal_export.cog_filename)
-                            os.link(nav_export.rat_filename, internal_export.rat_filename)
+                            try:
+                                os.symlink(nav_export.cog_filename, internal_export.cog_filename)
+                                os.symlink(nav_export.rat_filename, internal_export.rat_filename)
+                            except OSError:
+                                LOGGER.warning("Symlinks failed, only the Navigation file will exist, internal will not")
                             update_export_record(conn_info_exports, navigation_id, internal=True, notes=unreviewed_notes)
                             internal_id = navigation_id
                         elif sensitive_cnt == 0 and public_export.cog_filename.exists():
-                            os.link(public_export.cog_filename, internal_export.cog_filename)
-                            os.link(public_export.rat_filename, internal_export.rat_filename)
+                            try:
+                                os.symlink(public_export.cog_filename, internal_export.cog_filename)
+                                os.symlink(public_export.rat_filename, internal_export.rat_filename)
+                            except OSError:
+                                LOGGER.warning("Symlinks failed, only the public file will exist, internal will not")
                             update_export_record(conn_info_exports, public_id, internal=True, notes=unreviewed_notes)
                             internal_id = public_id
                         else:

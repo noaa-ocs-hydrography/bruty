@@ -18,7 +18,7 @@ connection, cursor = connection_with_retries(conn_info)
 export_types = ['internal', 'navigation', 'public']
 keeps = {}
 deletes = {}
-retain = config_file['DEFAULT'].getint('retain', 2)
+retain = config_file['DEFAULT'].getint('retain', 4)
 
 def cmppath(pth):
     pathobj = pathlib.Path(pth)
