@@ -6,7 +6,7 @@
       <actionScope id="Feature"/>
       <actionScope id="Canvas"/>
     </actionsetting>
-    <actionsetting notificationMessage="" shortTitle="Approve XBox Tile" id="{5b3f83c1-8d92-4311-990e-98260bed5132}" name="Approve XBox Tile" icon="" capture="0" type="1" action="from qgis.utils import iface&#xd;&#xa;layer = QgsProject().instance().mapLayer(&quot;[%@layer_id%]&quot;)&#xd;&#xa;field = layer.fields().lookupField(&quot;approved&quot;)&#xd;&#xa;with edit(layer):&#xd;&#xa;    current = layer.getFeature([%$id%]).attribute(0)&#xd;&#xa;    if current:&#xd;&#xa;        layer.changeAttributeValue([%$id%], field, &quot;N&quot;)&#xd;&#xa;    else:&#xd;&#xa;        layer.changeAttributeValue([%$id%], field, &quot;Y&quot;)&#xd;&#xa;    iface.messageBar().pushInfo(&quot;[%tile%]&quot;,&quot; Approved&quot;)" isEnabledOnlyWhenEditable="0">
+    <actionsetting notificationMessage="" shortTitle="Approve XBox Tile" id="{5b3f83c1-8d92-4311-990e-98260bed5132}" name="Approve XBox Tile" icon="" capture="0" type="1" action="from qgis.utils import iface&#xd;&#xa;layer = QgsProject().instance().mapLayer(&quot;[%@layer_id%]&quot;)&#xd;&#xa;field = layer.fields().lookupField(&quot;approved&quot;)&#xd;&#xa;with edit(layer):&#xd;&#xa;    current = layer.getFeature([%$id%]).attribute(field)&#xd;&#xa;    layer.changeAttributeValue([%$id%], field, not current)&#xd;&#xa;    iface.messageBar().pushInfo(&quot;[%tile%]&quot;,&quot; Approved&quot;)" isEnabledOnlyWhenEditable="0">
       <actionScope id="Feature"/>
       <actionScope id="Canvas"/>
     </actionsetting>
