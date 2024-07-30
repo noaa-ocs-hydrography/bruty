@@ -399,6 +399,7 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
 
         if all(done):
             LOGGER.info(f"Already exported - {timestamp} data located at:")
+            del dataset, dataset_score  # release the file handle for the score file
             for exp, loc, exp_rec_id in done:
                 LOGGER.info(f"  {exp}  --  {loc}")
                 unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, export_definitions[exp]['datasets'])
