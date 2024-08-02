@@ -307,10 +307,14 @@ def show_last_ids(cursor, tablenames):
                 WHERE column_name='{NBS_ID_STR}';""")
         ret = cursor.fetchone()
         if ret is not None:
-            last_id = last_nbs_id(tablename, cursor)
+            try:
+                last_id = last_nbs_id(tablename, cursor)
+            except Exception:
+                print('failed to read for last id', tablename)
             # cursor.execute(f"""SELECT nbs_id FROM {tablename}""")
             # last_id = cursor.fetchone()
-            print(tablename, last_id)
+            else:
+                print(tablename, last_id)
         else:
             print(tablename, "doesn't have nbs_id")
 
