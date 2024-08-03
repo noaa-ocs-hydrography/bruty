@@ -178,8 +178,9 @@ def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=
             if delete_existing:
                 db.clear_all()
             else:
-                db.transaction_groups.set_modified(trans_id)
-                db.clean(removals, compare_callback=comp, transaction_id=trans_id, subprocesses=subprocesses)
+                modified = db.clean(removals, compare_callback=comp, transaction_id=trans_id, subprocesses=subprocesses)
+                if modified:
+                    db.transaction_groups.set_modified(trans_id)
         db.transaction_groups.set_finished(trans_id)
 
 

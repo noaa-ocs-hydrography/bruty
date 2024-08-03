@@ -2606,8 +2606,9 @@ class WorldDatabase(VABC):
 
         Returns
         -------
-        dict
-            keys are survey ids affected, values are sets of the tiles affected for that survey
+        [tiles, surveys_affected]
+            tiles -- list of tiles, if the list is empty then bruty database was not modified
+            surveys_affected -- a dict where the keys are survey ids affected, values are sets of the tiles affected for that survey
         """
         # 1) Find all the tiles the ID falls in and make a master list of tile numbers (this is in master metadata record?)
         # 1a) Lock all the tiles for write access
@@ -2702,7 +2703,7 @@ class WorldDatabase(VABC):
                 # self.to_file(locked_file=metadata_file)
 
         self.db.LOGGER.debug(f"removing contributor {contributor} will affect {len(contributor_tiles)} contributors: {contributor_tiles}")
-        return not tile_list, contributor_tiles
+        return tile_list, contributor_tiles
 
     def reinsert_from_sqlite(self, comp_callback=None):
         """ Use the metadata to try and reinsert contributors from disk.
