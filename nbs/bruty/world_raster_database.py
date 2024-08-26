@@ -2891,6 +2891,41 @@ class WorldDatabase(VABC):
                 f"some removal were locked, make sure all bruty combines are closed and lock server is restarted {unfinished_removals}")
         return modified_data
 
+    def repair_subtiles(self, tx_ty, compare_callback=None, transaction_id=-1):
+        """ This function will delete all the history for a list of subtiles (the respective metadata.json and the _000xx_.tif files)
+        and rebuild those subtiles from scratch.
+
+        NOTE This only works in a NO_LOCK situation and does not use multiprocess
+
+        Parameters
+        ----------
+        tx_ty
+            list of tx, ty pairs to rebuild
+        compare_callback
+
+        Returns
+        -------
+
+        """
+        affected_contributors = {}
+        # Loop the inserted surveys and find all the ones that belong in the subtiles that are being rebuilt
+        # We can't trust the subtile itself in case the error is that some contributors were missing from the subtiles
+        # We also can't read the _000xx_.tif files in case they were corrupt.
+        # These are the two main cases we are using this function
+        for tx, ty in tx_ty:
+            tile_history = self.db.get_tile_history_by_index(tx, ty, no_create=True)
+            if tile_history is not None:
+                del tile_history[0:]
+            for contrib in self.included_ids.keys():
+                if (tx, ty) in self.included_ids[contrib].tiles:
+                    affected_contributors.setdefault(contrib, set()).add((tx, ty))
+        # Add the consolidated list of subtiles to work on with their contributors to the reinsert list
+        self.add_reinserts(affected_contributors)
+        # @TODO add+test multiprocessing capability like remove_and_recompute has
+        if len(self.reinserts.unfinished_records()) > 0:
+            self.reinsert_from_sqlite(comp_callback=compare_callback)
+
+
     def revise_survey(self, survey_id, path_to_survey_file):
         # we are not going to trust that the data was only edited for height/depth but that the scoring may have been adjusted too
         # so this becomes a simple two step process.

@@ -22,6 +22,8 @@ def main(config):
     """
     errors = {}
     debug_config = config.getboolean('DEBUG', False)
+    repair = config.getboolean('REPAIR', False)
+
     if debug_config:
         user_res = [float(dt.strip()) for dt in parse_multiple_values(config['res'])]
     else:
@@ -91,14 +93,18 @@ def main(config):
                                 tile_missing, tile_extra, contributor_missing = db.validate()
                                 if not tile_missing and not tile_extra and not contributor_missing:
                                     LOGGER.info("consistency checks ok")
-                                if contributor_missing:
-                                    # create a reinsert list for the missing contributors
-                                    affected_contributors = {}
-                                    for tile, contribs in contributor_missing.items():
-                                        for contrib in contribs:
-                                            affected_contributors.setdefault(contrib, []).append(tile)
-                                    db.add_reinserts(affected_contributors)
-                                    LOGGER.info("Added reinsert instructions to metadata.sqlite")
+                                else:
+                                    if contributor_missing:
+                                        # create a reinsert list for the missing contributors
+                                        affected_contributors = {}
+                                        for tile, contribs in contributor_missing.items():
+                                            for contrib in contribs:
+                                                affected_contributors.setdefault(contrib, []).append(tile)
+                                        db.add_reinserts(affected_contributors)
+                                        LOGGER.info("Added reinsert instructions to metadata.sqlite")
+                                    elif tile_missing or tile_extra:
+                                        repairs = set(tile_missing).union(tile_extra)
+                                        db.repair_subtiles(repairs)
                                 LOGGER.info("*** Finished checks")
 
                                 if reinserts_remain or tile_missing or tile_extra or contributor_missing or last_insert_unfinished:
