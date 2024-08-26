@@ -607,6 +607,7 @@ def nbs_sort_values(id_to_score, new_contrib, new_elev, accum_contrib, accum_ele
     existing_alphabetical = accum_contrib.copy()
     # for each unique contributor fill with the associated decay/resolution score and the alphabetical score
     for contrib in unique_contributors:
+        # TODO add functions for converting the contributor to a float and back
         int_contrib = numpy.frombuffer(numpy.array(contrib, dtype=numpy.float32).tobytes(), dtype=numpy.int32)[0]
         try:
             existing_decay_and_res[accum_contrib == contrib] = id_to_score[int_contrib][0]

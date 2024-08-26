@@ -853,20 +853,20 @@ class WorldTilesBackend(VABC):
 
 
 class LatLonBackend(WorldTilesBackend):
-    def __init__(self, history_class, storage_class, data_class, data_path, zoom_level=13, epsg=None):
+    def __init__(self, history_class, storage_class, data_class, data_path, zoom_level=13, epsg=None, log_level=logging.INFO):
         tile_scheme = LatLonTiles(zoom=zoom_level, epsg=epsg)
-        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
+        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path, log_level=log_level)
 
 
 class GoogleLatLonTileBackend(WorldTilesBackend):
     # https://gist.githubusercontent.com/maptiler/fddb5ce33ba995d5523de9afdf8ef118/raw/d7565390d2480bfed3c439df5826f1d9e4b41761/globalmaptiles.py
     def __init__(self, history_class, storage_class, data_class, data_path, zoom_level=13, log_level=logging.INFO):
         tile_scheme = GoogleTilesLatLon(zoom=zoom_level)
-        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path)
+        super().__init__(tile_scheme, history_class, storage_class, data_class, data_path, log_level=log_level)
 
 
 class UTMTileBackend(WorldTilesBackend):
-    def __init__(self, utm_epsg, history_class, storage_class, data_class, data_path, zoom_level=13):
+    def __init__(self, utm_epsg, history_class, storage_class, data_class, data_path, zoom_level=13, log_level=logging.INFO):
         tile_scheme = UTMTiles(zoom=zoom_level, epsg=utm_epsg)
         super().__init__(tile_scheme, history_class, storage_class, data_class, data_path, log_level=log_level)
 
@@ -2754,6 +2754,7 @@ class WorldDatabase(VABC):
                 reverse_z = included_rec.reverse_z
                 dformat = included_rec.dformat
                 trans_id = included_rec.transaction_id
+                score = included_rec.survey_score
 
                 try:
                     lock = FileLock(fname)  # this doesn't work with the file lock - just the multiprocessing locks
@@ -2761,7 +2762,7 @@ class WorldDatabase(VABC):
                         rec = self.reinserts[oid]
                         if not rec.finished:  # still in the database, did another process remove it?
                             self.reinserts.set_started(oid)
-                            self.insert_survey(fname, contrib_id=rec.nbs_id, compare_callback=comp_callback, override_epsg=override_epsg,
+                            self.insert_survey(fname, survey_score=score, contrib_id=rec.nbs_id, compare_callback=comp_callback, override_epsg=override_epsg,
                                                reverse_z=reverse_z,
                                                limit_to_tiles=rec.tiles, force=True, dformat=dformat, transaction_id=trans_id)
                             self.reinserts.set_finished(oid)
