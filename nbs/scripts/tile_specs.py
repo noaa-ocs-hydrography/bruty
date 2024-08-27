@@ -2,6 +2,7 @@ import os
 import pathlib
 from dataclasses import dataclass
 import logging
+import re
 
 import numpy
 from osgeo import ogr
@@ -253,9 +254,19 @@ def iterate_tiles_table(config):
     # grab them all at run time so that if records are changed during the run we at least know all the geometries should have been from the run time
     all_records = []
     for branch, utms in branch_utms.items():
-        for utm in utms:
-            fields, records = get_nbs_records(f"combine_spec_{branch}_{utm}", conn_info, geom_name='geometry', order='ORDER BY tile ASC')
-            all_records.extend(records)
+        if production_branches and branch not in production_branches:
+            continue
+        else:
+            for utm in utms:
+                wants_recs = True
+                # get records is a slow operation so don't call it unless we need it or aren't sure
+                if zones:
+                    utmzone= int(re.search(r"\d+", utm).group())
+                    if utmzone not in zones:
+                        wants_recs = False
+                if wants_recs:
+                    fields, records = get_nbs_records(f"combine_spec_{branch}_{utm}", conn_info, geom_name='geometry', order='ORDER BY tile ASC')
+                    all_records.extend(records)
     for review_tile in all_records:
         info = TileInfo(**review_tile)
         # determine if this tile should be processed
