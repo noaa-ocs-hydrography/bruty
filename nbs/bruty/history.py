@@ -166,6 +166,16 @@ class DiskHistory(History):
         """
         json.dump(meta, open(self.metadata_filename, "w"))
 
+    def clear_data(self):
+        meta = self.get_metadata()
+        meta['contributors'] = {}
+        self.set_metadata(meta)
+        fnames = self.data_files()
+        for fname in fnames:
+            fullname = self.data_path.joinpath(fname)
+            remove_file(fullname, allow_permission_fail=False, raise_on_fail=True)
+            remove_file(self.data_class.build_metapath(fullname), allow_permission_fail=False, raise_on_fail=True)
+
     def __getitem__(self, key):
         if isinstance(key, (list, tuple)):
             return [self.__getitem__(index) for index in key]
@@ -406,7 +416,8 @@ class RasterHistory(History):
                         pass  # user did not have set contributor data for rasters in the history
             self.set_metadata(full_meta)
 
-
+    def clear_data(self):
+        self.history.clear_data()
 
     def __len__(self):
         return len(self.history)

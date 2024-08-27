@@ -767,7 +767,7 @@ class WorldTilesBackend(VABC):
             if history.min_x is None:  # "min_x" not in history.get_metadata():
                 lx, ly, ux, uy = self.tile_scheme.tile_index_to_xy(tx, ty)
                 history.set_corners(lx, ly, ux, uy)
-            # @ todo remove this after rebuild/check of existing PBG14,15,16 data
+            # @todo remove this after rebuild/check of existing PBG14,15,16 data
             if "epsg" not in history.get_metadata():
                 history.set_epsg(self.epsg)
         return history
@@ -2915,11 +2915,14 @@ class WorldDatabase(VABC):
         for tx, ty in tx_ty:
             tile_history = self.db.get_tile_history_by_index(tx, ty, no_create=True)
             if tile_history is not None:
-                del tile_history[0:]
-            for contrib in self.included_ids.keys():
-                if (tx, ty) in self.included_ids[contrib].tiles:
-                    affected_contributors.setdefault(contrib, set()).add((tx, ty))
+                tile_history.clear_data()
+        set_tx_ty = set(tx_ty)
+        for contrib in self.included_ids.keys():
+            subtiles = set_tx_ty.intersection(self.included_ids[contrib].tiles)
+            if subtiles:
+                affected_contributors[contrib] = subtiles
         # Add the consolidated list of subtiles to work on with their contributors to the reinsert list
+        # @TODO should we change the journal mode for speed based on McAffee?  cur.execute('pragma journal_mode=DELETE') or WAL or MEMORY etc
         self.add_reinserts(affected_contributors)
         # @TODO add+test multiprocessing capability like remove_and_recompute has
         if len(self.reinserts.unfinished_records()) > 0:

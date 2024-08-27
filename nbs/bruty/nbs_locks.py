@@ -732,3 +732,11 @@ else:
         def release(self):
             """Releases the currently locked file handle"""
             self.cursor.execute(self.release_func)
+
+        def __enter__(self):
+            # this is called when a Lock is used in a 'with' statement
+            return self.acquire()
+
+        def __exit__(self, *args):
+            # this is called when a Lock is used in a 'with' statement
+            self.release()

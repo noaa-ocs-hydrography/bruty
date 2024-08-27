@@ -5,10 +5,13 @@ import logging
 import io
 import traceback
 
-from nbs.bruty.world_raster_database import WorldDatabase
+from nbs.bruty import world_raster_database
+from nbs.bruty.world_raster_database import WorldDatabase, AdvisoryLock, EXCLUSIVE, NON_BLOCKING, BaseLockException
+from nbs.bruty.nbs_postgres import NOT_NAV
 from nbs.configs import get_logger, run_command_line_configs, parse_multiple_values
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, connect_params_from_config
 from nbs.scripts.tile_specs import iterate_tiles_table, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS
+from nbs.scripts.combine import get_postgres_processing_info
 
 LOGGER = get_logger('nbs.bruty.validate')
 CONFIG_SECTION = 'insert'
@@ -23,6 +26,7 @@ def main(config):
     errors = {}
     debug_config = config.getboolean('DEBUG', False)
     repair = config.getboolean('REPAIR', False)
+    conn_info = connect_params_from_config(config)
 
     if debug_config:
         user_res = [float(dt.strip()) for dt in parse_multiple_values(config['res'])]
@@ -94,17 +98,28 @@ def main(config):
                                 if not tile_missing and not tile_extra and not contributor_missing:
                                     LOGGER.info("consistency checks ok")
                                 else:
-                                    if contributor_missing:
-                                        # create a reinsert list for the missing contributors
-                                        affected_contributors = {}
-                                        for tile, contribs in contributor_missing.items():
-                                            for contrib in contribs:
-                                                affected_contributors.setdefault(contrib, []).append(tile)
-                                        db.add_reinserts(affected_contributors)
-                                        LOGGER.info("Added reinsert instructions to metadata.sqlite")
-                                    elif tile_missing or tile_extra:
-                                        repairs = set(tile_missing).union(tile_extra)
-                                        db.repair_subtiles(repairs)
+                                    # replace the whole thing or call re-insert?
+                                    if True:
+                                        tx_ty = set(contributor_missing.keys())
+                                        tx_ty.update(tile_missing.keys())
+                                        tx_ty.update(tile_extra.keys())
+                                        ret = SUCCEEDED
+                                        if world_raster_database.NO_LOCK:  # NO_LOCK means that we are not allowing multiple processes to work on one Tile/database at the same time - so use an advisory lock on the whole thine
+                                            p = pathlib.Path(db_path)
+                                            lck = AdvisoryLock(p.name, conn_info, EXCLUSIVE | NON_BLOCKING)
+                                            try:
+                                                lck.acquire()
+                                            except BaseLockException:
+                                                ret = TILE_LOCKED
+                                        if ret == SUCCEEDED:
+                                            conn_info.tablenames = [tile_info.metadata_table_name(dtype)]
+                                            sorted_recs, names_list, sort_dict, comp, tx_meta = get_postgres_processing_info(db_path,
+                                                                                                                             conn_info,
+                                                                                                                             for_navigation_flag=(True, nav_flag_value))
+                                            db.repair_subtiles(tx_ty, compare_callback=comp)
+                                            LOGGER.info(f"Removed existing subtiles and added reinsert instructions to metadata.sqlite\n{tx_ty}")
+                                            if world_raster_database.NO_LOCK:
+                                                lck.release()
                                 LOGGER.info("*** Finished checks")
 
                                 if reinserts_remain or tile_missing or tile_extra or contributor_missing or last_insert_unfinished:
