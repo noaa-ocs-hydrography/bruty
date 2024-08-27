@@ -98,7 +98,7 @@ res.script_to_filename
 res.from_filename
 """
 
-"""
+r"""
 to convert blob from sqlite after copying value from sqlite browser in the edite cell area
 # sample string from sqlite browser gui
 a = '''024dfd0186944d3e024dfd0186944d34
@@ -118,7 +118,32 @@ returns:
  (574, 509),
  (564, 508),
  ...
- 
+
+Example of reading the database from interactive prompt
+
+>>> from nbs.bruty import world_raster_database
+>>> wdb = world_raster_database.WorldDatabase.open(r"D:\debug\combines\BAD_subtile_missing_survey_PBB_Southeast_utm17n_MLLW_Tile89_res16_qualified")
+>>> wdb.included_ids[171008622].tiles
+[(519, 425), (520, 425), (521, 425), (522, 425), (523, 425)]
+
+>>> print(wdb.included_ids[171008622])
+nbs_id: 171008622
+survey_path: \\nos.noaa\OCS\HSD\Projects\NBS\NBS_Data_Qualified\PBB_Southeast_UTM17N_MLLW\NOAA_NCEI_OCS\BPS\Processed\H10656\H10656.bruty.npz
+tiles: [(519, 425), (520, 425), (521, 425), (522, 425), (523, 425)]
+sorting_metadata: (33.849445, 1.0)
+epsg: -1
+reverse_z: False
+survey_score: 100.0
+flag: 0
+dformat: [('x', 'f8'), ('y', 'f8'), ('depth', 'f8'), ('uncertainty', 'f8')]
+mtime: 1658440779.8342113
+transaction_id: 20
+
+a = [x for x in wdb.reinserts.values() if x.nbs_id == 171008622]
+
+for x in wdb.removed_ids.values():
+    if x.nbs_id == 171004235:
+        print(x)
 """
 def use_locks(port):
     global LockNotAcquired, BaseLockException, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, NO_LOCK, current_address, Lock, AdvisoryLock
@@ -181,6 +206,9 @@ def make_data_class(fields):
                 except IndexError as e:
                     raise AttributeError(str(e))
                 return val
+
+        def __repr__(self):
+            return "\n".join([f"{k}: {self._data[i]}" for k, i in self._name_to_index.items()])
 
         def __setattr__(self, key, value):
             # translate self.whatever to self['whatever'], if it's not already an attribute (like self.data needs to be)
