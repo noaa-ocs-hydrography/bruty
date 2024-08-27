@@ -51,7 +51,7 @@ def find_surveys_to_update(db, sort_dict, names_list):
     invalid_surveys = []
     unfinished_surveys = []
     out_of_sync_surveys = []
-    metadata_mismatch = []
+    metadata_mismatch = set()
     new_surveys = []
     id_to_path = {itm.sid: itm.data_path for itm in names_list}
     # Find any surveys that are listed in the included table but not in the started table.
@@ -73,7 +73,7 @@ def find_surveys_to_update(db, sort_dict, names_list):
                 db.db.LOGGER.debug(f"found {sid} in the bruty data but path changed in database - will remove")
                 db.db.LOGGER.debug(f"\t{raw_pth} vs {db.started_ids[sid].survey_path}")
                 # Track the partial inserts by listing that it is started - and when it crashes it will not be in included_ids
-                invalid_surveys.append(sid)
+                metadata_mismatch.add(sid)
         if sid not in db.included_ids:
             db.db.LOGGER.debug(f"found {sid} in the bruty data but was not finished - consider removal (is another process adding it now?)")
             unfinished_surveys.append(sid)
@@ -97,7 +97,7 @@ def find_surveys_to_update(db, sort_dict, names_list):
         try:
             rec = db.included_ids[survey.sid]
             if not rec.sorting_metadata == (survey.decay, survey.resolution):
-                metadata_mismatch.append(survey.sid)
+                metadata_mismatch.add(survey.sid)
         except KeyError:
             new_surveys.append(survey.sid)  # survey not added yet
     return invalid_surveys, unfinished_surveys, out_of_sync_surveys, metadata_mismatch, new_surveys

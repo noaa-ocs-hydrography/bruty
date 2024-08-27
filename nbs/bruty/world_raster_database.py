@@ -1122,11 +1122,12 @@ class WorldDatabase(VABC):
             per_tile_contributors[(tx, ty)] = expected
         # check each survey in the included list against the tiles that are listed to make sure they not are missing
         if not isinstance(log, bool):
-            message = log
+            good_message = bad_message = log
         elif log:
-            message = self.db.LOGGER.warning
+            bad_message = self.db.LOGGER.warning
+            good_message = self.db.LOGGER.info
         else:
-            message = print
+            good_message = bad_message = print
         for contrib in tqdm(self.included_ids.keys(), desc='Surveys', mininterval=.7, leave=False):
             for tx, ty in self.included_ids[contrib].tiles:
                 try:
@@ -1137,21 +1138,21 @@ class WorldDatabase(VABC):
                     if not self.area_of_interest:  # if area of interest there are still some tiles being listed that are not in the AOI
                         raise e
         if tile_missing:
-            message("The following contributors are listed in the tile's metadata but don't have a delta in the commit history"
+            bad_message("The following contributors are listed in the tile's metadata but don't have a delta in the commit history"
                   "So they were added but and are in metadata.json but have no _00000_.tif data in the directory")
             for tile_xy, missing in tile_missing.items():
-                message(f"Tile {tile_xy} was missing contributors from the history which were listed in that tile metadata {missing}")
+                bad_message(f"Tile {tile_xy} was missing contributors from the history which were listed in that tile metadata {missing}")
         if tile_extra:
-            message("The following contributors have _00000_.tif data in the directory but are NOT listed in the tile's metadata.json")
+            bad_message("The following contributors have _00000_.tif data in the directory but are NOT listed in the tile's metadata.json")
             for tile_xy, extra in tile_extra.items():
-                message(f"Tile {tile_xy} had extra contributors in the history {extra}")
+                bad_message(f"Tile {tile_xy} had extra contributors in the history {extra}")
         if contributor_missing:
-            message("The following contributors are listed in the world database metadata as being applied to a tile "
+            bad_message("The following contributors are listed in the world database metadata as being applied to a tile "
                   "but don't appear in that Tile's metadata.json, most likely a remove happened and they were not reinserted correctly.")
             for tile_xy, missing in contributor_missing.items():
-                message(f"Based on the global insertion metadata, Tile {tile_xy} was missing contributors from the history {missing}")
+                bad_message(f"Based on the global insertion metadata, Tile {tile_xy} was missing contributors from the history {missing}")
         if not tile_missing and not tile_extra and not contributor_missing:
-            message("Global contributors match individual tiles and tiles are internally consistent too")
+            good_message("Global contributors match individual tiles and tiles are internally consistent too")
         return tile_missing, tile_extra, contributor_missing
 
     @classmethod

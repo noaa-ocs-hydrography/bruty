@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 import sys
 import pathlib
 import logging
@@ -11,7 +12,7 @@ from nbs.bruty.nbs_postgres import NOT_NAV
 from nbs.configs import get_logger, run_command_line_configs, parse_multiple_values
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, connect_params_from_config
 from nbs.scripts.tile_specs import iterate_tiles_table, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS
-from nbs.scripts.combine import get_postgres_processing_info
+from nbs.scripts.combine import get_postgres_processing_info, find_surveys_to_update, clean_nbs_database
 
 LOGGER = get_logger('nbs.bruty.validate')
 CONFIG_SECTION = 'insert'
@@ -46,6 +47,15 @@ def main(config):
                                 LOGGER.info(f"{db_path} was not found")
                             else:
                                 LOGGER.info(f"Validating {db_path}")
+                                transaction = db.transaction_groups.data_class()
+                                transaction.ttype = "VALIDATE"
+                                transaction.ttime = datetime.now()
+                                transaction.process_id = os.getpid()
+                                transaction.modified_data = 0
+                                transaction.finished = 0
+                                transaction.user_quit = 0
+                                trans_id = db.transaction_groups.add_oid_record(transaction)  # ("CLEAN", datetime.now(), os.getpid(), 0, 0))
+
                                 LOGGER.info("*** Checking for positioning errors...")
                                 position_errors = db.search_for_bad_positioning()
                                 if not position_errors:
@@ -74,7 +84,8 @@ def main(config):
                                     if op.ttype == 'INSERT' or op.ttype is None:
                                         if last_insert is None or op.ttime > last_insert.ttime:
                                             last_insert = op
-                                last_insert_unfinished = last_insert is None or last_insert.code != 0
+                                # code was not added until Dec 2022 so ignore the warning if the transactions are that old
+                                last_insert_unfinished = last_insert is None or (last_inserts[-1].ttime > datetime(2023, 1, 1) and last_insert.code != 0)
                                 if not last_inserts:
                                     LOGGER.info("No INSERT operations were performed after the last CLEAN")
                                 else:
@@ -100,9 +111,6 @@ def main(config):
                                 else:
                                     # replace the whole thing or call re-insert?
                                     if True:
-                                        tx_ty = set(contributor_missing.keys())
-                                        tx_ty.update(tile_missing.keys())
-                                        tx_ty.update(tile_extra.keys())
                                         ret = SUCCEEDED
                                         if world_raster_database.NO_LOCK:  # NO_LOCK means that we are not allowing multiple processes to work on one Tile/database at the same time - so use an advisory lock on the whole thine
                                             p = pathlib.Path(db_path)
@@ -116,10 +124,25 @@ def main(config):
                                             sorted_recs, names_list, sort_dict, comp, tx_meta = get_postgres_processing_info(db_path,
                                                                                                                              conn_info,
                                                                                                                              for_navigation_flag=(True, nav_flag_value))
-                                            db.repair_subtiles(tx_ty, compare_callback=comp)
-                                            LOGGER.info(f"Removed existing subtiles and added reinsert instructions to metadata.sqlite\n{tx_ty}")
+                                            invalid, unfinished, out_of_sync, mismatch, new_surveys = find_surveys_to_update(
+                                                db, sort_dict, names_list)
+                                            if invalid or unfinished or out_of_sync or mismatch:
+                                                LOGGER.info(f"Found surveys needing cleanup before running repair\n{invalid}\n{sort_dict}\n{out_of_sync}\n{mismatch}")
+                                                clean_nbs_database(db.db.data_path, names_list, sort_dict, comp, subprocesses=1)
+                                                # refresh the checks in case the clean function is causing problems
+                                                tile_missing, tile_extra, contributor_missing = db.validate()
+                                            tx_ty = set(contributor_missing.keys())
+                                            tx_ty.update(tile_missing.keys())
+                                            tx_ty.update(tile_extra.keys())
+                                            if tx_ty:
+                                                db.repair_subtiles(tx_ty, compare_callback=comp)
+                                                db.transaction_groups.set_modified(trans_id)
+                                                LOGGER.info(f"Tried to repair existing subtiles issues by removal and reinsert\n{tx_ty}")
+                                            else:
+                                                LOGGER.info(f"Calling cleanup resolved subtile issues")
                                             if world_raster_database.NO_LOCK:
                                                 lck.release()
+                                db.transaction_groups.set_finished(trans_id)
                                 LOGGER.info("*** Finished checks")
 
                                 if reinserts_remain or tile_missing or tile_extra or contributor_missing or last_insert_unfinished:
