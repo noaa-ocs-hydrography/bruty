@@ -21,7 +21,7 @@ from nbs.bruty.utils import onerr, user_action, remove_file, QUIT, HELP
 from nbs.configs import get_logger, run_command_line_configs, make_family_of_logs, show_logger_handlers, convert_to_logging_level
 from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_metadata, ConnectionInfo, connect_params_from_config
 from nbs.scripts.convert_csar import convert_csar_python
-from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS
+from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION
 from nbs_utils.points_utils import to_npz
 
 
@@ -396,6 +396,137 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
         db.db.LOGGER.error(traceback.format_exc())
         raise e
 
+
+def perform_qc_checks(db_path, conn_info, nav_flag_value, repair=True, check_last_insert=True):
+    """
+    Parameters
+    ----------
+    db_path
+        path to the bruty combine database directory
+    conn_info
+        connection info with the metadata table name set inside it
+    repair
+        boolean of if repairs are to be performed which will also add a transaction entry to the sqlite database
+
+    Returns
+    -------
+    errors
+        tuple of (reinserts_remain, tile_missing, tile_extra, contributor_missing, last_insert_unfinished)
+
+    """
+    try:
+        db = WorldDatabase.open(db_path)
+    except FileNotFoundError:
+        LOGGER.info(f"{db_path} was not found")
+    else:
+        LOGGER.info("*** Checking for positioning errors...")
+        position_errors = db.search_for_bad_positioning()
+        if not position_errors:
+            LOGGER.info("checks ok")
+        LOGGER.info("*** Checking for unfinished reinserts...")
+        reinserts_remain = len(db.reinserts.unfinished_records()) > 0
+        if not reinserts_remain:
+            LOGGER.info("checks ok")
+        LOGGER.info("*** Checking for orphaned accumulation directories...")
+        vr_orphaned_accum_db = db.search_for_accum_db()
+        if not vr_orphaned_accum_db:
+            LOGGER.info("checks ok")
+        LOGGER.info("*** Checking if combine (insert) completed...")
+        if not check_last_insert:
+            last_insert_unfinished = False
+        else:
+            last_clean = None
+            for rec in db.transaction_groups.values():
+                if rec.ttype == 'CLEAN':
+                    if last_clean is None or rec.ttime > last_clean.ttime:
+                        last_clean = rec
+            last_inserts = []
+            for rec in db.transaction_groups.values():
+                if rec.ttype == 'INSERT':
+                    if last_clean is None or rec.ttime > last_clean.ttime:
+                        last_inserts.append(rec)
+            last_insert = None
+            for op in db.completion_codes.values():
+                if op.ttype == 'INSERT' or op.ttype is None:
+                    if last_insert is None or op.ttime > last_insert.ttime:
+                        last_insert = op
+            # code was not added until Dec 2022 so ignore the warning if the transactions are that old
+            last_insert_unfinished = last_insert is None or (last_inserts[-1].ttime > datetime(2023, 1, 1) and last_insert.code != 0)
+            if not last_inserts:
+                LOGGER.info("No INSERT operations were performed after the last CLEAN")
+            else:
+                unfinished = False
+                one_finished = False
+                for rec in last_inserts:
+                    if not rec.finished:
+                        unfinished = True
+                    if rec.finished and not rec.user_quit:  # at least once the program needed to finish without the user quitting
+                        one_finished = True
+                if unfinished or not one_finished:
+                    msg = "At least one combine (INSERT) didn't complete since the last cleanup operation or user quit in ALL cases"
+                    LOGGER.info(msg)
+                    for rec in last_inserts:
+                        LOGGER.info(f'{rec.ttime.strftime("%Y/%m/%d - %H:%M:%S")}   completed:{bool(rec.finished)}    user quit:{bool(rec.user_quit)}')
+                    LOGGER.info(msg)
+                else:
+                    LOGGER.info("checks ok")
+        LOGGER.info("*** Checking DB consistency...")
+        tile_missing, tile_extra, contributor_missing = db.validate()
+        if repair:
+            LOGGER.info(f"Validating {db_path}")
+            transaction = db.transaction_groups.data_class()
+            transaction.ttype = "VALIDATE"
+            transaction.ttime = datetime.now()
+            transaction.process_id = os.getpid()
+            transaction.modified_data = 0
+            transaction.finished = 0
+            transaction.user_quit = 0
+            trans_id = db.transaction_groups.add_oid_record(transaction)  # ("CLEAN", datetime.now(), os.getpid(), 0, 0))
+
+            if not (tile_missing or tile_extra or contributor_missing or reinserts_remain):
+                LOGGER.info("consistency checks ok")
+                db.transaction_groups.set_finished(trans_id)
+            else:
+                ret = SUCCEEDED
+                if world_raster_database.NO_LOCK:  # NO_LOCK means that we are not allowing multiple processes to work on one Tile/database at the same time - so use an advisory lock on the whole thine
+                    p = pathlib.Path(db_path)
+                    lck = AdvisoryLock(p.name, conn_info, EXCLUSIVE | NON_BLOCKING)
+                    try:
+                        lck.acquire()
+                    except BaseLockException:
+                        ret = TILE_LOCKED
+                if ret == SUCCEEDED:
+                    sorted_recs, names_list, sort_dict, comp, tx_meta = get_postgres_processing_info(db_path,
+                                                                                                     conn_info,
+                                                                                                     for_navigation_flag=nav_flag_value)
+                    invalid, unfinished, out_of_sync, mismatch, new_surveys = find_surveys_to_update(
+                        db, sort_dict, names_list)
+                    if invalid or unfinished or out_of_sync or mismatch:
+                        LOGGER.info(f"Found surveys needing cleanup before running repair\n{invalid}\n{sort_dict}\n{out_of_sync}\n{mismatch}")
+                        clean_nbs_database(db.db.data_path, names_list, sort_dict, comp, subprocesses=1)
+                        # refresh the checks in case the clean function is causing problems
+                        tile_missing, tile_extra, contributor_missing = db.validate()
+                    tx_ty = set(contributor_missing.keys())
+                    tx_ty.update(tile_missing.keys())
+                    tx_ty.update(tile_extra.keys())
+                    if tx_ty:
+                        db.repair_subtiles(tx_ty, compare_callback=comp)
+                        db.transaction_groups.set_modified(trans_id)
+                        tile_missing, tile_extra, contributor_missing = db.validate()
+                        LOGGER.info(f"Tried to repair existing subtiles issues by removal and reinsert\n{tx_ty}")
+                    else:
+                        LOGGER.info(f"Calling cleanup resolved subtile issues")
+                    if world_raster_database.NO_LOCK:
+                        lck.release()
+                    reinserts_remain = len(db.reinserts.unfinished_records()) > 0
+                    if not any([reinserts_remain, tile_missing, tile_extra, contributor_missing, last_insert_unfinished]):
+                        db.transaction_groups.set_finished(trans_id)
+        LOGGER.info("*** Finished checks")
+
+        errors = reinserts_remain, tile_missing, tile_extra, contributor_missing, last_insert_unfinished
+        return errors
+
+
 def make_parser():
     parser = argparse.ArgumentParser(description='Combine a NBS postgres table(s) into a Bruty dataset')
     parser.add_argument("-?", "--show_help", action="store_true",
@@ -463,6 +594,12 @@ if __name__ == "__main__":
             ret = process_nbs_database(args.bruty_path, conn_info, for_navigation_flag=(not args.ignore_for_nav, not args.not_for_nav),
                                        extra_debug=args.debug, override_epsg=args.override_epsg, exclude=args.exclude, crop=args.crop,
                                        delete_existing=args.delete_existing, log_level=log_level)
+            # if we didn't succeed then let the ret value pass through and don't show a validation since it had an exception, data error or locked data
+            if ret == SUCCEEDED:
+                # since we succeeded on insert we don't need to check the insert code (which isn't even written til down below)
+                errors = perform_qc_checks(args.bruty_path, conn_info, (not args.ignore_for_nav, not args.not_for_nav), repair=True, check_last_insert=False)
+                if any(errors):
+                    ret = FAILED_VALIDATION
         except Exception as e:
             traceback.print_exc()
             msg = f"{args.bruty_path} for_navigation_flag={(not args.ignore_for_nav, not args.not_for_nav)} had an unhandled exception - see message above"
@@ -486,5 +623,6 @@ if __name__ == "__main__":
                 db.completion_codes[args.fingerprint] = d
             except:
                 pass
+
     LOGGER.debug(f"Exiting {args.bruty_path} with code {ret} after {int(time.time()-proc_start)} seconds")
     sys.exit(ret)

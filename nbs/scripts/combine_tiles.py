@@ -33,7 +33,7 @@ from nbs.configs import get_logger, run_command_line_configs, parse_multiple_val
 # , iter_configs, set_stream_logging, log_config, parse_multiple_values, make_family_of_logs
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, connect_params_from_config, connection_with_retries
 from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, TileToProcess, TileProcess
-from nbs.scripts.combine import process_nbs_database, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS
+from nbs.scripts.combine import process_nbs_database, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, perform_qc_checks
 
 interactive_debug = True
 if interactive_debug and sys.gettrace() is None:  # this only is set when a debugger is run (?)
@@ -273,6 +273,7 @@ def main(config):
                             ret = process_nbs_database(db, conn_info, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
                                                        extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(current_tile.dtype==ENC),
                                                        delete_existing=delete_existing, log_level=log_level)
+                            errors = perform_qc_checks(db.db.data_path, conn_info, (use_nav_flag, current_tile.nav_flag), repair=True, check_last_insert=False)
                             del remaining_tiles[current_tile]
                         else:
                             remove_finished_processes(tile_processes, remaining_tiles, max_tries)

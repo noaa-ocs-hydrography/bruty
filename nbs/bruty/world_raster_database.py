@@ -709,7 +709,7 @@ class WorldTilesBackend(VABC):
                                 raster = tile_history[-1]
                                 yield tx, ty, raster, tile_history.get_metadata()
                             except IndexError:
-                                print("accumulation db made directory but not filled?", ty_dir.path)
+                                pass  # print("accumulation db made directory but not filled?", ty_dir.path)
 
     def append_accumulation_db(self, accumulation_db):
         # iterate the acculation_db and append the last rasters from that into this db
@@ -2863,7 +2863,8 @@ class WorldDatabase(VABC):
             iter(contributors)
         except TypeError:
             contributors = [contributors]
-        self.db.LOGGER.info(f"removing and recomputing for contributors: {contributors}")
+        if contributors:
+            self.db.LOGGER.info(f"removing and recomputing for contributors: {contributors}")
         affected_contributors = {}
         unfinished_removals = []
         modified_data = False
@@ -2886,7 +2887,9 @@ class WorldDatabase(VABC):
         #    This seems best as otherwise we could remove data but not replace it so we'd have partially inserted data and not know it.
         # 1) Make a sqlite database of the contributors and tiles to work on
         self.add_reinserts(affected_contributors)
-        if len(self.reinserts.unfinished_records()) > 0:
+        num_reinsert = len(self.reinserts.unfinished_records())
+        if num_reinsert > 0:
+            self.db.LOGGER.info(f"processing {num_reinsert} reinsert operations")
             if NO_LOCK or subprocesses == 1:
                 if subprocesses > 1:
                     print("Warning, using more than one process would require a lock server.\nOnly one process will be used.")

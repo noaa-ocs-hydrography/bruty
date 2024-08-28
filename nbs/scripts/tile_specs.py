@@ -20,6 +20,7 @@ from nbs.bruty.utils import ConsoleProcessTracker
 SUCCEEDED = 0
 DATA_ERRORS = 3
 TILE_LOCKED = 4
+FAILED_VALIDATION = 5
 UNHANDLED_EXCEPTION = 99
 
 _debug = False
