@@ -220,10 +220,10 @@ def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), 
         sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, for_navigation_flag, exclude=exclude)
         clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=1, delete_existing=delete_existing, log_level=log_level)
         if not names_list:  # still call process_nbs_records to have it write the transaction group records
-            LOGGER.warning(f"No matching records found in tables {conn_info.tablenames}")
-            LOGGER.warning(f"  for_navigation_flag used:{for_navigation_flag[0]}")
+            LOGGER.info(f"No matching records found in tables {conn_info.tablenames}")
+            LOGGER.info(f"  for_navigation_flag used:{for_navigation_flag[0]}")
             if for_navigation_flag[0]:
-                LOGGER.warning(f"  and for_navigation value must equal: {for_navigation_flag[1]}")
+                LOGGER.info(f"  and for_navigation value must equal: {for_navigation_flag[1]}")
         ret = process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug, override_epsg, crop=crop, log_level=log_level)
     return ret
 
