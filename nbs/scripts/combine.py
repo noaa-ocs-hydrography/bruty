@@ -599,6 +599,7 @@ if __name__ == "__main__":
                 # since we succeeded on insert we don't need to check the insert code (which isn't even written til down below)
                 errors = perform_qc_checks(args.bruty_path, conn_info, (not args.ignore_for_nav, not args.not_for_nav), repair=True, check_last_insert=False)
                 if any(errors):
+                    LOGGER.error(f"Validation Failed with errors:{errors}")
                     ret = FAILED_VALIDATION
         except Exception as e:
             traceback.print_exc()
