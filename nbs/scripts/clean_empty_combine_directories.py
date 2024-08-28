@@ -46,11 +46,10 @@ if remove_empty_subtiles:
                 pass  # print(f"{parent} has data")
 
 if remove_old_accum_directories:
-    for parent, dirs, files in os.walk(data_dir, topdown=True):
-        cur_dir = pathlib.Path(parent)
-        # make sure we are three levels down (database/rowYYY/colXXX)
-        if cur_dir.parent == data_dir:
-            print(parent)
-        if re.search("tmp.*_accum", cur_dir.name) and cur_dir.parent.parent == data_dir:
-            print("  ",cur_dir.name)
-            shutil.rmtree(parent, ignore_errors=True)
+    for subpath in data_dir.iterdir():
+        if subpath.is_dir():
+            print(subpath)
+            for possible_accum in subpath.iterdir():
+                if possible_accum.is_dir() and re.search("tmp.*_accum", possible_accum.name):
+                    print("  ", possible_accum.name)
+                    shutil.rmtree(possible_accum, ignore_errors=True)
