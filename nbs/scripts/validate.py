@@ -46,7 +46,7 @@ def main(config):
                             # a missing database (like ENC_not_for_nav) returns None
                             if errors is not None and any(errors):
                                 LOGGER.warning(f"{db_path}:\n  last insert finished without errors: {not errors[4]}\n"
-                                               "  reinserts_remain: {errors[0]}\n  tile_missing: {errors[1]}\n"
+                                               f"  reinserts_remain: {errors[0]}\n  tile_missing: {errors[1]}\n"
                                                f"  tile_extra: {errors[2]}\n  contributor_missing:{errors[3]}")
         ret = SUCCEEDED
     except Exception as e:
