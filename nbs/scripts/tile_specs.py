@@ -91,7 +91,7 @@ class TileInfo:
     def update_table_status(self, cursor, tablename="combine_spec"):
         cursor.execute(
             f"""update {tablename} set ({self.OUT_OF_DATE},{self.SUMMARY})=(%s, %s) 
-            where ({self.PB},{self.UTM},{self.HEMISPHERE},{self.TILE},{self.DATUM},{self.LOCALITY})=(%s,%s,%s,%s,%s)""",
+            where ({self.PB},{self.UTM},{self.HEMISPHERE},{self.TILE},{self.DATUM},{self.LOCALITY})=(%s,%s,%s,%s,%s,%s)""",
             (self.out_of_date, self.summary, self.pb, self.utm, self.hemi.upper(), self.tile, self.datum, self.locality))
 
     @property
