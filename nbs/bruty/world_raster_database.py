@@ -2865,7 +2865,7 @@ class WorldDatabase(VABC):
             iter(contributors)
         except TypeError:
             contributors = [contributors]
-        if contributors:
+        if len(contributors) > 0:
             self.db.LOGGER.info(f"removing and recomputing for contributors: {contributors}")
         affected_contributors = {}
         unfinished_removals = []
@@ -2891,7 +2891,7 @@ class WorldDatabase(VABC):
         self.add_reinserts(affected_contributors)
         num_reinsert = len(self.reinserts.unfinished_records())
         if num_reinsert > 0:
-            modified_data = True
+            modified_data = True  # the removal above may not have affected any tiles but leftover reinserts may also exist so set modified
             self.db.LOGGER.info(f"processing {num_reinsert} reinsert operations")
             if NO_LOCK or subprocesses == 1:
                 if subprocesses > 1:
