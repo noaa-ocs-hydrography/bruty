@@ -81,7 +81,7 @@ class TileInfo:
         # self.data_type = review_tile.get("dtype", "")
 
     def __repr__(self):
-        return f"TileInfo:{self.pb}_{self.utm}{self.hemi}_{self.tile}"
+        return f"TileInfo:{self.pb}_{self.utm}{self.hemi}_{self.tile}_{self.locality}"
 
     def hash_id(self, res=None):
         if res is None:

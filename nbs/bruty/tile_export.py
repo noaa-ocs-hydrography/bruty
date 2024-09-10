@@ -188,7 +188,7 @@ class RasterExport:
         use_res = t.res
         if t.res == int(t.res):
             use_res = int(t.res)
-        base = str(self.output_base_path.joinpath(f"{t.pb}{t.utm}{t.hemi}", export_type, f"Tile{t.tile}_{t.pb}{t.utm}{t.hemi}_{use_res}m_{export_type}"))
+        base = str(self.output_base_path.joinpath(f"{t.pb}{t.utm}{t.hemi}_{t.locality}", export_type, f"Tile{t.tile}_{t.pb}{t.utm}{t.hemi}_{t.locality}_{use_res}m_{export_type}"))
         if self.data_time:
             base += "_" + self.data_time
         use_closing = t.closing

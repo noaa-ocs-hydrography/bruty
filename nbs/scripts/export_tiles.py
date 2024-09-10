@@ -274,7 +274,8 @@ def main(config):
                     # if the product branch (pb) is new then read and cache the data in a pickle file to pass to the new console
                     # Also, if cached metadata from the combine is desired then read it every time
                     # since we don't know if all combines were done with the same metadata tables.
-                    if tile_info.pb != cached_metadata_pb or use_cached_meta or use_cached_enc_meta:
+                    if tile_info.pb != cached_metadata_pb or tile_info.locality != cached_locality or \
+                            tile_info != cached_utm or use_cached_meta or use_cached_enc_meta:
                         # determine the location of the cached metadata if any is to be used
                         cache_dir = config['data_dir'] if use_cached_meta or use_cached_enc_meta else ""
                         # determine which datatypes will use the cache
@@ -293,6 +294,8 @@ def main(config):
                         pickle.dump(sort_dict, meta_cache)
                         meta_cache.close()
                         cached_metadata_pb = tile_info.pb
+                        cached_locality = tile_info.locality
+                        cached_utm = tile_info.utm
 
                     # closing_dist = tile_record[closing_index]
 
