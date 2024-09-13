@@ -723,6 +723,11 @@ def get_records(conn_info, cache_dir=None, query_fields=None, exclude_fields=('p
     for table_name in conn_info.tablenames:
         try:
             fields, records = get_nbs_records(table_name, conn_info, query_fields=query_fields, exclude_fields=exclude_fields)
+            # for n in range(len(records)-1, -1, -1):
+            #     pth = records[n]['from_filename']
+            #     surveys = ["CT_12_CRB_20201220_CS_070", "CT_08_CRB_20201220_CS_070"]
+            #     if not any([s in pth for s in surveys]):
+            #        del records[n]
             if cache_dir:
                 cache_fname = pathlib.Path(cache_dir).joinpath(f"last_used_{conn_info.database}_{table_name}.pickle")
                 try:

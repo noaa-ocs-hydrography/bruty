@@ -366,9 +366,24 @@ def merge_array(pts, output_data, output_sort_key_values,
                 comp_func = numpy.greater
             else:
                 comp_func = numpy.less
+            # in the compare function use astype to cast the incoming data to the same type as the exiting data.
+            # this handles problems of if the new depths are float64 but the stored data is float32 that rounding (representation) errors will occur
             replace_cells = numpy.logical_or(replace_cells,
                                              numpy.logical_and(previous_all_equal,
-                                                               comp_func(sorted_pts[2 + key_num], key[export_rows, export_cols])))
+                                                               comp_func(sorted_pts[2 + key_num].astype(key.dtype), key[export_rows, export_cols])))
+            # if _debug:
+            #     minj= 361
+            #     maxj = 361
+            #     mini = 586
+            #     debug_indices = numpy.where(numpy.logical_and(sorted_pts[0] == mini, numpy.logical_and(sorted_pts[1] >= minj, sorted_pts[1] <= maxj)))
+            #     print("sort key", key_num)
+            #     print(sorted_pts[:5, debug_indices])
+            #     print("pts", sorted_pts.dtype)
+            #     print(sorted_pts[2 + key_num][debug_indices])
+            #     print("existing", key.dtype)
+            #     print(key[export_rows, export_cols][debug_indices])
+            #     print(comp_func(sorted_pts[2 + key_num].astype(key.dtype), key[export_rows, export_cols])[debug_indices])
+            #     print(replace_cells[debug_indices])
             previous_all_equal = numpy.logical_and(previous_all_equal,
                                                    numpy.equal(sorted_pts[2 + key_num], key[export_rows, export_cols]))
             # check that the key values are within the desired ranges
