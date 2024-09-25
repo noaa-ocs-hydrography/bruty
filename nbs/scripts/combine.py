@@ -631,7 +631,7 @@ if __name__ == "__main__":
         if args.debug:
             setup_call_logger(args.bruty_path)  # in debug mode we want to see all the calls, otherwise this will be a no-op
             try:
-            shutil.copyfile(pathlib.Path(get_dbg_log_path()).parent.parent.joinpath("wdb_metadata.sqlite"),
+                shutil.copyfile(pathlib.Path(get_dbg_log_path()).parent.parent.joinpath("wdb_metadata.sqlite"),
                                 pathlib.Path(get_dbg_log_path()+"wdb_metadata.1start.sqlite"))
             except:
                pass
