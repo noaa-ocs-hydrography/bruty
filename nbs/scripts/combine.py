@@ -25,7 +25,7 @@ from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_
 from nbs.scripts.convert_csar import convert_csar_python
 from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION
 from nbs_utils.points_utils import to_npz
-from nbs.debugging import log_calls, get_call_logger, get_log_path, setup_call_logger
+from nbs.debugging import log_calls, get_call_logger, get_dbg_log_path, setup_call_logger
 
 
 interactive_debug = False
@@ -142,7 +142,7 @@ def get_postgres_processing_info(world_db_path, conn_info, for_navigation_flag=(
     sorted_recs, names_list, sort_dict, comp = get_sorting_info(all_fields, all_records, for_navigation_flag, exclude=exclude)
     transform_metadata = get_transform_metadata(all_fields, all_records)
     if get_call_logger().level <= logging.DEBUG:
-        debug_file = open(get_log_path()+".meta_table", "w")
+        debug_file = open(get_dbg_log_path()+".meta_table", "w")
         store_fields = ['from_filename', 'nbs_id',
                         'never_post', 'decay_score', 'manual_resolution', 'script_resolution', 'manual_point_spacing', 'script_point_spacing', 'for_navigation',
                         'manual_to_filename', 'script_to_filename']
@@ -516,7 +516,7 @@ def perform_qc_checks(db_path, conn_info, nav_flag_value, repair=True, check_las
                 msg['Subject'] = rf"Validation Error found {db_path}"
                 msg['From'] = "barry.gallagher@noaa.gov"
                 msg['To'] = "barry.gallagher@noaa.gov,barry.gallagher@gmail.com"
-                msg.set_content(f"{get_log_path()}\n\ntile_missing\n{tile_missing}\n\ntile_extra\n{tile_extra}\n\ncontributor_missing\n{contributor_missing}\n\nreinserts_remain\n{reinserts_remain}")
+                msg.set_content(f"{get_dbg_log_path()}\n\ntile_missing\n{tile_missing}\n\ntile_extra\n{tile_extra}\n\ncontributor_missing\n{contributor_missing}\n\nreinserts_remain\n{reinserts_remain}")
 
                 server = smtplib.SMTP('smtp.google.com', port=25)
                 server.set_debuglevel(1)
@@ -628,8 +628,13 @@ if __name__ == "__main__":
 
         log_level = convert_to_logging_level(args.log_level)
 
-        if args.debug:
+        if True or args.debug:
             setup_call_logger(args.bruty_path)  # in debug mode we want to see all the calls, otherwise this will be a no-op
+            # try:
+            shutil.copyfile(pathlib.Path(get_dbg_log_path()).parent.parent.joinpath("wdb_metadata.sqlite"),
+                                pathlib.Path(get_dbg_log_path()+"wdb_metadata.1start.sqlite"))
+            #except:
+            #    pass
         print("using log level", log_level)
         if args.logger_path:
             make_family_of_logs("nbs", args.logger_path, remove_other_file_loggers=False, log_level=log_level)
@@ -639,6 +644,12 @@ if __name__ == "__main__":
             ret = process_nbs_database(args.bruty_path, conn_info, for_navigation_flag=(not args.ignore_for_nav, not args.not_for_nav),
                                        extra_debug=args.debug, override_epsg=args.override_epsg, exclude=args.exclude, crop=args.crop,
                                        delete_existing=args.delete_existing, log_level=log_level)
+            if args.debug:
+                try:
+                    shutil.copyfile(pathlib.Path(get_dbg_log_path()).parent.parent.joinpath("wdb_metadata.sqlite"),
+                                    pathlib.Path(get_dbg_log_path() + "wdb_metadata.2postprocess.sqlite"))
+                except:
+                    pass
             # if we didn't succeed then let the ret value pass through and don't show a validation since it had an exception, data error or locked data
             if ret == SUCCEEDED:
                 # since we succeeded on insert we don't need to check the insert code (which isn't even written til down below)
@@ -680,6 +691,12 @@ if __name__ == "__main__":
                 d.code = ret
                 d.fingerprint = args.fingerprint
                 db.completion_codes[args.fingerprint] = d
+            except:
+                pass
+        if args.debug:
+            try:
+                shutil.copyfile(pathlib.Path(get_dbg_log_path()).parent.parent.joinpath("wdb_metadata.sqlite"),
+                                pathlib.Path(get_dbg_log_path()+"wdb_metadata.3end.sqlite"))
             except:
                 pass
 

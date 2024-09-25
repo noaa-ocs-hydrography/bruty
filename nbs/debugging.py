@@ -47,7 +47,7 @@ def log_calls(func):
     return wrapper
 
 
-def get_log_path():
+def get_dbg_log_path():
     """ Gets the first file handler in the logger and returns the path of the log file. """
     debug_log = get_call_logger()
     for h in debug_log.handlers:

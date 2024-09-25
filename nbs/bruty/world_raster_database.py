@@ -37,7 +37,7 @@ from nbs.bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator, G
 from nbs.bruty import morton
 from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
 from nbs.configs import get_logger, set_file_logging, make_family_of_logs, close_logs  # , iter_configs, log_config, parse_multiple_values
-from nbs.debugging import get_call_logger, log_calls, get_log_path
+from nbs.debugging import get_call_logger, log_calls, get_dbg_log_path
 
 geo_debug = False
 _debug = False
