@@ -34,6 +34,7 @@ from nbs.configs import get_logger, run_command_line_configs, parse_multiple_val
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, connect_params_from_config, connection_with_retries
 from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, TileToProcess, TileProcess
 from nbs.scripts.combine import process_nbs_database, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, perform_qc_checks
+from nbs.debugging import get_call_logger, setup_call_logger, log_calls
 
 interactive_debug = True
 if interactive_debug and sys.gettrace() is None:  # this only is set when a debugger is run (?)
@@ -270,6 +271,7 @@ def main(config):
                         fingerprint = str(current_tile.hash_id) + "_" + datetime.now().isoformat()
                         if debug_launch:
                             use_locks(port)
+                            setup_call_logger(db.db.data_path)
                             ret = process_nbs_database(db, conn_info, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
                                                        extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(current_tile.dtype==ENC),
                                                        delete_existing=delete_existing, log_level=log_level)

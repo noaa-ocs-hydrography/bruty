@@ -1,4 +1,6 @@
 import os
+import pickle
+import pprint
 import sys
 import argparse
 import time
@@ -23,6 +25,7 @@ from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_
 from nbs.scripts.convert_csar import convert_csar_python
 from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION
 from nbs_utils.points_utils import to_npz
+from nbs.debugging import log_calls, get_call_logger, get_log_path, setup_call_logger
 
 
 interactive_debug = False
@@ -138,9 +141,26 @@ def get_postgres_processing_info(world_db_path, conn_info, for_navigation_flag=(
     all_fields, all_records = get_records(conn_info, cache_dir=world_db_path)
     sorted_recs, names_list, sort_dict, comp = get_sorting_info(all_fields, all_records, for_navigation_flag, exclude=exclude)
     transform_metadata = get_transform_metadata(all_fields, all_records)
+    if get_call_logger().level <= logging.DEBUG:
+        debug_file = open(get_log_path()+".meta_table", "w")
+        store_fields = ['from_filename', 'nbs_id',
+                        'never_post', 'decay_score', 'manual_resolution', 'script_resolution', 'manual_point_spacing', 'script_point_spacing', 'for_navigation',
+                        'manual_to_filename', 'script_to_filename']
+        debug_file.write(f"all_records : {store_fields}\n")
+        for rec_grp in all_records:
+            for rec in rec_grp:
+                revised = [rec[k] for k in store_fields]
+                debug_file.write(str(revised)+"\n")
+        # debug_file.write("all_fields = " + pprint.pformat(all_fields) + "\n")
+        # debug_file.write("sorted_recs = " + pprint.pformat(sorted_recs) + "\n")
+        debug_file.write("\n\nnames_list = " + pprint.pformat(names_list) + "\n")
+        debug_file.write("\n\nsort_dict = " + str(sort_dict) + "\n")
+        # debug_file.write("transform_metadata = " + pprint.pformat(transform_metadata) + "\n")
+        debug_file.close()
     return sorted_recs, names_list, sort_dict, comp, transform_metadata
 
 
+@log_calls
 def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=5, delete_existing=False, log_level=logging.INFO):
     try:
         db = WorldDatabase.open(world_db_path, log_level=log_level)
@@ -184,6 +204,7 @@ def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=
         db.transaction_groups.set_finished(trans_id)
 
 
+@log_calls
 def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), extra_debug=False, override_epsg=NO_OVERRIDE, exclude=None, crop=False, delete_existing=False, log_level=logging.INFO):
     """ Reads the NBS postgres metadata table to find all surveys in a region and insert them into a Bruty combined database.
 
@@ -242,6 +263,7 @@ def get_converted_csar(path, transform_metadata, sid):
     return path
 
 
+@log_calls
 def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug=False, override_epsg=NO_OVERRIDE, crop=False, log_level=logging.INFO):
     unconverted_csars = []
     files_not_found = []
@@ -290,14 +312,14 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
                 sid = survey.sid
                 path = survey.data_path
                 sort_info = (survey.decay, survey.resolution)
-                if extra_debug:
-                    pth = path.upper()
+                # if extra_debug:
+                    # pth = path.upper()
                     # if not ('H12010' in pth or 'H06443' in pth or 'H12023' in pth):  # a VR, gdal raster and points survey (points is in not__for_nav)
                     # if extra_debug and sid not in (721744, 720991, 720301):  # , 764261, 764263
                     # if extra_debug and i > 3:  # , 764261, 764263
                     #     names_list.pop(i)
                     #     continue
-                    print(path)
+                    # print(path)
                 LOGGER.debug(f'starting {sid} {path}')
                 # # @FIXME is contributor an int or float -- needs to be int 32 and maybe int 64 (or two int 32s)
                 msg = f"{datetime.now().isoformat()}  processing {num_names - i} of {num_names}"
@@ -585,6 +607,9 @@ if __name__ == "__main__":
         use_locks(args.lock_server)
 
         log_level = convert_to_logging_level(args.log_level)
+
+        if args.debug:
+            setup_call_logger(args.bruty_path)  # in debug mode we want to see all the calls, otherwise this will be a no-op
         print("using log level", log_level)
         if args.logger_path:
             make_family_of_logs("nbs", args.logger_path, remove_other_file_loggers=False, log_level=log_level)
@@ -601,6 +626,19 @@ if __name__ == "__main__":
                 if any(errors):
                     LOGGER.error(f"Validation Failed with errors:{errors}")
                     ret = FAILED_VALIDATION
+                    import smtplib
+                    from email.message import EmailMessage
+
+                    msg = EmailMessage()
+                    msg['Subject'] = rf"Validation Error found {args.bruty_path}"
+                    msg['From'] = "barry.gallagher@noaa.gov"
+                    msg['To'] = "barry.gallagher@noaa.gov,barry.gallagher@gmail.com"
+                    msg.set_content(f"{args.bruty_path}\n{errors}")
+
+                    server = smtplib.SMTP('smtp.google.com', port=25)
+                    server.set_debuglevel(1)
+                    server.send_message(msg)
+                    server.quit()
         except Exception as e:
             traceback.print_exc()
             msg = f"{args.bruty_path} for_navigation_flag={(not args.ignore_for_nav, not args.not_for_nav)} had an unhandled exception - see message above"

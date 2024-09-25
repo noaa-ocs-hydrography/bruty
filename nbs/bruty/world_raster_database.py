@@ -37,6 +37,7 @@ from nbs.bruty.tile_calculations import TMSTilesMercator, GoogleTilesMercator, G
 from nbs.bruty import morton
 from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
 from nbs.configs import get_logger, set_file_logging, make_family_of_logs, close_logs  # , iter_configs, log_config, parse_multiple_values
+from nbs.debugging import get_call_logger, log_calls, get_log_path
 
 geo_debug = False
 _debug = False
@@ -632,6 +633,9 @@ class WorldTilesBackend(VABC):
             self._make_logger()
         self.to_file()  # store parameters so it can be loaded back from disk
 
+    def __repr__(self):
+        return self.__class__.__name__ + " " + str(self.data_path)
+
     @property
     def log_name(self):
         return __name__ + "." + self.data_path.name
@@ -990,6 +994,9 @@ class WorldDatabase(VABC):
         self.completion_codes = CompletionCodes(pth)
         self.to_file()
 
+    def __repr__(self):
+        return self.__class__.__name__ + " containing " + self.db.__repr__()
+
     def _rmtree_on_error_handler(self, func, pth, info):
         if "logs_" in str(pth):
             pass
@@ -1242,6 +1249,7 @@ class WorldDatabase(VABC):
             self.transaction_groups = TransactionGroups(pth)
             self.completion_codes = CompletionCodes(pth)
 
+    @log_calls
     def insert_survey(self, path_to_survey_data, override_epsg=NO_OVERRIDE, contrib_id=numpy.nan, compare_callback=None, reverse_z=False,
                       limit_to_tiles=None, force=False, survey_score=100, flag=0, dformat=None, transaction_id=-1, sorting_metadata=None, crop=False):
         """
@@ -1300,6 +1308,7 @@ class WorldDatabase(VABC):
                 done = True
                 raise ValueError("Filename ends in csar which needs to be eported to a different format first")
         return data_modified
+
     def _get_transformer(self, srs, override_epsg, path_to_survey_data, inv=False):
         try:
             epsg = get_epsg_or_wkt(srs)
@@ -1377,6 +1386,7 @@ class WorldDatabase(VABC):
                     if i == block_size - 1 or ifeat == total_points - 1:  # end of block or end of file
                         yield wkt, x, y, depth, uncertainty
 
+    @log_calls
     def insert_survey_as_outside_area_of_interest(self, path_to_survey_data, survey_score=100, flag=0, dformat=None, override_epsg: int = NO_OVERRIDE,
                                                   contrib_id=numpy.nan, reverse_z: bool = False, transaction_id=-1, sorting_metadata=None):
         """ Insert a survey into the metadata so it is known to have been evaluated but had no data of interest.
@@ -1387,6 +1397,7 @@ class WorldDatabase(VABC):
                                        dformat, transaction_id, sorting_metadata=sorting_metadata)
 
     # noinspection PyUnboundLocalVariable
+    @log_calls
     def insert_points_survey(self, path_to_survey_data, survey_score=100, flag=0, dformat=None, override_epsg: int = NO_OVERRIDE,
                           contrib_id=numpy.nan, compare_callback=None, reverse_z: bool = False, limit_to_tiles=None, force=False, transaction_id=-1,
                           sorting_metadata=None, block_size=30000000, crop=False):
@@ -1596,6 +1607,7 @@ class WorldDatabase(VABC):
 
     # @todo - make the survey_ids and survey_paths into properties that load from disk when called by user so that they stay in sync.
     #    Otherwise use postgres to hold that info so queries are current.
+    @log_calls
     def finished_survey_insertion(self, path_to_survey_data, tiles, contrib_id=numpy.nan,
                                   override_epsg=NO_OVERRIDE, reverse_z=False, survey_score=100,
                                   flag=0, dformat=None, transaction_id=-1, sorting_metadata=None,
@@ -1669,6 +1681,7 @@ class WorldDatabase(VABC):
             # self.to_file(locked_file=metadata_file)
             # print('unlocking metadata at ', datetime.now().isoformat())
 
+    @log_calls
     def start_survey_insertion(self, path_to_survey_data, tiles, contrib_id=numpy.nan, transaction_id=-1):
         """
         Parameters
@@ -1863,6 +1876,7 @@ class WorldDatabase(VABC):
                 tiles_data[(int(tx), int(ty))] = tile_survey_data  # force int so we don't accidentally get numpy.int in the keys
 
         # remove any tile that aren't in the allowed list
+        get_call_logger().debug(f"affected tiles {self.db.data_path} : {list(tiles_data.keys())}")
         if limit_to_tiles is not None:
             # make sure the limits are ints, not floats or numpy.ints etc so compare works
             limit_ints = set([(int(tx), int(ty)) for tx, ty in limit_to_tiles])
@@ -1870,6 +1884,7 @@ class WorldDatabase(VABC):
                 if (tx, ty) not in limit_ints:
                     del tiles_data[(tx, ty)]
         tile_list = list(tiles_data.keys())
+        get_call_logger().debug(f"affected tiles (after limit_to_tiles) {self.db.data_path} : {tile_list}")
 
         # itererate each tile that was found to have data
         # @FIXME - confirm that points outside bounds (less than lower left and greater than upper right) don't crash this
@@ -1967,6 +1982,7 @@ class WorldDatabase(VABC):
         else:
             return 512, 512
 
+    @log_calls
     def insert_survey_vr(self, vr, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, contrib_id=numpy.nan, compare_callback=None, reverse_z=False,
                          limit_to_tiles=None, force=False, transaction_id=-1, sorting_metadata=None):
         """
@@ -2116,6 +2132,7 @@ class WorldDatabase(VABC):
                     raise Exception(f"Survey Exists already in database {contrib_id}")
         return data_modified
 
+    @log_calls
     def insert_raster_survey(self, path_to_survey_data, survey_score=100, flag=0, override_epsg=NO_OVERRIDE, data_band=1, uncert_band=2,
                            contrib_id=numpy.nan, compare_callback=None, reverse_z=False, limit_to_tiles=None, force=False,
                            transaction_id=-1, sorting_metadata=None):
@@ -2611,6 +2628,7 @@ class WorldDatabase(VABC):
     def export_at_date(self, area, date):
         raise NotImplementedError
 
+    @log_calls
     def clean(self, removals, compare_callback=None, transaction_id=-1, subprocesses=5):
         """
         Parameters
@@ -2632,6 +2650,7 @@ class WorldDatabase(VABC):
         # removals.update(out_of_sync)
         return self.remove_and_recompute(removals, compare_callback=compare_callback, transaction_id=transaction_id, subprocesses=subprocesses)
 
+    @log_calls
     def remove_survey(self, contributor, transaction_id=-1):
         """ Will remove a survey from all the tiles it had been appled to.
         Returns a list of the tiles affected and the IDs that had been processed after the removed contributor.
@@ -2686,6 +2705,7 @@ class WorldDatabase(VABC):
             data.finished = 0
             new_id = self.removed_ids.add_oid_record(data)  # (contributor, tile_list, "TBD", transaction_id, 1, 0))
             contributor_tiles = {}  # master list of other contributors that will be affected by removing the requested contributor
+            dbg_log = get_call_logger()
             for tx, ty in tile_list:
                 tile_history = self.db.get_tile_history_by_index(tx, ty, no_create=True)
                 if tile_history is not None:
@@ -2705,7 +2725,9 @@ class WorldDatabase(VABC):
                     # 4) Revert all the tiles back to the state before the ID was inserted
                     # remove the history entries from the requested contributor to the end
                     if remove_index is not None:
+                        dbg_log.debug(f"removing contributor {contributor} from tile {tx}, {ty} at index {remove_index}")
                         del tile_history[remove_index:]
+            dbg_log.debug(f"  contributors affected: {contributor_tiles}")
             data.affects = ",".join([str(c) for c in contributor_tiles])
             data.finished = 1
             self.removed_ids[new_id] = data
@@ -2833,6 +2855,8 @@ class WorldDatabase(VABC):
                 #    This means that the 2,3,4 tile will reprocess #2 and it's tile history will show 2,3,2  (duplicate #2 entries)
                 #    Either remove one at a time (which has some efficiency issues or check on re-insert if the survey is already in the history,
                 #    or just live with the duplicate (it doesn't hurt much).
+
+    @log_calls
     def add_reinserts(self, contributors:dict):
         existing_unfinished = {rec.nbs_id: rec for rec in self.reinserts.unfinished_records()}
 
@@ -2842,8 +2866,10 @@ class WorldDatabase(VABC):
                 updated = set(existing.tiles)
                 updated.update(tiles)
                 existing.tiles = updated
+                get_call_logger().debug(f"updating reinsert of {contrib} into {updated}")
                 self.reinserts[existing.oid] = existing  # set the data back into the file
             except KeyError:
+                get_call_logger().debug(f"adding reinsert of {contrib} into {tiles}")
                 self.reinserts.add_oid_record((contrib, tuple(tiles), 0, 0))
 
     def remove_and_recompute(self, contributors: (int, float, list, tuple), compare_callback=None, subprocesses=5, transaction_id=-1):

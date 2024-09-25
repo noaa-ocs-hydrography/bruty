@@ -16,6 +16,7 @@ from nbs.bruty.raster_data import TiffStorage, LayersEnum
 from nbs.configs import parse_multiple_values, iter_configs
 from data_management.db_connection import connect_with_retries
 from fuse_dev.fuse.meta_review.meta_review import database_has_table, split_URL_port
+from nbs.debugging import log_calls
 
 _debug = False
 
@@ -471,6 +472,9 @@ class SurveyInfo:
         self.data_path = data_path
         self.decay = decay
         self.resolution = resolution
+
+    def __repr__(self):
+        return f"{self.from_filename}, {self.sid}, {self.data_path}, {self.decay}, {self.resolution}"
 
 
 def id_to_scoring(records_lists, for_navigation_flag=(True, True), never_post_flag=(True, False), exclude=None):
