@@ -29,7 +29,7 @@ except ModuleNotFoundError:
 
 from data_management.db_connection import connect_with_retries
 from fuse_dev.fuse.meta_review import meta_review
-from nbs.configs import iter_configs
+from nbs.configs import iter_configs, read_config
 from nbs.bruty.utils import affine, get_crs_transformer, make_mllw_height_wkt, user_action, tqdm, remove_file, iterate_gdal_image, BufferedImageOps, QUIT, HELP
 from nbs.bruty.nbs_postgres import id_to_scoring, get_nbs_records, nbs_survey_sort, ConnectionInfo, connect_params_from_config, make_contributor_csv
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, NOT_NAV, INTERNAL, NAVIGATION, PUBLIC, connect_params_from_config, connection_with_retries
@@ -1445,7 +1445,7 @@ if __name__ == "__main__":
         raise Exception("testing")
 
     if args.config and args.cache:
-        config_filename, config_file = [x for x in iter_configs([args.config])][0]
+        config_file = read_config(args.config)
         config = config_file['EXPORT']
         # use_locks(args.lock_server)
         tile_info = pickle.load(open(args.tile_info, 'rb'))

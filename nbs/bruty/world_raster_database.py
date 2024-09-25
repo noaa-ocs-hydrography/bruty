@@ -1103,6 +1103,7 @@ class WorldDatabase(VABC):
             message(f"Tolerance exceeded {sid}, {max_x}, {max_y}\n   {pth}")
         return possible_errors
 
+    @log_calls
     def validate(self, log=True):
         """
         log

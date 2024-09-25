@@ -20,7 +20,7 @@ from nbs.bruty.world_raster_database import WorldDatabase, use_locks, UTMTileBac
 from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
 from nbs.bruty.world_raster_database import LockNotAcquired, AreaLock, FileLock, BaseLockException, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, Lock, AdvisoryLock
 from nbs.bruty.utils import onerr, user_action, remove_file, QUIT, HELP
-from nbs.configs import get_logger, run_command_line_configs, make_family_of_logs, show_logger_handlers, convert_to_logging_level
+from nbs.configs import get_logger, read_config, log_config, make_family_of_logs, show_logger_handlers, convert_to_logging_level
 from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_metadata, ConnectionInfo, connect_params_from_config
 from nbs.scripts.convert_csar import convert_csar_python
 from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION
@@ -568,16 +568,18 @@ def make_parser():
     parser.add_argument("-?", "--show_help", action="store_true",
                         help="show this help message and exit")
 
-    parser.add_argument("-d", "--database", type=str, metavar='database', default="metadata",
-                        help="postgres database table holding the records to process")
-    parser.add_argument("-r", "--port", type=str, metavar='port', default='5434',  # nargs="+"
-                        help="postgres database connection port")
-    parser.add_argument("-o", "--host", type=str, metavar='host', default='OCS-VS-NBS05',
-                        help="postgres host")
-    parser.add_argument("-u", "--user", type=str, metavar='user', default="",
-                        help="username to connect with to database")
-    parser.add_argument("-p", "--password", type=str, metavar='password', default="",
-                        help="password to connect to postgres database")
+    # parser.add_argument("-d", "--database", type=str, metavar='database', default="metadata",
+    #                     help="postgres database table holding the records to process")
+    # parser.add_argument("-r", "--port", type=str, metavar='port', default='5434',  # nargs="+"
+    #                     help="postgres database connection port")
+    # parser.add_argument("-o", "--host", type=str, metavar='host', default='OCS-VS-NBS05',
+    #                     help="postgres host")
+    # parser.add_argument("-u", "--user", type=str, metavar='user', default="",
+    #                     help="username to connect with to database")
+    # parser.add_argument("-p", "--password", type=str, metavar='password', default="",
+    #                     help="password to connect to postgres database")
+    parser.add_argument("-c", "--config_path", type=str, metavar='config_path', default="",
+                        help="location to config file for connection info")
     parser.add_argument("-t", "--table", action='append', type=str, dest="tables", metavar='table', default=[],
                         help="table to read from postgres database, can specify more than once")
     parser.add_argument("-x", "--exclude", action='append', type=int, dest="exclude", default=[],
@@ -596,7 +598,7 @@ def make_parser():
                         default=False, help="ignore the for_navigation flag")
     parser.add_argument('-n', '--not_for_nav', action='store_true', dest='not_for_nav',
                         default=False, help="require the for_navigation flag to be False")
-    parser.add_argument('-c', action='store_true', dest='crop',
+    parser.add_argument('-r', action='store_true', dest='crop',
                         default=False, help="crop data to tile extents to avoid error (for ENC data covering many zones)")
     parser.add_argument("-g", "--logger_path", type=str, metavar='logger_path', default="",
                         help="location to store logger messages")
@@ -617,7 +619,11 @@ if __name__ == "__main__":
         ret = NOT_ENOUGH_ARGS
     proc_start = time.time()
     if args.bruty_path:
-        conn_info = ConnectionInfo(args.database, args.user, args.password, args.host, args.port, args.tables)
+        # conn_info = ConnectionInfo(args.database, args.user, args.password, args.host, args.port, args.tables)
+        config_obj = read_config(args.config_path)
+        config = config_obj['DEFAULT']
+        conn_info = connect_params_from_config(config)
+        conn_info.tablenames = args.tables
         use_locks(args.lock_server)
 
         log_level = convert_to_logging_level(args.log_level)

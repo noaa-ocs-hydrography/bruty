@@ -243,6 +243,11 @@ def iter_configs(config_filenames: Union[list, str, os.PathLike], log_files: boo
         yield config_filename, config_file
 
 
+def read_config(config_filename: str, log_files: bool = True, default_config_name: Union[str, os.PathLike] = ""):
+    for fname, config in iter_configs([config_filename], log_files, default_config_name):
+        return config
+
+
 def make_family_of_logs(name, root_filename, log_format=None, remove_other_file_loggers=True, weekly=True, log_level=logging.DEBUG):
     added_handlers = []
     # sets the parent logger to output to files

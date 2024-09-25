@@ -47,7 +47,7 @@ CONFIG_SECTION = 'insert'
 print("\nremove the hack setting the bruty and nbs directories into the python path\n")
 
 
-def launch(world_db, conn_info, for_navigation_flag=(True, True), override_epsg=NO_OVERRIDE, extra_debug=False, new_console=True,
+def launch(world_db, config_pth, tablenames, for_navigation_flag=(True, True), override_epsg=NO_OVERRIDE, extra_debug=False, new_console=True,
            lock=None, exclude=None, crop=False, log_path=None, env_path=r'', env_name='', minimized=False,
            fingerprint="", delete_existing=False, log_level=logging.INFO):
     """ for_navigation_flag = (use_nav_flag, nav_flag_value)
@@ -79,11 +79,12 @@ def launch(world_db, conn_info, for_navigation_flag=(True, True), override_epsg=
             cmds.append(env_path + " " + env_name)  # activate the environment
         cmds.append(f'{env_var_cmd} PYTHONPATH={nbs_code}{separator}{bruty_code}')  # add the NBS and Bruty code to the python path
         combine_args = ['python combine.py']
-        for table in conn_info.tablenames:
+        for table in tablenames:
             combine_args.extend(["-t", table])
         for exclusion in exclude:
             combine_args.extend(['-x', exclusion])
         combine_args.extend(["-b", str(world_db_path)])
+        combine_args.extend(["-c", str(config_pth)])
         if not for_navigation_flag[0]:  # not using the navigation flag
             combine_args.append("-i")
         else:  # using the navigation flag, so  see if it should be True (default) or False (needs arg)
@@ -91,7 +92,7 @@ def launch(world_db, conn_info, for_navigation_flag=(True, True), override_epsg=
                 combine_args.append("-n")
         combine_args.extend(['--log_level', str(log_level)])
         if crop:
-            combine_args.append('-c')
+            combine_args.append('-r')
         if override_epsg != NO_OVERRIDE:
             combine_args.extend(["-e", str(override_epsg)])
         if extra_debug:
@@ -104,8 +105,8 @@ def launch(world_db, conn_info, for_navigation_flag=(True, True), override_epsg=
             combine_args.extend(["-g", log_path])
         if fingerprint:
             combine_args.extend(['-f', fingerprint])
-        combine_args.extend(["-d", conn_info.database, "-r", str(conn_info.port), "-o", conn_info.hostname, "-u", conn_info.username,
-                             "-p", '"'+conn_info.password+'"'])
+        # combine_args.extend(["-d", conn_info.database, "-r", str(conn_info.port), "-o", conn_info.hostname, "-u", conn_info.username,
+        #                      "-p", '"'+conn_info.password+'"'])
         cmds.append(" ".join(combine_args))
         if platform.system() == 'Windows':
             cmds.append(f"exiter.bat {SUCCEEDED} {TILE_LOCKED}")  # exiter.bat closes the console if there was no error code, keeps it open if there was an error
@@ -267,7 +268,7 @@ def main(config):
                         lock = Lock(db.metadata_filename().with_suffix(".lock"), fail_when_locked=True, flags=LockFlags.EXCLUSIVE|LockFlags.NON_BLOCKING)
                         lock.acquire()
                         override = db.db.epsg if config.getboolean('override', False) else NO_OVERRIDE
-                        conn_info.tablenames = [tile_info.metadata_table_name(current_tile.dtype)]
+                        tablenames = [tile_info.metadata_table_name(current_tile.dtype)]
                         fingerprint = str(current_tile.hash_id) + "_" + datetime.now().isoformat()
                         if debug_launch:
                             use_locks(port)
@@ -284,7 +285,7 @@ def main(config):
                                 do_keyboard_actions(remaining_tiles, tile_processes)
                                 remove_finished_processes(tile_processes, remaining_tiles, max_tries)
 
-                            pid = launch(db, conn_info, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
+                            pid = launch(db, config._source_filename, tablenames, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
                                          override_epsg=override, extra_debug=debug_config, lock=port, exclude=exclude, crop=(current_tile.dtype==ENC),
                                          log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
                                          fingerprint=fingerprint, delete_existing=delete_existing, log_level=log_level)

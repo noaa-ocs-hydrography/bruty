@@ -5,12 +5,12 @@ import shutil
 
 from nbs.bruty.nbs_postgres import id_to_scoring, get_nbs_records, nbs_survey_sort, ConnectionInfo, connect_params_from_config, make_contributor_csv
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, NOT_NAV, INTERNAL, NAVIGATION, PUBLIC, connect_params_from_config, connection_with_retries
-from nbs.configs import iter_configs
+from nbs.configs import iter_configs, read_config
 from nbs.bruty.utils import remove_file
 import nbs.scripts
 
 script_dir = pathlib.Path(nbs.scripts.__path__[0])
-config_filename, config_file = [x for x in iter_configs([script_dir.joinpath(r'base_configs\nbs_postgres.config')])][0]
+config_file = read_config(script_dir.joinpath(r'base_configs\nbs_postgres.config')
 conn_info = connect_params_from_config(config_file['DEFAULT'])
 conn_info.database = "tile_specifications"
 fields, recs = get_nbs_records("xbox", conn_info, exclude_fields=['geometry', 'geometry_modified'])
