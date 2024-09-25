@@ -141,7 +141,7 @@ def get_postgres_processing_info(world_db_path, conn_info, for_navigation_flag=(
     all_fields, all_records = get_records(conn_info, cache_dir=world_db_path)
     sorted_recs, names_list, sort_dict, comp = get_sorting_info(all_fields, all_records, for_navigation_flag, exclude=exclude)
     transform_metadata = get_transform_metadata(all_fields, all_records)
-    if get_call_logger().level <= logging.DEBUG:
+    if get_call_logger().level != logging.NOTSET:
         debug_file = open(get_dbg_log_path()+".meta_table", "w")
         store_fields = ['from_filename', 'nbs_id',
                         'never_post', 'decay_score', 'manual_resolution', 'script_resolution', 'manual_point_spacing', 'script_point_spacing', 'for_navigation',
