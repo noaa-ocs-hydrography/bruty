@@ -509,6 +509,20 @@ def perform_qc_checks(db_path, conn_info, nav_flag_value, repair=True, check_las
                 LOGGER.info("consistency checks ok")
                 db.transaction_groups.set_finished(trans_id)
             else:
+                import smtplib
+                from email.message import EmailMessage
+
+                msg = EmailMessage()
+                msg['Subject'] = rf"Validation Error found {db_path}"
+                msg['From'] = "barry.gallagher@noaa.gov"
+                msg['To'] = "barry.gallagher@noaa.gov,barry.gallagher@gmail.com"
+                msg.set_content(f"{get_log_path()}\n\ntile_missing\n{tile_missing}\n\ntile_extra\n{tile_extra}\n\ncontributor_missing\n{contributor_missing}\n\nreinserts_remain\n{reinserts_remain}")
+
+                server = smtplib.SMTP('smtp.google.com', port=25)
+                server.set_debuglevel(1)
+                server.send_message(msg)
+                server.quit()
+
                 ret = SUCCEEDED
                 if world_raster_database.NO_LOCK:  # NO_LOCK means that we are not allowing multiple processes to work on one Tile/database at the same time - so use an advisory lock on the whole thine
                     p = pathlib.Path(db_path)

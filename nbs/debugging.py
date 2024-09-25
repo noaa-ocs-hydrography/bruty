@@ -34,7 +34,11 @@ def log_calls(func):
         debug_log.debug("Args:")
         debug_log.debug(pprint.pformat(args))
         debug_log.debug("KWArgs:")
-        debug_log.debug(pprint.pformat(kwargs))
+        for k, v in kwargs.items():
+            if callable(v):
+                debug_log.debug(str(k) + ": not printable - callable object")
+            else:
+                debug_log.debug(str(k) + ": " + pprint.pformat(v))
         # for key, val in kwargs.items():
         #     debug_log.debug(f"{key} : {val}")
         ret = func(*args, **kwargs)
