@@ -628,13 +628,13 @@ if __name__ == "__main__":
 
         log_level = convert_to_logging_level(args.log_level)
 
-        if True or args.debug:
+        if args.debug:
             setup_call_logger(args.bruty_path)  # in debug mode we want to see all the calls, otherwise this will be a no-op
-            # try:
+            try:
             shutil.copyfile(pathlib.Path(get_dbg_log_path()).parent.parent.joinpath("wdb_metadata.sqlite"),
                                 pathlib.Path(get_dbg_log_path()+"wdb_metadata.1start.sqlite"))
-            #except:
-            #    pass
+            except:
+               pass
         print("using log level", log_level)
         if args.logger_path:
             make_family_of_logs("nbs", args.logger_path, remove_other_file_loggers=False, log_level=log_level)
