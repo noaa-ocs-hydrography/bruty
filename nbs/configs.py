@@ -184,7 +184,8 @@ def load_config(config_filename: Union[str, os.PathLike], base_config_path: Unio
     return config_file
 
 
-def iter_configs(config_filenames: Union[list, str, os.PathLike], log_files: bool = True, default_config_name: Union[str, os.PathLike] = ""):
+def iter_configs(config_filenames: Union[list, str, os.PathLike], log_files: bool = True, default_config_name: Union[str, os.PathLike] = "",
+                 base_config_path: Union[str, os.PathLike] = None):
     """ Read all the configs using configparser and optionally modified by a default config file and base_configs.
     A ConfigParser object is created.  Then the default_config_name is loaded, if applicable.
     Then loads all configs from the base_configs directory (local to the script) listed in the [DEFAULT] section 'additional_configs' entry.
@@ -221,14 +222,16 @@ def iter_configs(config_filenames: Union[list, str, os.PathLike], log_files: boo
     config_filenames = [pathlib.Path(p) for p in config_filenames]
     for config_filename in filter(lambda fname: fname.name != default_config_name, config_filenames):
         config_path, just_cfg_filename = config_filename.parent, config_filename.name
-        if user_directory_exists:
-            base_config_path = config_path.parent.joinpath("base_configs")  # parallel to the user directory, so up one directory from config
-        else:
-            base_config_path = config_path.joinpath("base_configs")  # local to the config file
-        if not base_config_path.exists():
-            base_config_path = pathlib.Path("base_configs")  # local to the current directory
+        if base_config_path is None:
+            if user_directory_exists:
+                base_config_path = config_path.parent.joinpath("base_configs")  # parallel to the user directory, so up one directory from config
+            else:
+                base_config_path = config_path.joinpath("base_configs")  # local to the config file
             if not base_config_path.exists():
-                base_config_path = None  # use the local directory default
+                base_config_path = pathlib.Path("base_configs")  # local to the current directory
+                if not base_config_path.exists():
+                    base_config_path = None  # use the local directory default
+
         os.makedirs(os.path.join(config_path, "logs"), exist_ok=True)
         if default_config_name:
             initial_config = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
@@ -243,8 +246,19 @@ def iter_configs(config_filenames: Union[list, str, os.PathLike], log_files: boo
         yield config_filename, config_file
 
 
-def read_config(config_filename: str, log_files: bool = True, default_config_name: Union[str, os.PathLike] = ""):
-    for fname, config in iter_configs([config_filename], log_files, default_config_name):
+def read_config(config_filename: str, **kwargs):
+    """ Read a single config file and return the ConfigParser object.
+    All other parameters (kwargs) are passed to iter_configs().
+
+    Parameters
+    ----------
+    config_filename
+
+    Returns
+    -------
+
+    """
+    for fname, config in iter_configs([config_filename], **kwargs):
         return config
 
 
