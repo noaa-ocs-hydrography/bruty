@@ -1,4 +1,4 @@
-""" Run tile_export.py on each tile listed in the combine_spec table (views) as defined by the build flag and the config parameters specified
+""" Run tile_export.py on each tile listed in the combine_spec tables (views) as defined by the build flag and the config parameters specified
 """
 import datetime
 import multiprocessing

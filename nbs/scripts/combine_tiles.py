@@ -1,4 +1,4 @@
-""" Run combine.py on each tile listed in the combine_spec table as defined by the build flag and the config parameters specified
+""" Run combine.py on each tile listed in the combine_spec tables (views) as defined by the build flag and the config parameters specified
 """
 import multiprocessing
 import os
@@ -47,7 +47,7 @@ CONFIG_SECTION = 'insert'
 print("\nremove the hack setting the bruty and nbs directories into the python path\n")
 
 
-def launch(world_db, config_pth, tablenames, for_navigation_flag=(True, True), override_epsg=NO_OVERRIDE, extra_debug=False, new_console=True,
+def launch(world_db, view_pk_id, config_pth, tablenames, for_navigation_flag=(True, True), override_epsg=NO_OVERRIDE, extra_debug=False, new_console=True,
            lock=None, exclude=None, crop=False, log_path=None, env_path=r'', env_name='', minimized=False,
            fingerprint="", delete_existing=False, log_level=logging.INFO):
     """ for_navigation_flag = (use_nav_flag, nav_flag_value)
@@ -83,6 +83,7 @@ def launch(world_db, config_pth, tablenames, for_navigation_flag=(True, True), o
             combine_args.extend(["-t", table])
         for exclusion in exclude:
             combine_args.extend(['-x', exclusion])
+        combine_args.extend(["-k", str(view_pk_id)])
         combine_args.extend(["-b", str(world_db_path)])
         combine_args.extend(["-c", str(config_pth)])
         if not for_navigation_flag[0]:  # not using the navigation flag
@@ -267,11 +268,12 @@ def main(config):
                         lock = Lock(db.metadata_filename().with_suffix(".lock"), fail_when_locked=True, flags=LockFlags.EXCLUSIVE|LockFlags.NON_BLOCKING)
                         lock.acquire()
                         override = db.db.epsg if config.getboolean('override', False) else NO_OVERRIDE
-                        tablenames = [tile_info.metadata_table_name(current_tile.dtype)]
+                        tablenames = [tile_info.metadata_table_name(tile_info.datatype)]
                         fingerprint = str(current_tile.hash_id) + "_" + datetime.now().isoformat()
                         if debug_launch:
                             use_locks(port)
                             setup_call_logger(db.db.data_path)
+                            # NOTICE -- this function will not write to the combine_spec_view table with the status codes etc.
                             ret = process_nbs_database(db, conn_info, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
                                                        extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(current_tile.dtype==ENC),
                                                        delete_existing=delete_existing, log_level=log_level)
@@ -284,7 +286,7 @@ def main(config):
                                 do_keyboard_actions(remaining_tiles, tile_processes)
                                 remove_finished_processes(tile_processes, remaining_tiles, max_tries)
 
-                            pid = launch(db, config._source_filename, tablenames, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
+                            pid = launch(db, tile_info.view_id, config._source_filename, tablenames, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
                                          override_epsg=override, extra_debug=debug_config, lock=port, exclude=exclude, crop=(current_tile.dtype==ENC),
                                          log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
                                          fingerprint=fingerprint, delete_existing=delete_existing, log_level=log_level)

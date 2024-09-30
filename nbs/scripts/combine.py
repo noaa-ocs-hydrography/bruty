@@ -23,7 +23,7 @@ from nbs.bruty.utils import onerr, user_action, remove_file, QUIT, HELP
 from nbs.configs import get_logger, read_config, log_config, make_family_of_logs, show_logger_handlers, convert_to_logging_level
 from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_metadata, ConnectionInfo, connect_params_from_config
 from nbs.scripts.convert_csar import convert_csar_python
-from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION
+from nbs.scripts.tile_specs import TileInfo, iterate_tiles_table, create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION
 from nbs_utils.points_utils import to_npz
 from nbs.debugging import log_calls, get_call_logger, get_dbg_log_path, setup_call_logger
 
@@ -582,6 +582,8 @@ def make_parser():
                         help="location to config file for connection info")
     parser.add_argument("-t", "--table", action='append', type=str, dest="tables", metavar='table', default=[],
                         help="table to read from postgres database, can specify more than once")
+    parser.add_argument("-k", "--combine_pk_id", action='append', type=str, dest="combine_pk_id", metavar='combine_pk_id', default="",
+                        help="table to read from postgres database, can specify more than once")
     parser.add_argument("-x", "--exclude", action='append', type=int, dest="exclude", default=[],
                         help="nbs_ids to exclude from the combine process")
     parser.add_argument("-b", "--bruty_path", type=str, metavar='bruty_path', default="",
@@ -623,8 +625,12 @@ if __name__ == "__main__":
         config_obj = read_config(args.config_path)
         config = config_obj['DEFAULT']
         conn_info = connect_params_from_config(config)
+
         conn_info.tablenames = args.tables
         use_locks(args.lock_server)
+
+        tile_info = TileInfo.from_combine_spec(conn_info, args.combine_pk_id)
+        tile_info.update_table(start_time=datetime.now())
 
         log_level = convert_to_logging_level(args.log_level)
 

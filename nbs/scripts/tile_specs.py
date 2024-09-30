@@ -5,10 +5,11 @@ import logging
 import re
 
 import numpy
+import psycopg2
 from osgeo import ogr
 from shapely import wkt, wkb
 
-from data_management.db_connection import connect_with_retries
+from nbs.bruty.nbs_postgres import get_tablenames, show_last_ids, connection_with_retries, ConnectionInfo
 from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
 from nbs.bruty.raster_data import TiffStorage, LayersEnum
 from nbs.bruty.history import DiskHistory, RasterHistory, AccumulationHistory
@@ -17,6 +18,7 @@ from nbs.bruty.nbs_postgres import NOT_NAV, get_nbs_records, get_sorting_info, g
 from nbs.bruty.world_raster_database import WorldDatabase, use_locks, UTMTileBackendExactRes, NO_OVERRIDE
 from nbs.bruty.utils import ConsoleProcessTracker
 
+NO_DATA = -1
 SUCCEEDED = 0
 DATA_ERRORS = 3
 TILE_LOCKED = 4
@@ -29,6 +31,9 @@ LOGGER = get_logger('nbs.bruty.create_tiles')
 
 
 class TileInfo:
+    SOURCE_DATABASE = "tile_specifications"
+    SOURCE_TABLE = "combine_spec_view"
+
     OUT_OF_DATE = "out_of_date"
     SUMMARY = "change_summary"
     PB = 'production_branch'
@@ -37,6 +42,11 @@ class TileInfo:
     DATUM = 'datum'
     LOCALITY = 'locality'
     HEMISPHERE = 'hemisphere'
+    RESOLUTION = "resolution"
+    CLOSING_DISTANCE = 'closing_distance'
+    NOT_FOR_NAV = 'not_for_navigation'
+    DATATYPE = 'datatype'
+    VIEW_ID = 'b_id'
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
@@ -52,8 +62,11 @@ class TileInfo:
         self.datum = review_tile[self.DATUM]
         self.build = review_tile['build']
         self.locality = review_tile[self.LOCALITY]
-        self.resolution = review_tile["resolution"]
-        self.closing_dist = review_tile['closing_distance']
+        self.resolution = review_tile[self.RESOLUTION]
+        self.closing_dist = review_tile[self.CLOSING_DISTANCE]
+        self.datatype = review_tile[self.DATATYPE]
+        self.not_for_nav = review_tile[self.NOT_FOR_NAV]
+        self.view_id = review_tile[self.VIEW_ID]
 
         self.out_of_date = review_tile[self.OUT_OF_DATE]
         self.summary = review_tile[self.SUMMARY]
@@ -74,11 +87,30 @@ class TileInfo:
             res = self.resolution
         return hash_id(self.pb, self.utm, self.hemi, self.tile, self.datum, res)
 
-    def update_table_status(self, cursor, tablename="combine_spec"):  # @todo fix for combine_spec_view needing to know which res and datatype/not_for_nav was used
+    @classmethod
+    def from_combine_spec_view(cls, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), pk_id):
+        if isinstance(connection_info, ConnectionInfo):
+            conn_info = ConnectionInfo(cls.SOURCE_DATABASE, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [cls.SOURCE_TABLE])
+            conn, cursor = connection_with_retries(conn_info)
+        else:
+            cursor = connection_info
+        cursor.execute(f"""SELECT * from {cls.SOURCE_TABLE} WHERE b_id={pk_id}""",)
+        tile_info = cursor.fetchone()
+        return cls(tile_info)
+
+
+    def update_table_status(self, cursor, tablename=None):
+        if tablename is None:
+            tablename = self.SOURCE_TABLE
+        # trying to just save the b_id from the combine_spec_view and use that to update the combine_spec_bruty table
+        # cursor.execute(
+        #     f"""update {tablename} set ({self.OUT_OF_DATE},{self.SUMMARY})=(%s, %s)
+        #     where ({self.PB},{self.UTM},{self.HEMISPHERE},{self.TILE},{self.DATUM},{self.LOCALITY},{self.RESOLUTION}, {self.DATATYPE},{self.NOT_FOR_NAV})=(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        #     (self.out_of_date, self.summary, self.pb, self.utm, self.hemi.upper(), self.tile, self.datum, self.locality, self.resolution, self.datatype, self.not_for_nav))
         cursor.execute(
             f"""update {tablename} set ({self.OUT_OF_DATE},{self.SUMMARY})=(%s, %s) 
-            where ({self.PB},{self.UTM},{self.HEMISPHERE},{self.TILE},{self.DATUM},{self.LOCALITY})=(%s,%s,%s,%s,%s,%s)""",
-            (self.out_of_date, self.summary, self.pb, self.utm, self.hemi.upper(), self.tile, self.datum, self.locality))
+            where ({self.VIEW_ID})=(%s)""",
+            (self.out_of_date, self.summary, self.view_id))
 
     @property
     def geometry(self):
@@ -145,10 +177,16 @@ class TileInfo:
         # names.append(str(use_res))
         return "_".join(names)
 
-    def metadata_table_name(self, dtype: str):
+    def metadata_table_name(self, dtype: str=None):
+        if dtype is None:
+            dtype = self.datatype
         return self.base_name + "_" + dtype  # doesn't have Tile numbers in the metadata table
 
-    def bruty_db_name(self, dtype: str, for_nav: bool):
+    def bruty_db_name(self, dtype: str=None, for_nav: bool=None):
+        if dtype is None:
+            dtype = self.datatype
+        if for_nav is None:
+            for_nav = not self.not_for_nav
         names = [self.tile_name, dtype]
         if not for_nav:
             names.append(NOT_NAV)
@@ -188,8 +226,8 @@ class TileToProcess:
     closing: float = 0
 
 
-def create_world_db(root_path, tile_info: TileInfo, dtype: str, for_nav: bool, log_level=logging.INFO):
-    full_path = pathlib.Path(root_path).joinpath(tile_info.bruty_db_name(dtype, for_nav))
+def create_world_db(root_path, tile_info: TileInfo, log_level=logging.INFO):
+    full_path = pathlib.Path(root_path).joinpath(tile_info.bruty_db_name())
 
     try:  # see if there is an exising Bruty database
         db = WorldDatabase.open(full_path, log_level=log_level)
