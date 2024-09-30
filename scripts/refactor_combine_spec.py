@@ -1,4 +1,5 @@
 import datetime
+import pathlib
 
 from nbs import configs
 from nbs.bruty import nbs_postgres
@@ -55,7 +56,8 @@ conn_info = nbs_postgres.connect_params_from_config(config)
 conn_info.database = "tile_specifications"
 conn_info.tablenames = ['combine_spec_tiles']
 con, cursor = nbs_postgres.connection_with_retries(conn_info)
-if False:
+
+if False:  # split the old table into two
     cursor.execute(f"""select t_id, resolution, closing_distance from combine_spec_tiles""")
     tiles = cursor.fetchall()
     done = {}
@@ -68,16 +70,24 @@ if False:
             id_of_new_row = cursor.fetchone()[0]
     con.commit()
     con.close()
-if True:
+
+if False:  # fill in initial values
     #  WHERE production_branch='PBC' and tile=1 and resolution=4
-    cursor.execute(f"""select production_branch, locality, utm, hemisphere, datum, tile, resolution, datatype, not_for_nav, b_id, t_id from combine_spec_view""")
+    cursor.execute(f"""select exit_code, production_branch, locality, utm, hemisphere, datum, tile, resolution, datatype, not_for_nav, b_id, t_id from combine_spec_view""")
     tiles = cursor.fetchall()
-    for (production_branch, locality, utm, hemisphere, datum, tile, resolution, datatype, not_for_nav, b_id, t_id) in tiles:
+    for (exit_code, production_branch, locality, utm, hemisphere, datum, tile, resolution, datatype, not_for_nav, b_id, t_id) in tiles:
+        if exit_code is not None:
+            continue
         world_db_path = fr"X:\bruty_databases\{production_branch}_{locality}_utm{utm}{hemisphere}_{datum}_Tile{tile}_res{int(resolution)}_{datatype}{'_not_for_navigation'*not_for_nav}"
         try:
             db = WorldDatabase.open(world_db_path)
         except FileNotFoundError:
-            print(f"Could not open {world_db_path}")
+            if pathlib.Path(world_db_path).exists():
+                now = datetime.datetime.now()
+                cursor.execute(f"""UPDATE combine_spec_view SET start_time=%s, end_time=%s, exit_code=%s WHERE b_id=%s""",
+                               (now, now, -1, b_id))
+            else:
+                print(f"Could not open {world_db_path}")
         else:
             max_t = datetime.datetime(1, 1, 1)
             last_code = None

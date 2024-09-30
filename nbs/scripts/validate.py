@@ -35,19 +35,18 @@ def main(config):
         user_res = None
     try:
         for tile_info in iterate_tiles_table(config):
-            for res in tile_info.resolutions:
-                if not user_res or res in user_res:
-                    tile_info.res = res
-                    for nav_flag_value in (True, False):
-                        for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
-                            db_path = pathlib.Path(config['data_dir']).joinpath(tile_info.bruty_db_name(dtype, nav_flag_value))
-                            conn_info.tablenames = [tile_info.metadata_table_name(dtype)]
-                            errors = perform_qc_checks(db_path, conn_info, (True, nav_flag_value), repair=repair)
-                            # a missing database (like ENC_not_for_nav) returns None
-                            if errors is not None and any(errors):
-                                LOGGER.warning(f"{db_path}:\n  last insert finished without errors: {not errors[4]}\n"
-                                               f"  reinserts_remain: {errors[0]}\n  tile_missing: {errors[1]}\n"
-                                               f"  tile_extra: {errors[2]}\n  contributor_missing:{errors[3]}")
+            res = tile_info.resolution
+            if not user_res or res in user_res:
+                for nav_flag_value in (True, False):
+                    for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
+                        db_path = pathlib.Path(config['data_dir']).joinpath(tile_info.bruty_db_name(dtype, nav_flag_value))
+                        conn_info.tablenames = [tile_info.metadata_table_name(dtype)]
+                        errors = perform_qc_checks(db_path, conn_info, (True, nav_flag_value), repair=repair)
+                        # a missing database (like ENC_not_for_nav) returns None
+                        if errors is not None and any(errors):
+                            LOGGER.warning(f"{db_path}:\n  last insert finished without errors: {not errors[4]}\n"
+                                           f"  reinserts_remain: {errors[0]}\n  tile_missing: {errors[1]}\n"
+                                           f"  tile_extra: {errors[2]}\n  contributor_missing:{errors[3]}")
         ret = SUCCEEDED
     except Exception as e:
         traceback.print_exc()

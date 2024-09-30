@@ -86,14 +86,14 @@ def main(config):
     except KeyError:
         user_res = None
     for tile_info in iterate_tiles_table(config):
-        for res in tile_info.resolutions:
-            if user_res and res not in user_res:
+        res = tile_info.resolution
+        if user_res and res not in user_res:
+            continue
+        for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
+            if user_dtypes and dtype not in user_dtypes:
                 continue
-            for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
-                if user_dtypes and dtype not in user_dtypes:
-                    continue
-                for nav_flag_value in (True, False):
-                    remaining_tiles[TileToProcess(tile_info.hash_id(res), res, dtype, nav_flag_value)] = [tile_info, 0]
+            for nav_flag_value in (True, False):
+                remaining_tiles[TileToProcess(tile_info.hash_id(res), res, dtype, nav_flag_value)] = [tile_info, 0]
     debug_launch = interactive_debug and debug_config and max_processes < 2
     tile_processes = {}
     # careful not to iterate the dictionary and delete from it at the same time, so make a copy of the list of keys first
@@ -102,7 +102,7 @@ def main(config):
             tile_info = remaining_tiles[current_tile][0]
         except KeyError:  # the tile was running and in the list but got removed while we were looping on the cached list of tiles
             continue
-        tile_info.res = current_tile.res  # set this each time for each resolution listed in the data object
+        tile_info.resolution = current_tile.resolution  # set this each time for each resolution listed in the data object
 
         if not current_tile.nav_flag and current_tile.dtype == ENC:
             del remaining_tiles[current_tile]

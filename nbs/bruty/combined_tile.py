@@ -2,7 +2,7 @@ from nbs.bruty.abstract import VABC, abstractmethod
 
 class Tile(VABC):
     """ Class to encapulate a raster that has a history.
-    It should be able to get the current raster data and also at a previoud point in time.
+    It should be able to get the current raster data and also at a previous point in time.
     Initial thought is to have two sets of history, one based on insertion date and one based on survey date.
     Think of it as a VCS like GIT or SVN.
     Each transaction will be held as a double linked list of deltas between it and the next more recent version of the surface.

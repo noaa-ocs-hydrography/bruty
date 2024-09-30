@@ -185,15 +185,15 @@ class RasterExport:
     def filename_with_type_root(self, export_type) -> pathlib.Path:
         """no export time included"""
         t = self.tile_info
-        use_res = t.res
-        if t.res == int(t.res):
-            use_res = int(t.res)
+        use_res = t.resolution
+        if t.resolution == int(t.resolution):
+            use_res = int(t.resolution)
         base = str(self.output_base_path.joinpath(f"{t.pb}{t.utm}{t.hemi}_{t.locality}", export_type, f"Tile{t.tile}_{t.pb}{t.utm}{t.hemi}_{t.locality}_{use_res}m_{export_type}"))
         if self.data_time:
             base += "_" + self.data_time
-        use_closing = t.closing
-        if t.closing == int(t.closing):
-            use_closing = int(t.closing)
+        use_closing = t.closing_dist
+        if t.closing_dist == int(t.closing_dist):
+            use_closing = int(t.closing_dist)
         base += f"_{use_closing}m"
         return pathlib.Path(base)
 
@@ -438,7 +438,7 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                     # databases = [root_dir.joinpath(db_name) for db_name in databases]
                     # nav_sensitive_cnt = add_databases(databases, nav_dataset, nav_score, comp)
                     del nav_score, nav_dataset  # closes the files so they can be copied
-                    complete_export(nav_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
+                    complete_export(nav_export, all_simple_records, tile_info.closing_dist, tile_info.epsg, decimals=decimals)
                     unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav)
                     navigation_id = write_export_record(conn_info_exports, nav_export, navigation=True, notes=unreviewed_notes)
 
@@ -468,7 +468,7 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                             public_id = navigation_id
                         else:
                             copy_dataset(dataset, public_export.extracted_filename)
-                            complete_export(public_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
+                            complete_export(public_export, all_simple_records, tile_info.closing_dist, tile_info.epsg, decimals=decimals)
                             public_id = write_export_record(conn_info_exports, public_export, public=True, notes=unreviewed_notes)
 
                     if tile_info.internal:
@@ -499,7 +499,7 @@ def combine_and_export(config, tile_info, all_simple_records, comp, export_time=
                             internal_id = public_id
                         else:
                             copy_dataset(dataset, internal_export.extracted_filename)
-                            complete_export(internal_export, all_simple_records, tile_info.closing, tile_info.epsg, decimals=decimals)
+                            complete_export(internal_export, all_simple_records, tile_info.closing_dist, tile_info.epsg, decimals=decimals)
                             internal_id = write_export_record(conn_info_exports, internal_export, internal=True, notes=unreviewed_notes)
 
                 for exp, wanted in ((nav_export, tile_info.navigation), (internal_export, tile_info.internal), (public_export, tile_info.public)):
@@ -561,8 +561,8 @@ def setup_export_raster(filename, tile_info, db):
         miny = min(cy)
         maxy = max(cy)
     wkt = make_mllw_height_wkt(db.db.tile_scheme.epsg)
-    res = tile_info.res  # tile_record[resolution_index]
-    closing_dist = tile_info.closing
+    res = tile_info.resolution  # tile_record[resolution_index]
+    closing_dist = tile_info.closing_dist
     # center the output cells at origin of UTM like Coast Survey standard -- this will align with Coast Survey Bruty tiles
     # basically a cell center would fall at 0,0 of the coordinate system
     use_minx = ((minx - closing_dist) // res) * res - res / 2.0
@@ -1307,7 +1307,7 @@ def get_tile_records(conn_info: ConnectionInfo, tile_info, select="id", **kwargs
     connection, cursor = connection_with_retries(conn_info)
     rids = []
     for tablename in conn_info.tablenames:
-        record = [tile_info.tile, tile_info.utm, tile_info.hemi.upper(), tile_info.datum, tile_info.pb, tile_info.locality, tile_info.res, tile_info.closing]
+        record = [tile_info.tile, tile_info.utm, tile_info.hemi.upper(), tile_info.datum, tile_info.pb, tile_info.locality, tile_info.resolution, tile_info.closing_dist]
         query = f"""select {select} FROM {tablename} WHERE tile=%s AND utm=%s AND hemisphere=%s AND datum=%s AND production_branch=%s AND locality=%s AND resolution=%s AND closing_dist=%s"""
         for key, val in kwargs.items():
             query += f" AND {key}=%s"
@@ -1364,7 +1364,7 @@ def update_export_record(conn_info: ConnectionInfo, row_id: int, **to_update):
 
 
 def write_export_record(conn_info: ConnectionInfo, export: RasterExport, internal: bool = False, navigation: bool = False, public: bool = False, notes=""):
-    spec_table = "combine_spec"
+    spec_table = "combine_spec_tiles"
     id_of_new_row = None
     if conn_info.database is not None:
         connection, cursor = connection_with_retries(conn_info)
@@ -1378,7 +1378,7 @@ def write_export_record(conn_info: ConnectionInfo, export: RasterExport, interna
             raise BrutyError(f"Could not find {spec_table} record for {pri_key}")
         # @TODO this should be a dictionary but there is no clear syntax for writing dicts directly.
         #   make or find a wrapper which is like: con.execute(insert into table (dict.keys()) values (dict.values()))
-        record = [ti.tile, ti.utm, ti.hemi.upper(), ti.datum, ti.pb, ti.locality, ti.res, ti.closing,
+        record = [ti.tile, ti.utm, ti.hemi.upper(), ti.datum, ti.pb, ti.locality, ti.resolution, ti.closing_dist,
                   str(export.cog_filename), str(export.rat_filename), export.data_time, export.export_time,
                   geometry, internal, navigation, public, notes]
         q_str = ", ".join(["%s"] * len(record))

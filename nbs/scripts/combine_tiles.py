@@ -155,11 +155,11 @@ def remove_finished_processes(tile_processes, remaining_tiles, max_tries):
                 # treat it like an unhandled exception in the subprocess - retry and increment the count
                 # also wait a moment to let the network recover in case that helps
                 msg = traceback.format_exc()
-                LOGGER.warning(f"Exception accessing bruty db for {remaining_tiles[key][0]} {key.dtype} res={key.res}:\n{msg}")
+                LOGGER.warning(f"Exception accessing bruty db for {remaining_tiles[key][0]} {key.dtype} res={key.resolution}:\n{msg}")
                 reason = "failed with a sqlite Operational error or OSError"
                 retry = True
                 time.sleep(5)
-            LOGGER.info(f"Combine {reason} for {remaining_tiles[key][0]} {key.dtype} res={key.res}")
+            LOGGER.info(f"Combine {reason} for {remaining_tiles[key][0]} {key.dtype} res={key.resolution}")
             if retry:
                 remaining_tiles[key][1] += 1  # set the tile to try again later and note that it is retrying
             else:
@@ -172,7 +172,7 @@ def do_keyboard_actions(remaining_tiles, tile_processes):
     if action == QUIT:
         raise UserCancelled("User pressed keyboard quit")
     elif action == HELP:
-        descr_of_running_processes = '\n'.join([f'{prc.tile_info} {k.res} {k.dtype}' for k, prc in tile_processes.items()])
+        descr_of_running_processes = '\n'.join([f'{prc.tile_info} {k.resolution} {k.dtype}' for k, prc in tile_processes.items()])
         print(f"Remaining tiles: {len(remaining_tiles)}\nCurrently running:{len(tile_processes)}\n{descr_of_running_processes}")
 
 
@@ -214,14 +214,14 @@ def main(config):
     except KeyError:
         user_res = None
     for tile_info in iterate_tiles_table(config):
-        for res in tile_info.resolutions:
-            if user_res and res not in user_res:
+        res = tile_info.resolution
+        if user_res and res not in user_res:
+            continue
+        for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
+            if user_dtypes and dtype not in user_dtypes:
                 continue
-            for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
-                if user_dtypes and dtype not in user_dtypes:
-                    continue
-                for nav_flag_value in (True, False):
-                    remaining_tiles[TileToProcess(tile_info.hash_id(res), res, dtype, nav_flag_value)] = [tile_info, 0]
+            for nav_flag_value in (True, False):
+                remaining_tiles[TileToProcess(tile_info.hash_id(res), res, dtype, nav_flag_value)] = [tile_info, 0]
     debug_launch = interactive_debug and debug_config and max_processes < 2
     tile_processes = {}
     try:
@@ -235,9 +235,8 @@ def main(config):
                     tile_info = remaining_tiles[current_tile][0]
                 except KeyError:  # the tile was running and in the list but got removed while we were looping on the cached list of tiles
                     continue
-                tile_info.res = current_tile.res  # set this each time for each resolution listed in the data object
 
-                LOGGER.info(f"starting combine for {tile_info} {current_tile.res}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}" +
+                LOGGER.info(f"starting combine for {tile_info} {current_tile.resolution}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}" +
                             f"\n  {len(remaining_tiles)} remain including the {len(tile_processes) + 1} currently running")
                 if not current_tile.nav_flag and current_tile.dtype == ENC:
                     LOGGER.debug(f"  Skipping ENC with for_navigation=False since all ENC data must be for navigation")
@@ -253,7 +252,7 @@ def main(config):
                     # this happened as a network issue - we will skip it for now and come back and give the network some time to recover
                     # but we will count it as a retry in case there is a corrupted file or something
                     msg = traceback.format_exc()
-                    LOGGER.warning(f"Exception accessing bruty db for {tile_info} {current_tile.res}m {current_tile.dtype}:\n{msg}")
+                    LOGGER.warning(f"Exception accessing bruty db for {tile_info} {current_tile.resolution}m {current_tile.dtype}:\n{msg}")
                     time.sleep(5)
                     remaining_tiles[current_tile][1] += 1
                     if remaining_tiles[current_tile][1] > max_tries:
@@ -293,13 +292,13 @@ def main(config):
                             if running_process.console.last_pid != pid:
                                 LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
                             else:
-                                LOGGER.debug(f"Started PID {pid} for {tile_info} {current_tile.res}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
+                                LOGGER.debug(f"Started PID {pid} for {tile_info} {current_tile.resolution}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
 
                             # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
                             tile_processes[current_tile] = TileProcess(running_process, tile_info, db, fingerprint, lock)
                         del lock  # unlocks if the lock wasn't stored in the tile_process
                     except AlreadyLocked:
-                        LOGGER.debug(f"delay combine due to data lock for {tile_info} {current_tile.res}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
+                        LOGGER.debug(f"delay combine due to data lock for {tile_info} {current_tile.resolution}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
             # remove finished processes from the list or this becomes an infinite loop
             remove_finished_processes(tile_processes, remaining_tiles, max_tries)
 

@@ -52,25 +52,11 @@ class TileInfo:
         self.datum = review_tile[self.DATUM]
         self.build = review_tile['build']
         self.locality = review_tile[self.LOCALITY]
-        self.resolutions = review_tile["resolution"]
-
-        # convert from string if needed
-        if isinstance(self.resolutions, str):
-            self.resolutions = list(map(float, self.resolutions.split(",")))
-        # convert to float in case they passed in integers
-        self.resolutions = list(map(float, self.resolutions))
-        self.closing_dists = review_tile['closing_distance']
-        # convert from string if needed
-        if isinstance(self.closing_dists, str):
-            self.closing_dists = list(map(float, self.closing_dists.split(",")))
-        # convert to float in case they passed in integers
-        self.closing_dists = list(map(float, self.closing_dists))
+        self.resolution = review_tile["resolution"]
+        self.closing_dist = review_tile['closing_distance']
 
         self.out_of_date = review_tile[self.OUT_OF_DATE]
         self.summary = review_tile[self.SUMMARY]
-        idx = numpy.argmin(self.resolutions)
-        self.res = self.resolutions[idx]
-        self.closing = self.closing_dists[idx]
         self.epsg = review_tile['st_srid']
         self.geometry = review_tile['geometry']
         self.public = review_tile['combine_public']  # public - included "unqualified"
@@ -85,10 +71,10 @@ class TileInfo:
 
     def hash_id(self, res=None):
         if res is None:
-            res = self.res
+            res = self.resolution
         return hash_id(self.pb, self.utm, self.hemi, self.tile, self.datum, res)
 
-    def update_table_status(self, cursor, tablename="combine_spec"):
+    def update_table_status(self, cursor, tablename="combine_spec"):  # @todo fix for combine_spec_view needing to know which res and datatype/not_for_nav was used
         cursor.execute(
             f"""update {tablename} set ({self.OUT_OF_DATE},{self.SUMMARY})=(%s, %s) 
             where ({self.PB},{self.UTM},{self.HEMISPHERE},{self.TILE},{self.DATUM},{self.LOCALITY})=(%s,%s,%s,%s,%s,%s)""",
@@ -142,10 +128,10 @@ class TileInfo:
         names = [self.base_name]
         if self.tile not in (None, ""):  # putting tile before the type makes it sort better by name
             names.append(f"Tile{self.tile}")
-        if self.res not in (None, ""):  # putting tile before the type makes it sort better by name
-            use_res = self.res
-            if int(self.res) == self.res:  # remove the decimal point if it's exact integer ("4" instead of "4.0")
-                use_res = int(self.res)
+        if self.resolution not in (None, ""):  # putting tile before the type makes it sort better by name
+            use_res = self.resolution
+            if int(self.resolution) == self.resolution:  # remove the decimal point if it's exact integer ("4" instead of "4.0")
+                use_res = int(self.resolution)
             names.append("res" + str(use_res))
         return "_".join(names)
 
@@ -153,9 +139,9 @@ class TileInfo:
     def full_name(self):
         names = [self.tile_name]
         # Resolution is now in the Tile_name since combines are node based and have to be done custom for each resolution
-        # use_res = self.res
-        # if int(self.res) == self.res:  # remove the decimal point if it's exact integer ("4" instead of "4.0")
-        #     use_res = int(self.res)
+        # use_res = self.resolution
+        # if int(self.resolution) == self.resolution:  # remove the decimal point if it's exact integer ("4" instead of "4.0")
+        #     use_res = int(self.resolution)
         # names.append(str(use_res))
         return "_".join(names)
 
@@ -196,7 +182,7 @@ class TileProcess:
 @dataclass(frozen=True)
 class TileToProcess:
     hash_id: str
-    res: float
+    resolution: float
     dtype: str = ""
     nav_flag: bool = True
     closing: float = 0
@@ -213,22 +199,22 @@ def create_world_db(root_path, tile_info: TileInfo, dtype: str, for_nav: bool, l
             aoi = ((tile_info.minx, tile_info.miny), (tile_info.maxx, tile_info.maxy))
         else:
             aoi = None
-        if tile_info.res > 4:
+        if tile_info.resolution > 4:
             zoom = 10
-        elif tile_info.res > 2:
+        elif tile_info.resolution > 2:
             zoom = 11
-        elif tile_info.res > 1:
+        elif tile_info.resolution > 1:
             zoom = 12
         else:
             zoom = 13
         # offset comes from NOAA wanting cell center to align at origin
         os.makedirs(root_path, exist_ok=True)
         db = WorldDatabase(
-            UTMTileBackendExactRes(tile_info.res, tile_info.res, epsg, RasterHistory, DiskHistory, TiffStorage, full_path,
-                                   offset_x=tile_info.res / 2, offset_y=tile_info.res / 2,
+            UTMTileBackendExactRes(tile_info.resolution, tile_info.resolution, epsg, RasterHistory, DiskHistory, TiffStorage, full_path,
+                                   offset_x=tile_info.resolution / 2, offset_y=tile_info.resolution / 2,
                                    zoom_level=zoom, log_level=log_level), aoi, log_level=log_level)
-    if db.res_x > tile_info.res:
-        raise BrutyError(f"Existing Bruty data has resolution of {db.res_x} but requested Tile {tile_info.full_name} wants at least {tile_info.res}")
+    if db.res_x > tile_info.resolution:
+        raise BrutyError(f"Existing Bruty data has resolution of {db.res_x} but requested Tile {tile_info.full_name} wants at least {tile_info.resolution}")
     return db
 
 
@@ -247,7 +233,7 @@ def iterate_tiles_table(config):
     conn_info.database = "tile_specifications"
     # tile specs are now being held in views, so we have to read the combine_specs table
     # then read the geometry from the view of the equivalent area/records
-    fields, records = get_nbs_records("combine_spec", conn_info, geom_name='geometry', order='ORDER BY tile ASC')
+    fields, records = get_nbs_records("(SELECT * from combine_spec_resolutions JOIN combine_spec_tiles ON (tile_id = t_id)", conn_info, geom_name='geometry', order='ORDER BY tile ASC')
     branch_utms = {}
     for review_tile in records:
         utms = branch_utms.setdefault(review_tile['production_branch'], set())

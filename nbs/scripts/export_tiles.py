@@ -1,4 +1,4 @@
-""" Run combine.py on each tile listed in the combine_spec table (views) as defined by the build flag and the config parameters specified
+""" Run tile_export.py on each tile listed in the combine_spec table (views) as defined by the build flag and the config parameters specified
 """
 import datetime
 import multiprocessing
@@ -163,11 +163,11 @@ def remove_finished_processes(tile_processes, remaining_tiles, max_tries):
                 # treat it like an unhandled exception in the subprocess - retry and increment the count
                 # also wait a moment to let the network recover in case that helps
                 msg = traceback.format_exc()
-                LOGGER.warning(f"Exception accessing bruty db for {remaining_tiles[key][0]} {key.dtype} res={key.res}:\n{msg}")
+                LOGGER.warning(f"Exception accessing bruty db for {remaining_tiles[key][0]} {key.dtype} res={key.resolution}:\n{msg}")
                 reason = "failed with a sqlite Operational error"
                 retry = True
                 time.sleep(5)
-            LOGGER.info(f"Export {reason} for {remaining_tiles[key][0]} {key.dtype} res={key.res}")
+            LOGGER.info(f"Export {reason} for {remaining_tiles[key][0]} {key.dtype} res={key.resolution}")
             if retry:
                 remaining_tiles[key][1] += 1  # set the tile to try again later and note that it is retrying
             else:
@@ -180,7 +180,7 @@ def do_keyboard_actions(remaining_tiles, tile_processes):
     if action == QUIT:
         raise UserCancelled("User pressed keyboard quit")
     elif action == HELP:
-        descr_of_running_processes = '\n'.join([f'{prc.tile_info} {k.res} {k.dtype}' for k, prc in tile_processes.items()])
+        descr_of_running_processes = '\n'.join([f'{prc.tile_info} {k.resolution} {k.dtype}' for k, prc in tile_processes.items()])
         print(f"Remaining tiles: {len(remaining_tiles)}\nCurrently running:\n{descr_of_running_processes}")
 
 
@@ -218,11 +218,11 @@ def main(config):
     # make sure to delete the entries when they finish
     remaining_tiles = {}
     for tile_info in tile_list:
-        for res1, closing1 in zip(tile_info.resolutions, tile_info.closing_dists):
-            if interactive_debug and debug_config and max_processes < 2:
-                if user_res and res1 not in user_res:
-                    continue
-            remaining_tiles[TileToProcess(tile_info.hash_id(res1), res1, closing=closing1)] = [tile_info, 0]
+        res1, closing1 = tile_info.resolution, tile_info.closing_dist
+        if interactive_debug and debug_config and max_processes < 2:
+            if user_res and res1 not in user_res:
+                continue
+        remaining_tiles[TileToProcess(tile_info.hash_id(res1), res1, closing=closing1)] = [tile_info, 0]
 
     cached_metadata_pb = None
     files_to_delete = []
@@ -248,9 +248,6 @@ def main(config):
                     tile_info = remaining_tiles[current_tile][0]
                 except KeyError:  # the tile was running and in the list but got removed while we were looping on the cached list of tiles
                     continue
-
-                tile_info.res = current_tile.res  # set the specific resolution and closing distance for processing
-                tile_info.closing = current_tile.closing  # will be read by the export function (after pickling)
 
                 # Lock all the possible combine databases so we can export safely -- this is only effective on one OS
                 # so if linux is combining and Windows tries to export they won't see each others locks.
@@ -315,7 +312,7 @@ def main(config):
                             # this happened as a network issue - we will skip it for now and come back and give the network some time to recover
                             # but we will count it as a retry in case there is a corrupted file or something
                             msg = traceback.format_exc()
-                            LOGGER.warning(f"Exception accessing bruty db for {tile_info} {current_tile.res}m {current_tile.dtype}:\n{msg}")
+                            LOGGER.warning(f"Exception accessing bruty db for {tile_info} {current_tile.resolution}m {current_tile.dtype}:\n{msg}")
                             time.sleep(5)
                             remaining_tiles[current_tile][1] += 1
                             if remaining_tiles[current_tile][1] > max_tries:
@@ -331,7 +328,7 @@ def main(config):
                             fingerprint = str(current_tile.hash_id) + "_" + datetime.datetime.now().isoformat()
 
                             pid, script_path = launch(config._source_filename, cache_file, tile_cache, export_time, env_path=env_path,
-                                         env_name=env_name, tile_id=(tile_info.tile, tile_info.res), decimals=decimals, minimized=minimized,
+                                         env_name=env_name, tile_id=(tile_info.tile, tile_info.resolution), decimals=decimals, minimized=minimized,
                                          remove_cache=use_cached_meta, fingerprint=fingerprint)
                             running_process = ConsoleProcessTracker(["python", fingerprint, script_path])
                             if running_process.console.last_pid != pid:
