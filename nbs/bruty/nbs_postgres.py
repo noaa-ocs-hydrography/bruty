@@ -171,6 +171,27 @@ def last_nbs_id(table_name, cursor):
     (last_num, ) = cursor.fetchone()
     return last_num
 
+def pg_update(cursor, table_name, where, **kwargs):
+    """ Update a column in a table with a list of values
+
+    Parameters
+    ----------
+    cursor
+        open psycopg2 cursor
+    table_name
+        name of the table to update
+    column_name
+        name of the column to update
+    values
+        list of values to update the column with
+    Returns
+    -------
+    None
+    """
+    set_str = ', '.join([f"{k} = {v}" for k,v in kwargs.items()])
+    where_str = ' AND '.join([f"{k} = {v}" for k,v in where.items()])
+    update_query = f"""UPDATE {table_name} SET {set_str} WHERE {where_str}"""
+    cursor.execute(update_query)
 
 def create_identity_column(table_name, start_val, conn_info: ConnectionInfo, col_name=NBS_ID_STR, force_restart=False, drop_add=False):
     """ Ensures there is a column which is a non-null identity.

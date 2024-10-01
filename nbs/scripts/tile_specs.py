@@ -9,7 +9,7 @@ import psycopg2
 from osgeo import ogr
 from shapely import wkt, wkb
 
-from nbs.bruty.nbs_postgres import get_tablenames, show_last_ids, connection_with_retries, ConnectionInfo
+from nbs.bruty.nbs_postgres import get_tablenames, show_last_ids, connection_with_retries, ConnectionInfo, pg_update
 from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
 from nbs.bruty.raster_data import TiffStorage, LayersEnum
 from nbs.bruty.history import DiskHistory, RasterHistory, AccumulationHistory
@@ -47,6 +47,9 @@ class TileInfo:
     NOT_FOR_NAV = 'not_for_navigation'
     DATATYPE = 'datatype'
     VIEW_ID = 'b_id'
+    START_TIME = 'start_time'
+    END_TIME = 'end_time'
+    EXIT_CODE = 'exit_code'
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
@@ -70,6 +73,9 @@ class TileInfo:
 
         self.out_of_date = review_tile[self.OUT_OF_DATE]
         self.summary = review_tile[self.SUMMARY]
+        self.start_time = review_tile[self.START_TIME]
+        self.end_time = review_tile[self.END_TIME]
+        self.exit_code = review_tile[self.EXIT_CODE]
         self.epsg = review_tile['st_srid']
         self.geometry = review_tile['geometry']
         self.public = review_tile['combine_public']  # public - included "unqualified"
@@ -88,29 +94,52 @@ class TileInfo:
         return hash_id(self.pb, self.utm, self.hemi, self.tile, self.datum, res)
 
     @classmethod
-    def from_combine_spec_view(cls, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), pk_id):
+    def from_combine_spec_view(cls, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), pk_id, database=None, table=None):
+        if database is None:
+            database = cls.SOURCE_DATABASE
+        if table is None:
+            table = cls.SOURCE_TABLE
         if isinstance(connection_info, ConnectionInfo):
-            conn_info = ConnectionInfo(cls.SOURCE_DATABASE, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [cls.SOURCE_TABLE])
+            conn_info = ConnectionInfo(database, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [table])
             conn, cursor = connection_with_retries(conn_info)
         else:
             cursor = connection_info
-        cursor.execute(f"""SELECT * from {cls.SOURCE_TABLE} WHERE b_id={pk_id}""",)
+        cursor.execute(f"""SELECT * from {table} WHERE b_id={pk_id}""",)
         tile_info = cursor.fetchone()
         return cls(tile_info)
 
+    @classmethod
+    def update_table(cls, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), where, database=None, table=None, **kwargs):
+        if database is None:
+            database = cls.SOURCE_DATABASE
+        if table is None:
+            table = cls.SOURCE_TABLE
+        if isinstance(connection_info, ConnectionInfo):
+            conn_info = ConnectionInfo(database, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [table])
+            conn, cursor = connection_with_retries(conn_info)
+        else:
+            cursor = connection_info
+        pg_update(cursor, table, where, **kwargs)
 
-    def update_table_status(self, cursor, tablename=None):
-        if tablename is None:
-            tablename = self.SOURCE_TABLE
+    def update_table_status(self,  connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), database=None, table=None):
+        if database is None:
+            database = self.SOURCE_DATABASE
+        if table is None:
+            table = self.SOURCE_TABLE
+        if isinstance(connection_info, ConnectionInfo):
+            conn_info = ConnectionInfo(database, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [table])
+            conn, cursor = connection_with_retries(conn_info)
+        else:
+            cursor = connection_info
         # trying to just save the b_id from the combine_spec_view and use that to update the combine_spec_bruty table
         # cursor.execute(
         #     f"""update {tablename} set ({self.OUT_OF_DATE},{self.SUMMARY})=(%s, %s)
         #     where ({self.PB},{self.UTM},{self.HEMISPHERE},{self.TILE},{self.DATUM},{self.LOCALITY},{self.RESOLUTION}, {self.DATATYPE},{self.NOT_FOR_NAV})=(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         #     (self.out_of_date, self.summary, self.pb, self.utm, self.hemi.upper(), self.tile, self.datum, self.locality, self.resolution, self.datatype, self.not_for_nav))
         cursor.execute(
-            f"""update {tablename} set ({self.OUT_OF_DATE},{self.SUMMARY})=(%s, %s) 
+            f"""update {table} set ({self.START_TIME},{self.END_TIME},{self.EXIT_CODE},{self.OUT_OF_DATE},{self.SUMMARY})=(%s, %s, %s, %s, %s) 
             where ({self.VIEW_ID})=(%s)""",
-            (self.out_of_date, self.summary, self.view_id))
+            (self.start_time, self.end_time, self.exit_code, self.out_of_date, self.summary, self.view_id))
 
     @property
     def geometry(self):

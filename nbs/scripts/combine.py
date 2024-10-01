@@ -630,7 +630,10 @@ if __name__ == "__main__":
         use_locks(args.lock_server)
 
         tile_info = TileInfo.from_combine_spec(conn_info, args.combine_pk_id)
-        tile_info.update_table(start_time=datetime.now())
+        tile_info.start_time = datetime.now()
+        tile_info.update_table_status(conn_info)
+        # or
+        tile_info.update_table(conn_info, {'b_id': tile_info.view_id}, start_time=datetime.now())
 
         log_level = convert_to_logging_level(args.log_level)
 
@@ -699,6 +702,11 @@ if __name__ == "__main__":
                 db.completion_codes[args.fingerprint] = d
             except:
                 pass
+        tile_info.end_time = datetime.now()
+        tile_info.exit_code = ret
+        tile_info.update_table_status(conn_info)
+        tile_info.update_table(conn_info, {'b_id': tile_info.view_id}, end_time=datetime.now(), exit_code=ret)
+
         if args.debug:
             try:
                 shutil.copyfile(pathlib.Path(get_dbg_log_path()).parent.parent.joinpath("wdb_metadata.sqlite"),

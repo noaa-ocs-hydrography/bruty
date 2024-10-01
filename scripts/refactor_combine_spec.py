@@ -14,12 +14,11 @@ SELECT * FROM combine_spec_bruty B JOIN combine_spec_resolutions R ON (B.res_id 
 """ 
 CREATE or REPLACE VIEW combine_spec_overview as
 SELECT CONCAT('Tile ',tile,' ', resolution,'m ', datum, ' ', production_branch, '_', utm, hemisphere, ' ', locality) tile_name,
-	bool_and(end_time>combine_time and start_time>=combine_time) is_finished, bool_or(start_time>=combine_time) has_started, bool_and(start_time<combine_time) is_waiting, 
+	restart_combine, bool_or(exit_code>0) has_errors, bool_and(end_time>combine_time and start_time>=combine_time) is_finished, bool_or(start_time>=combine_time) has_started, bool_and(start_time<combine_time) is_waiting, 
 	sum((end_time>=start_time and start_time>=combine_time)::int) ran, sum((end_time<start_time or start_time<combine_time)::int) remaining, sum((end_time<start_time)::int) running,
-	MIN(end_time) age, geometry
+	MIN(end_time) age, geometry, tile, utm, datum, resolution, production_branch, hemisphere, locality, r_id, t_id
 FROM combine_spec_view
-	-- WHERE t_id=3
-GROUP BY tile, utm, datum, resolution, production_branch, hemisphere, locality, geometry
+GROUP BY tile, utm, datum, resolution, production_branch, hemisphere, locality, geometry, restart_combine, r_id, t_id
 ORDER BY production_branch, utm, tile desc;
 """
 
