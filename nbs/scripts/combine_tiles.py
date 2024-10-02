@@ -1,6 +1,7 @@
 """ Run combine.py on each tile listed in the combine_spec tables (views) as defined by the build flag and the config parameters specified
 """
 import multiprocessing
+from dataclasses import dataclass
 import os
 import sqlite3
 import sys
@@ -145,8 +146,8 @@ def remove_finished_processes(tile_processes, remaining_tiles, max_tries):
                     tile_processes[key].clear_finish_code()  # remove record so we don't just pile up a lot of needless records
                     retry = True
                     # reduce the counter by one so we don't stop trying just because the tile was locked
-                    remaining_tiles[key][1] -= 1
-                elif remaining_tiles[key][1] + 1 >= max_tries:
+                    remaining_tiles[key].count -= 1
+                elif remaining_tiles[key].count + 1 >= max_tries:
                     reason = "failed too many times"
                 else:
                     reason = "failed and will retry"
@@ -156,13 +157,13 @@ def remove_finished_processes(tile_processes, remaining_tiles, max_tries):
                 # treat it like an unhandled exception in the subprocess - retry and increment the count
                 # also wait a moment to let the network recover in case that helps
                 msg = traceback.format_exc()
-                LOGGER.warning(f"Exception accessing bruty db for {remaining_tiles[key][0]} {key.dtype} res={key.resolution}:\n{msg}")
+                LOGGER.warning(f"Exception accessing bruty db for {remaining_tiles[key].info} {key.dtype} res={key.resolution}:\n{msg}")
                 reason = "failed with a sqlite Operational error or OSError"
                 retry = True
                 time.sleep(5)
-            LOGGER.info(f"Combine {reason} for {remaining_tiles[key][0]} {key.dtype} res={key.resolution}")
+            LOGGER.info(f"Combine {reason} for {remaining_tiles[key].info} {key.dtype} res={key.resolution}")
             if retry:
-                remaining_tiles[key][1] += 1  # set the tile to try again later and note that it is retrying
+                remaining_tiles[key].count += 1  # set the tile to try again later and note that it is retrying
             else:
                 del remaining_tiles[key]  # remove the tile from the list of tiles to process in the future
             del tile_processes[key]  # remove the instance from our list of active processes
@@ -176,6 +177,10 @@ def do_keyboard_actions(remaining_tiles, tile_processes):
         descr_of_running_processes = '\n'.join([f'{prc.tile_info} {k.resolution} {k.dtype}' for k, prc in tile_processes.items()])
         print(f"Remaining tiles: {len(remaining_tiles)}\nCurrently running:{len(tile_processes)}\n{descr_of_running_processes}")
 
+@dataclass
+class TileRuns:
+    info: TileInfo
+    count: int
 
 def main(config):
     """
@@ -214,7 +219,8 @@ def main(config):
             user_res = None
     except KeyError:
         user_res = None
-    for tile_info in iterate_tiles_table(config):
+    t1 = time.time()
+    for tile_info in iterate_tiles_table(config, max_tries):
         res = tile_info.resolution
         if user_res and res not in user_res:
             continue
@@ -222,8 +228,16 @@ def main(config):
             if user_dtypes and dtype not in user_dtypes:
                 continue
             for nav_flag_value in (True, False):
-                remaining_tiles[TileToProcess(tile_info.hash_id(res), res, dtype, nav_flag_value)] = [tile_info, 0]
+                remaining_tiles[TileToProcess(tile_info.hash_id(res), res, dtype, nav_flag_value)] = TileRuns(tile_info, 0)
+    t2 = time.time()
+    print(f"Time to get tiles: {t2-t1}")
     debug_launch = interactive_debug and debug_config and max_processes < 2
+    raise Exception("Redo the loop")
+    # While user doesn't quit and have a setting for if stop when finished user config (server runs forever while user ends when no more tiles to combine)
+    #   while running processes >= max_processes: wait
+    #   Read the combine_spec_view
+    #   Order by priority then balance the production branches (or other logic like user)?
+    #   Run the highest priority tile
     tile_processes = {}
     try:
         while remaining_tiles:
@@ -233,7 +247,7 @@ def main(config):
                 if current_tile in tile_processes:  # already running this one.  Wait til finished or stopped to retry if needed.
                     continue
                 try:
-                    tile_info = remaining_tiles[current_tile][0]
+                    tile_info = remaining_tiles[current_tile].info
                 except KeyError:  # the tile was running and in the list but got removed while we were looping on the cached list of tiles
                     continue
 
@@ -255,8 +269,9 @@ def main(config):
                     msg = traceback.format_exc()
                     LOGGER.warning(f"Exception accessing bruty db for {tile_info} {current_tile.resolution}m {current_tile.dtype}:\n{msg}")
                     time.sleep(5)
-                    remaining_tiles[current_tile][1] += 1
-                    if remaining_tiles[current_tile][1] > max_tries:
+                    remaining_tiles[current_tile].count += 1
+                    raise Exception("Need to add to postgres record tries field")
+                    if remaining_tiles[current_tile].count > max_tries:
                         del remaining_tiles[current_tile]
                 else:
                     try:

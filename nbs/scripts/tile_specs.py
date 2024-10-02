@@ -50,6 +50,7 @@ class TileInfo:
     START_TIME = 'start_time'
     END_TIME = 'end_time'
     EXIT_CODE = 'exit_code'
+    TRIES = 'tries'
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
@@ -70,6 +71,7 @@ class TileInfo:
         self.datatype = review_tile[self.DATATYPE]
         self.not_for_nav = review_tile[self.NOT_FOR_NAV]
         self.view_id = review_tile[self.VIEW_ID]
+        self.tries = review_tile[self.TRIES]
 
         self.out_of_date = review_tile[self.OUT_OF_DATE]
         self.summary = review_tile[self.SUMMARY]
@@ -137,9 +139,9 @@ class TileInfo:
         #     where ({self.PB},{self.UTM},{self.HEMISPHERE},{self.TILE},{self.DATUM},{self.LOCALITY},{self.RESOLUTION}, {self.DATATYPE},{self.NOT_FOR_NAV})=(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         #     (self.out_of_date, self.summary, self.pb, self.utm, self.hemi.upper(), self.tile, self.datum, self.locality, self.resolution, self.datatype, self.not_for_nav))
         cursor.execute(
-            f"""update {table} set ({self.START_TIME},{self.END_TIME},{self.EXIT_CODE},{self.OUT_OF_DATE},{self.SUMMARY})=(%s, %s, %s, %s, %s) 
+            f"""update {table} set ({self.START_TIME},{self.END_TIME},{self.EXIT_CODE},{self.OUT_OF_DATE},{self.SUMMARY},{self.TRIES})=(%s, %s, %s, %s, %s, %s) 
             where ({self.VIEW_ID})=(%s)""",
-            (self.start_time, self.end_time, self.exit_code, self.out_of_date, self.summary, self.view_id))
+            (self.start_time, self.end_time, self.exit_code, self.out_of_date, self.summary, self.tries, self.view_id))
 
     @property
     def geometry(self):
@@ -285,7 +287,7 @@ def create_world_db(root_path, tile_info: TileInfo, log_level=logging.INFO):
     return db
 
 
-def iterate_tiles_table(config):
+def iterate_tiles_table(config, only_needs_to_combine=False, max_retries=3):
     """ Read the NBS postgres tile_specifications database for the bruty_tile table and, if not existing,
     create Bruty databases for the area of interest for the polygon listed in the postgres table.
     """
@@ -300,7 +302,17 @@ def iterate_tiles_table(config):
     conn_info.database = "tile_specifications"
     # tile specs are now being held in views, so we have to read the combine_specs table
     # then read the geometry from the view of the equivalent area/records
-    fields, records = get_nbs_records("(SELECT * from combine_spec_resolutions JOIN combine_spec_tiles ON (tile_id = t_id)", conn_info, geom_name='geometry', order='ORDER BY tile ASC')
+    if only_needs_to_combine:
+        fields, records = get_nbs_records(f"""SELECT * from combine_spec_view 
+                                              WHERE (end_time > start_time  OR -- finished running previously or  
+                                                    (start_time IS NULL AND combine_time IS NOT NULL)) -- never ran
+                                                    AND 
+                                                    ((combine_time IS NOT NULL AND (start_time IS NULL OR combine_time > start_time)) OR -- not started yet
+                                                    (exit_code > 0 AND (tries IS NULL OR tries < {max_retries}))) -- failed with a positive exit code
+                                              """,
+                                          conn_info, geom_name='geometry', order='ORDER BY priority DESC, tile ASC')
+    else:
+        fields, records = get_nbs_records(f"SELECT * from combine_spec_resolutions JOIN combine_spec_tiles ON t_id=res_id", conn_info, geom_name='geometry', order='ORDER BY tile ASC')
     branch_utms = {}
     for review_tile in records:
         utms = branch_utms.setdefault(review_tile['production_branch'], set())
@@ -319,7 +331,17 @@ def iterate_tiles_table(config):
                     if utmzone not in zones:
                         wants_recs = False
                 if wants_recs:
-                    fields, records = get_nbs_records(f"combine_spec_{branch}_{utm}", conn_info, geom_name='geometry', order='ORDER BY tile ASC')
+                    if only_needs_to_combine:
+                        fields, records = get_nbs_records(f"""SELECT * from combine_spec_view_{branch}_{utm} 
+                                                              WHERE (end_time > start_time  OR -- finished running previously or  
+                                                                    (start_time IS NULL AND combine_time IS NOT NULL)) -- never ran
+                                                                    AND 
+                                                                    ((combine_time IS NOT NULL AND (start_time IS NULL OR combine_time > start_time)) OR -- not started yet
+                                                                    (exit_code > 0 AND (tries IS NULL OR tries < {max_retries}))) -- failed with a positive exit code
+                                                              """,
+                                                          conn_info, geom_name='geometry', order='ORDER BY priority DESC, tile ASC')
+                    else:
+                        fields, records = get_nbs_records(f"SELECT * from combine_spec_view_{branch}_{utm}", conn_info, geom_name='geometry', order='ORDER BY tile ASC')
                     all_records.extend(records)
     for review_tile in all_records:
         info = TileInfo(**review_tile)
