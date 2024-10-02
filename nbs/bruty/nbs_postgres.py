@@ -439,7 +439,7 @@ def show_last_ids(cursor, tablenames):
 #     cursor.execute(f"UPDATE {tablename} SET {col_name} = DEFAULT")
 #     connection.commit()
 
-def get_nbs_records(table_name, conn_info, geom_name=None, order="", query_fields=None, exclude_fields=None):
+def get_nbs_records(table_name, conn_info, geom_name=None, order="", query_fields=None, exclude_fields=None, where_clause=""):
     """ Supply a geom_name to get a value for ST_SRID({geom_name}) at the end of each sql record,
      which can be used to determine the spatial reference system used.
     """
@@ -474,7 +474,7 @@ def get_nbs_records(table_name, conn_info, geom_name=None, order="", query_field
                     cols_names.remove(exclude)
         field_str = ",".join(cols_names)
         srs = f",ST_SRID({geom_name})" if geom_name else ""
-        cursor.execute(f'SELECT {field_str}{srs} FROM {table_name} {order}')
+        cursor.execute(f'SELECT {field_str}{srs} FROM {table_name} {where_clause} {order}')
         records = cursor.fetchall()
         # the DictCursor makes an _index object that is shared by all rows which describes the mapping of name to index.
         # We will add a tablename entry at the end of the row and add the table_name to every record so it can be accessed later.

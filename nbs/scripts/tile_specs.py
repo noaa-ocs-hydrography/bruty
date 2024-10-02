@@ -303,16 +303,16 @@ def iterate_tiles_table(config, only_needs_to_combine=False, max_retries=3):
     # tile specs are now being held in views, so we have to read the combine_specs table
     # then read the geometry from the view of the equivalent area/records
     if only_needs_to_combine:
-        fields, records = get_nbs_records(f"""SELECT * from combine_spec_view 
-                                              WHERE (end_time > start_time  OR -- finished running previously or  
-                                                    (start_time IS NULL AND combine_time IS NOT NULL)) -- never ran
-                                                    AND 
-                                                    ((combine_time IS NOT NULL AND (start_time IS NULL OR combine_time > start_time)) OR -- not started yet
-                                                    (exit_code > 0 AND (tries IS NULL OR tries < {max_retries}))) -- failed with a positive exit code
-                                              """,
-                                          conn_info, geom_name='geometry', order='ORDER BY priority DESC, tile ASC')
+        fields, records = get_nbs_records("combine_spec_view", conn_info,
+                                          where_clause=f"""WHERE (end_time > start_time  OR -- finished running previously or  
+                                                           (start_time IS NULL AND combine_time IS NOT NULL)) -- never ran
+                                                           AND 
+                                                           (combine_time IS NOT NULL AND
+                                                             ((start_time IS NULL OR combine_time > start_time) OR -- not started yet
+                                                              (exit_code > 0 AND (tries IS NULL OR tries < {max_retries})))) -- failed with a positive exit code""",
+                                          geom_name='geometry', order='ORDER BY priority DESC, tile ASC')
     else:
-        fields, records = get_nbs_records(f"SELECT * from combine_spec_resolutions JOIN combine_spec_tiles ON t_id=res_id", conn_info, geom_name='geometry', order='ORDER BY tile ASC')
+        fields, records = get_nbs_records(f"combine_spec_resolutions JOIN combine_spec_tiles ON t_id=res_id", conn_info, geom_name='geometry', order='ORDER BY tile ASC')
     branch_utms = {}
     for review_tile in records:
         utms = branch_utms.setdefault(review_tile['production_branch'], set())
@@ -332,16 +332,17 @@ def iterate_tiles_table(config, only_needs_to_combine=False, max_retries=3):
                         wants_recs = False
                 if wants_recs:
                     if only_needs_to_combine:
-                        fields, records = get_nbs_records(f"""SELECT * from combine_spec_view_{branch}_{utm} 
-                                                              WHERE (end_time > start_time  OR -- finished running previously or  
-                                                                    (start_time IS NULL AND combine_time IS NOT NULL)) -- never ran
-                                                                    AND 
-                                                                    ((combine_time IS NOT NULL AND (start_time IS NULL OR combine_time > start_time)) OR -- not started yet
-                                                                    (exit_code > 0 AND (tries IS NULL OR tries < {max_retries}))) -- failed with a positive exit code
-                                                              """,
-                                                          conn_info, geom_name='geometry', order='ORDER BY priority DESC, tile ASC')
+                        fields, records = get_nbs_records("combine_spec_view", conn_info,
+                                                          where_clause=f"""WHERE (end_time > start_time  OR -- finished running previously or  
+                                                                           (start_time IS NULL AND combine_time IS NOT NULL)) -- never ran
+                                                                           AND 
+                                                                           (combine_time IS NOT NULL AND
+                                                                             ((start_time IS NULL OR combine_time > start_time) OR -- not started yet
+                                                                              (exit_code > 0 AND (tries IS NULL OR tries < {max_retries})))) -- failed with a positive exit code""",
+                                                          geom_name='geometry', order='ORDER BY priority DESC, tile ASC')
                     else:
-                        fields, records = get_nbs_records(f"SELECT * from combine_spec_view_{branch}_{utm}", conn_info, geom_name='geometry', order='ORDER BY tile ASC')
+                        fields, records = get_nbs_records(f"SELECT * from combine_spec_{branch}_{utm}", conn_info, geom_name='geometry', order='ORDER BY tile ASC')
+                    raise Exception("fix the combine_spec views")
                     all_records.extend(records)
     for review_tile in all_records:
         info = TileInfo(**review_tile)
