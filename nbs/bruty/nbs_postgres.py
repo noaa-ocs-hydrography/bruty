@@ -442,6 +442,8 @@ def show_last_ids(cursor, tablenames):
 def get_nbs_records(table_name, conn_info, geom_name=None, order="", query_fields=None, exclude_fields=None, where_clause=""):
     """ Supply a geom_name to get a value for ST_SRID({geom_name}) at the end of each sql record,
      which can be used to determine the spatial reference system used.
+
+     where_clause will have the keyword WHERE to the beginning so just supply the condition, e.g. "nbs_id IN (1,2,3) AND utm=19"
     """
     if _debug and conn_info.hostname is None:
         import pickle
@@ -474,6 +476,8 @@ def get_nbs_records(table_name, conn_info, geom_name=None, order="", query_field
                     cols_names.remove(exclude)
         field_str = ",".join(cols_names)
         srs = f",ST_SRID({geom_name})" if geom_name else ""
+        if where_clause:
+            where_clause = " WHERE " + where_clause
         cursor.execute(f'SELECT {field_str}{srs} FROM {table_name} {where_clause} {order}')
         records = cursor.fetchall()
         # the DictCursor makes an _index object that is shared by all rows which describes the mapping of name to index.

@@ -44,7 +44,7 @@ class TileInfo:
     HEMISPHERE = 'hemisphere'
     RESOLUTION = "resolution"
     CLOSING_DISTANCE = 'closing_distance'
-    NOT_FOR_NAV = 'not_for_navigation'
+    NOT_FOR_NAV = 'not_for_nav'
     DATATYPE = 'datatype'
     VIEW_ID = 'b_id'
     START_TIME = 'start_time'
@@ -79,7 +79,7 @@ class TileInfo:
         self.end_time = review_tile[self.END_TIME]
         self.exit_code = review_tile[self.EXIT_CODE]
         self.epsg = review_tile['st_srid']
-        self.geometry = review_tile['geometry']
+        self.geometry = review_tile['geometry'] if 'geometry_buffered' not in review_tile else review_tile['geometry_buffered']
         self.public = review_tile['combine_public']  # public - included "unqualified"
         self.internal = review_tile['combine_internal']  # includes sensitive
         self.navigation = review_tile['combine_navigation']  # only QC'd (qualified) data
@@ -300,63 +300,49 @@ def iterate_tiles_table(config, only_needs_to_combine=False, max_retries=3):
 
     conn_info = connect_params_from_config(config)
     conn_info.database = "tile_specifications"
+    connection, cursor = connection_with_retries(conn_info)
     # tile specs are now being held in views, so we have to read the combine_specs table
     # then read the geometry from the view of the equivalent area/records
-    if only_needs_to_combine:
-        fields, records = get_nbs_records("combine_spec_view", conn_info,
-                                          where_clause=f"""WHERE (end_time > start_time  OR -- finished running previously or  
-                                                           (start_time IS NULL AND combine_time IS NOT NULL)) -- never ran
-                                                           AND 
-                                                           (combine_time IS NOT NULL AND
-                                                             ((start_time IS NULL OR combine_time > start_time) OR -- not started yet
-                                                              (exit_code > 0 AND (tries IS NULL OR tries < {max_retries})))) -- failed with a positive exit code""",
-                                          geom_name='geometry', order='ORDER BY priority DESC, tile ASC')
-    else:
-        fields, records = get_nbs_records(f"combine_spec_resolutions JOIN combine_spec_tiles ON t_id=res_id", conn_info, geom_name='geometry', order='ORDER BY tile ASC')
-    branch_utms = {}
-    for review_tile in records:
-        utms = branch_utms.setdefault(review_tile['production_branch'], set())
-        utms.add(str(review_tile['utm']) + review_tile['hemisphere'])
     # grab them all at run time so that if records are changed during the run we at least know all the geometries should have been from the run time
-    all_records = []
-    for branch, utms in branch_utms.items():
-        if production_branches and branch not in production_branches:
-            continue
-        else:
-            for utm in utms:
-                wants_recs = True
-                # get records is a slow operation so don't call it unless we need it or aren't sure
-                if zones:
-                    utmzone= int(re.search(r"\d+", utm).group())
-                    if utmzone not in zones:
-                        wants_recs = False
-                if wants_recs:
-                    if only_needs_to_combine:
-                        fields, records = get_nbs_records("combine_spec_view", conn_info,
-                                                          where_clause=f"""WHERE (end_time > start_time  OR -- finished running previously or  
-                                                                           (start_time IS NULL AND combine_time IS NOT NULL)) -- never ran
-                                                                           AND 
-                                                                           (combine_time IS NOT NULL AND
-                                                                             ((start_time IS NULL OR combine_time > start_time) OR -- not started yet
-                                                                              (exit_code > 0 AND (tries IS NULL OR tries < {max_retries})))) -- failed with a positive exit code""",
-                                                          geom_name='geometry', order='ORDER BY priority DESC, tile ASC')
-                    else:
-                        fields, records = get_nbs_records(f"SELECT * from combine_spec_{branch}_{utm}", conn_info, geom_name='geometry', order='ORDER BY tile ASC')
-                    raise Exception("fix the combine_spec views")
-                    all_records.extend(records)
-    for review_tile in all_records:
+    conditions = []
+    if only_needs_to_combine:
+        conditions.append(f"""((end_time > start_time  OR -- finished running previously or  
+                            (start_time IS NULL AND combine_time IS NOT NULL)) -- never ran
+                            AND 
+                            (combine_time IS NOT NULL AND
+                             ((start_time IS NULL OR combine_time > start_time) OR -- not started yet
+                              (exit_code > 0 AND (tries IS NULL OR tries < {max_retries}))))) -- failed with a positive exit code""")
+    if production_branches:  # put strings in single quotes
+        conditions.append(f"""production_branch IN ({', '.join(["'"+pb.upper()+"'" for pb in production_branches])})""")
+    if zones:
+        conditions.append(f"utm IN ({', '.join([str(utm) for utm in zones])})")
+    if tiles:
+        conditions.append(f"tile IN ({', '.join([str(t) for t in tiles])})")
+    if datums:  # put strings in single quotes
+        conditions.append(f"""datum IN ({', '.join(["'"+str(d)+"'" for d in datums])})""")
+    where_clause = " AND ".join(conditions)
+    if where_clause:
+        where_clause = " WHERE " + where_clause
+    cursor.execute(f"""SELECT B.*, R.*, ST_SRID(geometry_buffered), TI.* 
+                       FROM combine_spec_bruty B JOIN combine_spec_resolutions R ON (B.res_id = R.r_id) JOIN combine_spec_tiles TI ON (R.tile_id = TI.t_id)
+                       {where_clause}
+                       ORDER BY priority DESC, tile ASC
+                       """)
+    records = cursor.fetchall()
+    connection.close()
+    for review_tile in records:
         info = TileInfo(**review_tile)
         # determine if this tile should be processed
         if not (force or info.build):
             continue
-        if production_branches and info.pb not in production_branches:
-            continue
-        if datums and info.datum not in datums:
-            continue
-        if tiles and int(info.tile) not in tiles:
-            continue
-        if zones and info.utm not in zones:
-            continue
+        # if production_branches and info.pb not in production_branches:
+        #     continue
+        # if datums and info.datum not in datums:
+        #     continue
+        # if tiles and int(info.tile) not in tiles:
+        #     continue
+        # if zones and info.utm not in zones:
+        #     continue
         # yield db or do a callback function?
         yield info
 
