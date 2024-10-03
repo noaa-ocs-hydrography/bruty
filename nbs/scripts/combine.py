@@ -205,7 +205,8 @@ def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=
 
 
 @log_calls
-def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), extra_debug=False, override_epsg=NO_OVERRIDE, exclude=None, crop=False, delete_existing=False, log_level=logging.INFO):
+def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), extra_debug=False, override_epsg=NO_OVERRIDE,
+                         exclude=None, crop=False, delete_existing=False, log_level=logging.INFO, view_pk_id=None):
     """ Reads the NBS postgres metadata table to find all surveys in a region and insert them into a Bruty combined database.
 
     Parameters
@@ -237,6 +238,9 @@ def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), 
             lck.acquire()
         except BaseLockException:
             ret = TILE_LOCKED
+        else:
+            TileInfo.update_table(conn_info, f"b_id={view_pk_id}", start_time="NOW()", tries="COALESCE(tries, 0) + 1", data_location=f"'{world_db_path}'")
+
     if ret == SUCCEEDED:
         sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, for_navigation_flag, exclude=exclude)
         clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=1, delete_existing=delete_existing, log_level=log_level)
@@ -246,6 +250,7 @@ def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), 
             if for_navigation_flag[0]:
                 LOGGER.info(f"  and for_navigation value must equal: {for_navigation_flag[1]}")
         ret = process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug, override_epsg, crop=crop, log_level=log_level)
+        TileInfo.update_table(conn_info, f"b_id={view_pk_id}", end_time="NOW()", exit_code=ret)
     return ret
 
 
@@ -629,12 +634,6 @@ if __name__ == "__main__":
         conn_info.tablenames = args.tables
         use_locks(args.lock_server)
 
-        tile_info = TileInfo.from_combine_spec(conn_info, args.combine_pk_id)
-        tile_info.start_time = datetime.now()
-        tile_info.update_table_status(conn_info)
-        # or
-        tile_info.update_table(conn_info, {'b_id': tile_info.view_id}, start_time=datetime.now())
-
         log_level = convert_to_logging_level(args.log_level)
 
         if args.debug:
@@ -652,7 +651,7 @@ if __name__ == "__main__":
             print(f"Processing {args.bruty_path} for_navigation_flag={(not args.ignore_for_nav, not args.not_for_nav)}")
             ret = process_nbs_database(args.bruty_path, conn_info, for_navigation_flag=(not args.ignore_for_nav, not args.not_for_nav),
                                        extra_debug=args.debug, override_epsg=args.override_epsg, exclude=args.exclude, crop=args.crop,
-                                       delete_existing=args.delete_existing, log_level=log_level)
+                                       delete_existing=args.delete_existing, log_level=log_level, view_pk_id=args.combine_pk_id)
             if args.debug:
                 try:
                     shutil.copyfile(pathlib.Path(get_dbg_log_path()).parent.parent.joinpath("wdb_metadata.sqlite"),
@@ -691,6 +690,7 @@ if __name__ == "__main__":
             LOGGER.error(traceback.format_exc())
             LOGGER.error(msg)
             ret = UNHANDLED_EXCEPTION
+            TileInfo.update_table(conn_info, f"b_id={args.combine_pk_id}", end_time="NOW()", exit_code=ret)
         if args.fingerprint:
             try:
                 db = WorldDatabase.open(args.bruty_path)
@@ -702,10 +702,7 @@ if __name__ == "__main__":
                 db.completion_codes[args.fingerprint] = d
             except:
                 pass
-        tile_info.end_time = datetime.now()
-        tile_info.exit_code = ret
-        tile_info.update_table_status(conn_info)
-        tile_info.update_table(conn_info, {'b_id': tile_info.view_id}, end_time=datetime.now(), exit_code=ret)
+
 
         if args.debug:
             try:

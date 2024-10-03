@@ -44,13 +44,14 @@ class TileInfo:
     HEMISPHERE = 'hemisphere'
     RESOLUTION = "resolution"
     CLOSING_DISTANCE = 'closing_distance'
-    NOT_FOR_NAV = 'not_for_nav'
+    FOR_NAV = 'for_navigation'
     DATATYPE = 'datatype'
     VIEW_ID = 'b_id'
     START_TIME = 'start_time'
     END_TIME = 'end_time'
     EXIT_CODE = 'exit_code'
     TRIES = 'tries'
+    PRIORITY = 'priority'
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
@@ -69,9 +70,10 @@ class TileInfo:
         self.resolution = review_tile[self.RESOLUTION]
         self.closing_dist = review_tile[self.CLOSING_DISTANCE]
         self.datatype = review_tile[self.DATATYPE]
-        self.not_for_nav = review_tile[self.NOT_FOR_NAV]
+        self.for_nav = review_tile[self.FOR_NAV]
         self.view_id = review_tile[self.VIEW_ID]
         self.tries = review_tile[self.TRIES]
+        self.priority = review_tile[self.PRIORITY]
 
         self.out_of_date = review_tile[self.OUT_OF_DATE]
         self.summary = review_tile[self.SUMMARY]
@@ -90,10 +92,8 @@ class TileInfo:
     def __repr__(self):
         return f"TileInfo:{self.pb}_{self.utm}{self.hemi}_{self.tile}_{self.locality}"
 
-    def hash_id(self, res=None):
-        if res is None:
-            res = self.resolution
-        return hash_id(self.pb, self.utm, self.hemi, self.tile, self.datum, res)
+    def hash_id(self):
+        return hash_id(self.pb, self.utm, self.hemi, self.tile, self.datum, self.resolution, self.datatype, self.for_nav)
 
     @classmethod
     def from_combine_spec_view(cls, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), pk_id, database=None, table=None):
@@ -112,6 +112,25 @@ class TileInfo:
 
     @classmethod
     def update_table(cls, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), where, database=None, table=None, **kwargs):
+        """ Update a table based on a a dictionary (from kwargs) of values
+
+        Parameters
+        ----------
+        cursor
+            open psycopg2 cursor
+        where
+            dictionary of column name(s) and value(s) to match
+        database
+            name of the database to update, default is the tile_specifications
+        table_name
+            name of the table to update, default is the combine_spec_view
+        kwargs
+            dictionary of column name and value to update.  Make sure to wrap strings in single quotes.
+        Returns
+        -------
+        None
+        """
+
         if database is None:
             database = cls.SOURCE_DATABASE
         if table is None:
@@ -287,7 +306,7 @@ def create_world_db(root_path, tile_info: TileInfo, log_level=logging.INFO):
     return db
 
 
-def iterate_tiles_table(config, only_needs_to_combine=False, max_retries=3):
+def get_tiles_records(config, only_needs_to_combine=False, max_retries=3):
     """ Read the NBS postgres tile_specifications database for the bruty_tile table and, if not existing,
     create Bruty databases for the area of interest for the polygon listed in the postgres table.
     """
@@ -295,7 +314,6 @@ def iterate_tiles_table(config, only_needs_to_combine=False, max_retries=3):
     zones = parse_ints_with_ranges(config.get('zones', ""))
     production_branches = parse_multiple_values(config.get('production_branches', ""))
     datums = parse_multiple_values(config.get('datums', ""))
-
     force = config.getboolean('force_build', False)
 
     conn_info = connect_params_from_config(config)
@@ -320,9 +338,14 @@ def iterate_tiles_table(config, only_needs_to_combine=False, max_retries=3):
         conditions.append(f"tile IN ({', '.join([str(t) for t in tiles])})")
     if datums:  # put strings in single quotes
         conditions.append(f"""datum IN ({', '.join(["'"+str(d)+"'" for d in datums])})""")
+    if max_retries:
+        conditions.append(f"""(tries is NULL OR tries<{max_retries})""")
+    if not force:
+        conditions.append(f"""(build IS TRUE)""")
     where_clause = " AND ".join(conditions)
     if where_clause:
         where_clause = " WHERE " + where_clause
+    # This is very similar to the combine_spec_view except we are getting the geometry_buffered and its SRID which are not in the view because of QGIS performance
     cursor.execute(f"""SELECT B.*, R.*, ST_SRID(geometry_buffered), TI.* 
                        FROM combine_spec_bruty B JOIN combine_spec_resolutions R ON (B.res_id = R.r_id) JOIN combine_spec_tiles TI ON (R.tile_id = TI.t_id)
                        {where_clause}
@@ -330,11 +353,15 @@ def iterate_tiles_table(config, only_needs_to_combine=False, max_retries=3):
                        """)
     records = cursor.fetchall()
     connection.close()
+    return records
+
+def iterate_tiles_table(config, only_needs_to_combine=False, max_retries=3):
+    records = get_tiles_records(config, only_needs_to_combine, max_retries)
     for review_tile in records:
         info = TileInfo(**review_tile)
         # determine if this tile should be processed
-        if not (force or info.build):
-            continue
+        # if not (force or info.build):
+        #     continue
         # if production_branches and info.pb not in production_branches:
         #     continue
         # if datums and info.datum not in datums:

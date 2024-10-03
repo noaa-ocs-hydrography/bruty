@@ -219,8 +219,7 @@ def main(config):
             user_res = None
     except KeyError:
         user_res = None
-    t1 = time.time()
-    for tile_info in iterate_tiles_table(config, max_tries):
+    for tile_info in iterate_tiles_table(config, only_needs_to_combine=True, max_retries=max_tries):
         res = tile_info.resolution
         if user_res and res not in user_res:
             continue
@@ -228,11 +227,22 @@ def main(config):
             if user_dtypes and dtype not in user_dtypes:
                 continue
             for nav_flag_value in (True, False):
-                remaining_tiles[TileToProcess(tile_info.hash_id(res), res, dtype, nav_flag_value)] = TileRuns(tile_info, 0)
-    t2 = time.time()
-    print(f"Time to get tiles: {t2-t1}")
+                remaining_tiles[tile_info.hash_id()] = tile_info
+    # sort remaining_tiles by priority and then by balance of production branches
+    priorities = {}
+    for tile in remaining_tiles.values():
+        try:
+            priorities[tile.info.priority][tile.info.pb].append(tile)
+        except KeyError:
+            try:
+                priorities[tile.info.priority][tile.info.pb] = [tile]
+            except KeyError:
+                priorities[tile.info.priority] = {tile.info.pb: [tile]}
+
+
     debug_launch = interactive_debug and debug_config and max_processes < 2
     raise Exception("Redo the loop")
+    raise "Change all the things (iter_tiles) using hash_id which now includes datatype, res, not_for_nav"
     # While user doesn't quit and have a setting for if stop when finished user config (server runs forever while user ends when no more tiles to combine)
     #   while running processes >= max_processes: wait
     #   Read the combine_spec_view
@@ -247,7 +257,7 @@ def main(config):
                 if current_tile in tile_processes:  # already running this one.  Wait til finished or stopped to retry if needed.
                     continue
                 try:
-                    tile_info = remaining_tiles[current_tile].info
+                    tile_info = remaining_tiles[current_tile]
                 except KeyError:  # the tile was running and in the list but got removed while we were looping on the cached list of tiles
                     continue
 
@@ -270,9 +280,9 @@ def main(config):
                     LOGGER.warning(f"Exception accessing bruty db for {tile_info} {current_tile.resolution}m {current_tile.dtype}:\n{msg}")
                     time.sleep(5)
                     remaining_tiles[current_tile].count += 1
-                    raise Exception("Need to add to postgres record tries field")
-                    if remaining_tiles[current_tile].count > max_tries:
-                        del remaining_tiles[current_tile]
+
+
+
                 else:
                     try:
                         # Lock all the database so we can write safely
