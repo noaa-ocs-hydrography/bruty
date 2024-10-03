@@ -239,7 +239,16 @@ def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), 
         except BaseLockException:
             ret = TILE_LOCKED
         else:
-            TileInfo.update_table(conn_info, f"b_id={view_pk_id}", start_time="NOW()", tries="COALESCE(tries, 0) + 1", data_location=f"'{world_db_path}'")
+            warnings_log = "''"  # single quotes for postgres
+            info_log = "''"
+            for h in logging.getLogger("nbs").handlers:
+                if isinstance(h, logging.FileHandler):
+                    if f"{os.getpid()}.log" in h.baseFilename:
+                        info_log = f"'{h.baseFilename}'"  # single quotes for postgres
+                    elif f"{os.getpid()}.warn" in h.baseFilename:
+                        warnings_log = f"'{h.baseFilename}'"
+            TileInfo.update_table(conn_info, {"b_id": view_pk_id}, start_time="NOW()", tries="COALESCE(tries, 0) + 1",
+                                  data_location=f"'{world_db_path}'", info_log=info_log, warnings_log=warnings_log)
 
     if ret == SUCCEEDED:
         sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, for_navigation_flag, exclude=exclude)
@@ -250,7 +259,8 @@ def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), 
             if for_navigation_flag[0]:
                 LOGGER.info(f"  and for_navigation value must equal: {for_navigation_flag[1]}")
         ret = process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug, override_epsg, crop=crop, log_level=log_level)
-        TileInfo.update_table(conn_info, f"b_id={view_pk_id}", end_time="NOW()", exit_code=ret)
+
+        TileInfo.update_table(conn_info, {"b_id": view_pk_id}, end_time="NOW()", exit_code=ret)
     return ret
 
 

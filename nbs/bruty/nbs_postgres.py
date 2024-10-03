@@ -33,6 +33,15 @@ INTERNAL = 'Internal'
 
 NBS_ID_STR = "nbs_id"
 
+# @TODO replace hardcoded strings with these variables
+TILES_TABLE = "combine_spec_tiles"
+RESOLUTIONS_TABLE = "combine_spec_resolutions"
+BRUTY_TABLE_RAW = "combine_spec_bruty"
+BRUTY_PRIMARY_KEY = "b_id"
+BRUTY_TABLE_VIEW = "combine_spec_view"
+OVERVIEW_TABLE = "combine_spec_overview"
+
+
 """
 SELECT nbs_id, from_filename, script_to_filename, manual_to_filename, for_navigation, never_post, decay_score,script_resolution,manual_resolution,script_point_spacing,manual_point_spacing 
 FROM public.pbg_gulf_utm14n_mllw
@@ -53,7 +62,7 @@ class ConnectionInfo:
     tablenames: tuple = ()
 
 
-def hash_id(product_branch: str, zone: int, hemi: str, tile: int, datum: str, res: int):
+def hash_id(product_branch: str, zone: int, hemi: str, tile: int, datum: str, res: int, datatype: str, nav_flag: bool):
     """ Get a 64 bit integer to use with the pg_try_advisory_lock_shared or pg_try_advisory_lock functions
 
     Parameters
@@ -75,7 +84,7 @@ def hash_id(product_branch: str, zone: int, hemi: str, tile: int, datum: str, re
         the 64 bit hash value as an integer for easy use with postgres locks
 
     """
-    lock_string = f"{product_branch.lower()}_{zone}{hemi}_{tile}_{datum.lower()}_{res}".encode()
+    lock_string = f"{product_branch.lower()}_{zone}{hemi}_{tile}_{datum.lower()}_{res}_{datatype}_{nav_flag}".encode()
     digest = blake2b(lock_string, digest_size=8).hexdigest()
     id = int(digest, 16)
     return id
@@ -172,7 +181,7 @@ def last_nbs_id(table_name, cursor):
     return last_num
 
 def pg_update(cursor, table_name, where, **kwargs):
-    """ Update a column in a table with a list of values
+    """ Update a table based on a dictionary of values
 
     Parameters
     ----------
@@ -180,10 +189,10 @@ def pg_update(cursor, table_name, where, **kwargs):
         open psycopg2 cursor
     table_name
         name of the table to update
-    column_name
-        name of the column to update
-    values
-        list of values to update the column with
+    where
+        dictionary of column name and value to match
+    kwargs
+        dictionary of column name and value to update.  Make sure to wrap strings in single quotes.
     Returns
     -------
     None

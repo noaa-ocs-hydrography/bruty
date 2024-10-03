@@ -73,7 +73,7 @@ class TileInfo:
         self.for_nav = review_tile[self.FOR_NAV]
         self.view_id = review_tile[self.VIEW_ID]
         self.tries = review_tile[self.TRIES]
-        self.priority = review_tile[self.PRIORITY]
+        self.priority = review_tile[self.PRIORITY] if review_tile[self.PRIORITY] else 0  # if None, make it 0
 
         self.out_of_date = review_tile[self.OUT_OF_DATE]
         self.summary = review_tile[self.SUMMARY]
@@ -90,7 +90,7 @@ class TileInfo:
         # self.data_type = review_tile.get("dtype", "")
 
     def __repr__(self):
-        return f"TileInfo:{self.pb}_{self.utm}{self.hemi}_{self.tile}_{self.locality}"
+        return f"TileInfo:{self.pb}_{self.utm}{self.hemi}_{self.tile}_{self.locality}_{self.datatype}_{self.resolution}"
 
     def hash_id(self):
         return hash_id(self.pb, self.utm, self.hemi, self.tile, self.datum, self.resolution, self.datatype, self.for_nav)
@@ -342,7 +342,7 @@ def get_tiles_records(config, only_needs_to_combine=False, max_retries=3):
         conditions.append(f"""(tries is NULL OR tries<{max_retries})""")
     if not force:
         conditions.append(f"""(build IS TRUE)""")
-    where_clause = " AND ".join(conditions)
+    where_clause = "\nAND ".join(conditions)  # a comment at the end was making this fail, so put a leading newline
     if where_clause:
         where_clause = " WHERE " + where_clause
     # This is very similar to the combine_spec_view except we are getting the geometry_buffered and its SRID which are not in the view because of QGIS performance

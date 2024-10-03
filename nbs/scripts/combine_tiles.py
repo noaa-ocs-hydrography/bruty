@@ -130,9 +130,10 @@ def launch(world_db, view_pk_id, config_pth, tablenames, for_navigation_flag=(Tr
     return ret
 
 
-def remove_finished_processes(tile_processes, remaining_tiles, max_tries):
+def remove_finished_processes(tile_processes, tile_manager):
     for key in list(tile_processes.keys()):
         if not tile_processes[key].console_process.is_running():
+            old_tile = tile_processes[key].tile_info
             try:
                 retry = False
                 if tile_processes[key].succeeded():
@@ -144,28 +145,23 @@ def remove_finished_processes(tile_processes, remaining_tiles, max_tries):
                 elif tile_processes[key].finish_code() == TILE_LOCKED:
                     reason = "LOCKED"
                     tile_processes[key].clear_finish_code()  # remove record so we don't just pile up a lot of needless records
-                    retry = True
-                    # reduce the counter by one so we don't stop trying just because the tile was locked
-                    remaining_tiles[key].count -= 1
-                elif remaining_tiles[key].count + 1 >= max_tries:
-                    reason = "failed too many times"
                 else:
-                    reason = "failed and will retry"
-                    retry = True
+                    reason = "failed and will retry if not over the maximum retry count"
             except (sqlite3.OperationalError, OSError) as e:
                 # this is happening when the network drive loses connection, not sure if it is recoverable.
                 # treat it like an unhandled exception in the subprocess - retry and increment the count
                 # also wait a moment to let the network recover in case that helps
                 msg = traceback.format_exc()
-                LOGGER.warning(f"Exception accessing bruty db for {remaining_tiles[key].info} {key.dtype} res={key.resolution}:\n{msg}")
+                LOGGER.warning(f"Exception accessing bruty db for {old_tile.tile_info}:\n{msg}")
                 reason = "failed with a sqlite Operational error or OSError"
                 retry = True
                 time.sleep(5)
-            LOGGER.info(f"Combine {reason} for {remaining_tiles[key].info} {key.dtype} res={key.resolution}")
-            if retry:
-                remaining_tiles[key].count += 1  # set the tile to try again later and note that it is retrying
-            else:
-                del remaining_tiles[key]  # remove the tile from the list of tiles to process in the future
+            LOGGER.info(f"Combine {reason} for {old_tile.tile_info}")
+            try:
+                del tile_manager.remaining_tiles[key]  # remove the tile from the list of tiles to process in the future
+                del tile_manager.priorities[old_tile.priority][old_tile.pb][key]
+            except KeyError:
+                pass  # the records will disappear from the manager when refreshed from postgres and the code sees it was running
             del tile_processes[key]  # remove the instance from our list of active processes
 
 
@@ -182,6 +178,74 @@ class TileRuns:
     info: TileInfo
     count: int
 
+
+class TileManager:
+    def __init__(self, config, max_tries, allow_res=False):
+        self.config = config
+        self.max_tries = max_tries
+        self.allow_res = allow_res
+        self.user_dtypes, self.user_res = None, None
+        self.read_user_settings(self.allow_res)
+        self.remaining_tiles = {}
+
+    def read_user_settings(self, allow_res=False):
+        try:
+            self.user_dtypes = [dt.strip() for dt in parse_multiple_values(self.config['dtypes'])]
+        except KeyError:
+            self.user_dtypes = None
+        try:
+            if allow_res:
+                self.user_res = [float(dt.strip()) for dt in parse_multiple_values(self.config['res'])]
+            else:
+                self.user_res = None
+        except KeyError:
+            self.user_res = None
+
+    def refresh_tiles_list(self, needs_combining=False):
+        self.remaining_tiles = {}
+        for tile_info in iterate_tiles_table(self.config, only_needs_to_combine=needs_combining, max_retries=self.max_tries):
+            res = tile_info.resolution
+            if self.user_res and res not in self.user_res:
+                continue
+            for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
+                if self.user_dtypes and dtype not in self.user_dtypes:
+                    continue
+                for nav_flag_value in (True, False):
+                    self.remaining_tiles[tile_info.hash_id()] = tile_info
+
+        # sort remaining_tiles by priority and then by balance of production branches
+        # The remaining_tiles list is already sorted by tile number, so we can just sort by priority and then by production branch
+        self.priorities = {}
+        for hash, tile in self.remaining_tiles.items():
+            try:
+                self.priorities[tile.priority][tile.pb][hash] = tile
+            except KeyError:
+                try:
+                    self.priorities[tile.priority][tile.pb] = {hash: tile}
+                except KeyError:
+                    self.priorities[tile.priority] = {tile.pb: {hash: tile}}
+
+    def pick_next_tile(self, currently_running):
+        # currently_running: dict(TileProcess)
+
+        # pick the highest priority tile
+        for priority in sorted(self.priorities.keys(), reverse=True):
+            # balance the production branches
+            # find the number of each production branch that is currently running
+            # default the count to 0 for each production branch in case none are running
+            pb_counts = {pb: 0 for pb in self.priorities[priority].keys()}
+            for tile_process in currently_running.values():
+                try:
+                    pb_counts[tile_process.tile_info.pb] += 1
+                except KeyError:  # something is running and no more of its production branch are in the list
+                    pb_counts[tile_process.tile_info.pb] = 1
+
+            for pb in sorted(pb_counts.keys(), key=lambda x: pb_counts[x]):
+                for hash, tile in self.priorities[priority][pb].items():
+                    if hash not in currently_running:
+                        return tile
+        return None
+
 def main(config):
     """
     Returns
@@ -192,6 +256,7 @@ def main(config):
     debug_config = config.getboolean('DEBUG', False)
     minimized = config.getboolean('MINIMIZED', False)
     delete_existing = config.getboolean('delete_existing_if_cleanup_needed', False)
+    is_service = config.getboolean('run_as_service', False)
     env_path = config.get('environment_path')
     env_name = config.get('environment_name')
     port = config.get('lock_server_port', None)
@@ -206,66 +271,43 @@ def main(config):
     log_path=os.path.join(root, "logs", cfg_name)
     if debug_config:
         show_logger_handlers(LOGGER)
-    remaining_tiles = {}
     use_nav_flag = True  # config.getboolean('use_for_navigation_flag', True)
-    try:
-        user_dtypes = [dt.strip() for dt in parse_multiple_values(config['dtypes'])]
-    except KeyError:
-        user_dtypes = None
-    try:
-        if debug_config:
-            user_res = [float(dt.strip()) for dt in parse_multiple_values(config['res'])]
-        else:
-            user_res = None
-    except KeyError:
-        user_res = None
-    for tile_info in iterate_tiles_table(config, only_needs_to_combine=True, max_retries=max_tries):
-        res = tile_info.resolution
-        if user_res and res not in user_res:
-            continue
-        for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
-            if user_dtypes and dtype not in user_dtypes:
-                continue
-            for nav_flag_value in (True, False):
-                remaining_tiles[tile_info.hash_id()] = tile_info
-    # sort remaining_tiles by priority and then by balance of production branches
-    priorities = {}
-    for tile in remaining_tiles.values():
-        try:
-            priorities[tile.info.priority][tile.info.pb].append(tile)
-        except KeyError:
-            try:
-                priorities[tile.info.priority][tile.info.pb] = [tile]
-            except KeyError:
-                priorities[tile.info.priority] = {tile.info.pb: [tile]}
-
 
     debug_launch = interactive_debug and debug_config and max_processes < 2
-    raise Exception("Redo the loop")
-    raise "Change all the things (iter_tiles) using hash_id which now includes datatype, res, not_for_nav"
     # While user doesn't quit and have a setting for if stop when finished user config (server runs forever while user ends when no more tiles to combine)
     #   while running processes >= max_processes: wait
     #   Read the combine_spec_view
     #   Order by priority then balance the production branches (or other logic like user)?
     #   Run the highest priority tile
+    tile_manager = TileManager(config, max_tries, allow_res=debug_config)
     tile_processes = {}
     try:
-        while remaining_tiles:
-            # careful not to iterate the dictionary and delete from it at the same time, so make a copy of the list of keys first
-            for current_tile in list(remaining_tiles.keys()):
-                do_keyboard_actions(remaining_tiles, tile_processes)
-                if current_tile in tile_processes:  # already running this one.  Wait til finished or stopped to retry if needed.
-                    continue
-                try:
-                    tile_info = remaining_tiles[current_tile]
-                except KeyError:  # the tile was running and in the list but got removed while we were looping on the cached list of tiles
-                    continue
+        loop = 0
+        while is_service or loop < 1:  # run forever if a service, otherwise run until all tiles are combined
+            loop += 1
+            # @TODO we need to change the log file occasionally to prevent it from getting too large
+            tile_manager.refresh_tiles_list(needs_combining=True)
+            # @TODO print("Move to unit test")
+            # tile_manager.refresh_tiles_list(needs_combining=False)
+            # for x in range(15):
+            #     next_tile = tile_manager.pick_next_tile(tile_processes)
+            #     print(next_tile)
+            #     tile_processes[next_tile.hash_id()] = TileProcess(None, next_tile, None, 1, None)
+            # print(tile_processes)
+            # raise
+            while tile_manager.remaining_tiles:
+                next_tile = tile_manager.pick_next_tile(tile_processes)
+                # careful not to iterate the dictionary and delete from it at the same time, so make a copy of the list of keys first
 
-                LOGGER.info(f"starting combine for {tile_info} {current_tile.resolution}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}" +
+                do_keyboard_actions(remaining_tiles, tile_processes)
+
+                LOGGER.info(f"starting combine for {tile_info} {next_tile.resolution}m {next_tile.datatype}, for_navigation:{next_tile.for_nav}" +
                             f"\n  {len(remaining_tiles)} remain including the {len(tile_processes) + 1} currently running")
-                if not current_tile.nav_flag and current_tile.dtype == ENC:
+                if not next_tile.for_nav and next_tile.datatype == ENC:
                     LOGGER.debug(f"  Skipping ENC with for_navigation=False since all ENC data must be for navigation")
-                    del remaining_tiles[current_tile]
+                    hash = next_tile.hash_id()
+                    del tile_manager.remaining_tiles[hash]
+                    del tile_manager.priorities[next_tile.priority][next_tile.pb][hash]
                     continue
                 # to make a full utm zone database, take the tile_info and set geometry and tile to None.
                 # need to make a copy first
@@ -301,15 +343,15 @@ def main(config):
                             # NOTICE -- this function will not write to the combine_spec_view table with the status codes etc.
                             ret = process_nbs_database(db, conn_info, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
                                                        extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(current_tile.dtype==ENC),
-                                                       delete_existing=delete_existing, log_level=log_level)
+                                                       delete_existing=delete_existing, log_level=log_level, view_pk_id=tile_info.view_id)
                             errors = perform_qc_checks(db.db.data_path, conn_info, (use_nav_flag, current_tile.nav_flag), repair=True, check_last_insert=False)
                             del remaining_tiles[current_tile]
                         else:
-                            remove_finished_processes(tile_processes, remaining_tiles, max_tries)
+                            remove_finished_processes(tile_processes, tile_manager)
                             while len(tile_processes) >= max_processes:  # wait for at least one process to finish
                                 time.sleep(10)
                                 do_keyboard_actions(remaining_tiles, tile_processes)
-                                remove_finished_processes(tile_processes, remaining_tiles, max_tries)
+                                remove_finished_processes(tile_processes, tile_manager)
 
                             pid = launch(db, tile_info.view_id, config._source_filename, tablenames, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
                                          override_epsg=override, extra_debug=debug_config, lock=port, exclude=exclude, crop=(current_tile.dtype==ENC),
@@ -323,11 +365,12 @@ def main(config):
 
                             # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
                             tile_processes[current_tile] = TileProcess(running_process, tile_info, db, fingerprint, lock)
+                        raise "Change all the things (iter_tiles) using hash_id which now includes datatype, res, not_for_nav"
                         del lock  # unlocks if the lock wasn't stored in the tile_process
                     except AlreadyLocked:
                         LOGGER.debug(f"delay combine due to data lock for {tile_info} {current_tile.resolution}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
             # remove finished processes from the list or this becomes an infinite loop
-            remove_finished_processes(tile_processes, remaining_tiles, max_tries)
+            remove_finished_processes(tile_processes, tile_manager)
 
             if len(remaining_tiles) > 0:  # not all files have finished, give time for processing or locks to finish
                 time.sleep(10)
