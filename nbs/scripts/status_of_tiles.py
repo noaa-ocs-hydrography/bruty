@@ -31,7 +31,6 @@ from nbs.configs import get_logger, run_command_line_configs
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, connect_params_from_config, connection_with_retries
 from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db
 from nbs.scripts.combine import find_surveys_to_update, get_postgres_processing_info
-from nbs.scripts.combine import process_nbs_database
 
 interactive_debug = False
 if interactive_debug and sys.gettrace() is None:  # this only is set when a debugger is run (?)

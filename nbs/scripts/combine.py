@@ -23,7 +23,7 @@ from nbs.bruty.utils import onerr, user_action, remove_file, QUIT, HELP
 from nbs.configs import get_logger, read_config, log_config, make_family_of_logs, show_logger_handlers, convert_to_logging_level
 from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_metadata, ConnectionInfo, connect_params_from_config
 from nbs.scripts.convert_csar import convert_csar_python
-from nbs.scripts.tile_specs import TileInfo, iterate_tiles_table, create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION
+from nbs.scripts.tile_specs import TileInfo, create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION
 from nbs_utils.points_utils import to_npz
 from nbs.debugging import log_calls, get_call_logger, get_dbg_log_path, setup_call_logger
 
@@ -205,8 +205,8 @@ def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=
 
 
 @log_calls
-def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), extra_debug=False, override_epsg=NO_OVERRIDE,
-                         exclude=None, crop=False, delete_existing=False, log_level=logging.INFO, view_pk_id=None):
+def process_nbs_database(world_db, conn_info, tile_info, use_navigation_flag=True, extra_debug=False, override_epsg=NO_OVERRIDE,
+                         exclude=None, crop=False, delete_existing=False, log_level=logging.INFO):
     """ Reads the NBS postgres metadata table to find all surveys in a region and insert them into a Bruty combined database.
 
     Parameters
@@ -247,20 +247,23 @@ def process_nbs_database(world_db, conn_info, for_navigation_flag=(True, True), 
                         info_log = f"'{h.baseFilename}'"  # single quotes for postgres
                     elif f"{os.getpid()}.warn" in h.baseFilename:
                         warnings_log = f"'{h.baseFilename}'"
-            TileInfo.update_table(conn_info, {"b_id": view_pk_id}, start_time="NOW()", tries="COALESCE(tries, 0) + 1",
+            # if not extra_debug:
+            print('turn this off for debug\n'*80)
+            tile_info.update_table_record(conn_info, start_time="NOW()", tries="COALESCE(tries, 0) + 1",
                                   data_location=f"'{world_db_path}'", info_log=info_log, warnings_log=warnings_log)
 
     if ret == SUCCEEDED:
-        sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, for_navigation_flag, exclude=exclude)
+        sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, (use_navigation_flag, tile_info.for_nav), exclude=exclude)
         clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=1, delete_existing=delete_existing, log_level=log_level)
         if not names_list:  # still call process_nbs_records to have it write the transaction group records
             LOGGER.info(f"No matching records found in tables {conn_info.tablenames}")
-            LOGGER.info(f"  for_navigation_flag used:{for_navigation_flag[0]}")
-            if for_navigation_flag[0]:
-                LOGGER.info(f"  and for_navigation value must equal: {for_navigation_flag[1]}")
+            LOGGER.info(f"  for_navigation_flag used:{use_navigation_flag}")
+            if use_navigation_flag:
+                LOGGER.info(f"  and for_navigation value must equal: {tile_info.for_nav}")
         ret = process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug, override_epsg, crop=crop, log_level=log_level)
-
-        TileInfo.update_table(conn_info, {"b_id": view_pk_id}, end_time="NOW()", exit_code=ret)
+        # if not extra_debug:
+        print('turn this off for debug\n'*80)
+        tile_info.update_table_record(conn_info, end_time="NOW()", exit_code=ret)
     return ret
 
 
@@ -583,6 +586,7 @@ def make_parser():
     parser.add_argument("-?", "--show_help", action="store_true",
                         help="show this help message and exit")
 
+    # Database connection info now read from config files
     # parser.add_argument("-d", "--database", type=str, metavar='database', default="metadata",
     #                     help="postgres database table holding the records to process")
     # parser.add_argument("-r", "--port", type=str, metavar='port', default='5434',  # nargs="+"
@@ -593,6 +597,9 @@ def make_parser():
     #                     help="username to connect with to database")
     # parser.add_argument("-p", "--password", type=str, metavar='password', default="",
     #                     help="password to connect to postgres database")
+    # removed and using tile_info now that there is a database record to read it from
+    # parser.add_argument('-n', '--not_for_nav', action='store_true', dest='not_for_nav',
+    #                     default=False, help="require the for_navigation flag to be False")
     parser.add_argument("-c", "--config_path", type=str, metavar='config_path', default="",
                         help="location to config file for connection info")
     parser.add_argument("-t", "--table", action='append', type=str, dest="tables", metavar='table', default=[],
@@ -613,8 +620,6 @@ def make_parser():
                         help="override incoming data epsg with this value")
     parser.add_argument('-i', '--ignore_for_navigation', action='store_true', dest='ignore_for_nav',
                         default=False, help="ignore the for_navigation flag")
-    parser.add_argument('-n', '--not_for_nav', action='store_true', dest='not_for_nav',
-                        default=False, help="require the for_navigation flag to be False")
     parser.add_argument('-r', action='store_true', dest='crop',
                         default=False, help="crop data to tile extents to avoid error (for ENC data covering many zones)")
     parser.add_argument("-g", "--logger_path", type=str, metavar='logger_path', default="",
@@ -658,10 +663,11 @@ if __name__ == "__main__":
             make_family_of_logs("nbs", args.logger_path, remove_other_file_loggers=False, log_level=log_level)
             make_family_of_logs("nbs", args.logger_path + "_" + str(os.getpid()), remove_other_file_loggers=False, log_level=log_level)
         try:
-            print(f"Processing {args.bruty_path} for_navigation_flag={(not args.ignore_for_nav, not args.not_for_nav)}")
-            ret = process_nbs_database(args.bruty_path, conn_info, for_navigation_flag=(not args.ignore_for_nav, not args.not_for_nav),
+            tile_info = TileInfo.from_combine_spec_view(conn_info, args.combine_pk_id)
+            print(f"Processing {args.bruty_path} for_navigation_flag={(not args.ignore_for_nav, tile_info.for_nav)}")
+            ret = process_nbs_database(args.bruty_path, conn_info, tile_info, use_navigation_flag=not args.ignore_for_nav,
                                        extra_debug=args.debug, override_epsg=args.override_epsg, exclude=args.exclude, crop=args.crop,
-                                       delete_existing=args.delete_existing, log_level=log_level, view_pk_id=args.combine_pk_id)
+                                       delete_existing=args.delete_existing, log_level=log_level)
             if args.debug:
                 try:
                     shutil.copyfile(pathlib.Path(get_dbg_log_path()).parent.parent.joinpath("wdb_metadata.sqlite"),
@@ -671,7 +677,7 @@ if __name__ == "__main__":
             # if we didn't succeed then let the ret value pass through and don't show a validation since it had an exception, data error or locked data
             if ret == SUCCEEDED:
                 # since we succeeded on insert we don't need to check the insert code (which isn't even written til down below)
-                errors = perform_qc_checks(args.bruty_path, conn_info, (not args.ignore_for_nav, not args.not_for_nav), repair=True, check_last_insert=False)
+                errors = perform_qc_checks(args.bruty_path, conn_info, (not args.ignore_for_nav, tile_info.for_nav), repair=True, check_last_insert=False)
                 if any(errors):
                     LOGGER.error(f"Validation Failed with errors:{errors}")
                     ret = FAILED_VALIDATION
@@ -690,7 +696,7 @@ if __name__ == "__main__":
                     server.quit()
         except Exception as e:
             traceback.print_exc()
-            msg = f"{args.bruty_path} for_navigation_flag={(not args.ignore_for_nav, not args.not_for_nav)} had an unhandled exception - see message above"
+            msg = f"{args.bruty_path} use_navigation_flag={not args.ignore_for_nav} had an unhandled exception - see message above"
             print(msg)
             c = LOGGER
             while c:

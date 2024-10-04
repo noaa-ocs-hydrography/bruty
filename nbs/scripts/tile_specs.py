@@ -90,7 +90,7 @@ class TileInfo:
         # self.data_type = review_tile.get("dtype", "")
 
     def __repr__(self):
-        return f"TileInfo:{self.pb}_{self.utm}{self.hemi}_{self.tile}_{self.locality}_{self.datatype}_{self.resolution}"
+        return f"TileInfo:{self.pb}_{self.utm}{self.hemi}_{self.tile}_{self.locality}_{self.datatype}_{self.resolution}m_{'nav' if self.for_nav else 'NOT_NAV'}"
 
     def hash_id(self):
         return hash_id(self.pb, self.utm, self.hemi, self.tile, self.datum, self.resolution, self.datatype, self.for_nav)
@@ -141,6 +141,10 @@ class TileInfo:
         else:
             cursor = connection_info
         pg_update(cursor, table, where, **kwargs)
+
+    def update_table_record(self, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), database=None, table=None, **kwargs):
+        where = {"b_id": tile_info.view_id}
+        self.update_table(connection_info, where, database, table, **kwargs)
 
     def update_table_status(self,  connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), database=None, table=None):
         if database is None:
@@ -236,7 +240,7 @@ class TileInfo:
         if dtype is None:
             dtype = self.datatype
         if for_nav is None:
-            for_nav = not self.not_for_nav
+            for_nav = self.for_nav
         names = [self.tile_name, dtype]
         if not for_nav:
             names.append(NOT_NAV)
@@ -373,32 +377,3 @@ def iterate_tiles_table(config, only_needs_to_combine=False, max_retries=3):
         # yield db or do a callback function?
         yield info
 
-
-""" 
->>> prior = psutil.pids()
->>> p = subprocess.Popen(args[1:], creationflags=subprocess.CREATE_NEW_CONSOLE)
->>> for p in psutil.pids():
-...   try:
-...     if p not in prior: print(psutil.Process(p).cmdline())
-...   except:
-...     pass
-...
-['cmd.exe', '/K', 'set', 'pythonpath=&&', 'set', 'TCL_LIBRARY=&&', 'set', 'TIX_LIBRARY=&&', 'set', 'TK_LIBRARY=&&', 'C:\\PydroSVN\\trunk\\Miniconda36\\scripts\\activate', 'Pydro27', '&&', 'python']
-['python']
-['\\??\\C:\\WINDOWS\\system32\\conhost.exe', '0x4']
->>> for p in psutil.pids():
-...   try:
-...     if p not in prior: print(psutil.Process(p).cmdline())
-...   except:
-...     pass
-...
-['cmd.exe', '/K', 'set', 'pythonpath=&&', 'set', 'TCL_LIBRARY=&&', 'set', 'TIX_LIBRARY=&&', 'set', 'TK_LIBRARY=&&', 'C:\\PydroSVN\\trunk\\Miniconda36\\scripts\\activate', 'Pydro27', '&&', 'python']
-['\\??\\C:\\WINDOWS\\system32\\conhost.exe', '0x4']
->>> p = psutil.Popen(args[1:], creationflags=subprocess.CREATE_NEW_CONSOLE)
->>> p.is_running()
-True
-"""
-
-if __name__ == '__main__':
-    # Runs the main function for each config specified in sys.argv
-    run_configs(iterate_tiles_table, "Splitting Tiles", ["debug.config"], logger=LOGGER)

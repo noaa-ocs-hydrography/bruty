@@ -202,6 +202,7 @@ def main(config):
     use_cached_enc_meta = config.getboolean('USE_CACHED_ENC_METADATA', False)
     conn_info = connect_params_from_config(config)
     # conn_info.database = 'metadata'
+    raise "Not finished updating export for new table structure - like tile_info having .res, .datatype, .for_nav"
     tile_list = list(iterate_tiles_table(config))
     tile_list.sort(key=lambda t: t.pb)
     max_tries = config.getint('max_tries', 3)

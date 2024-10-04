@@ -93,25 +93,18 @@ def main(config):
             if user_dtypes and dtype not in user_dtypes:
                 continue
             for nav_flag_value in (True, False):
-                remaining_tiles[TileToProcess(tile_info.hash_id(res), res, dtype, nav_flag_value)] = [tile_info, 0]
+                remaining_tiles[tile_info.hash_id()] = tile_info
     debug_launch = interactive_debug and debug_config and max_processes < 2
     tile_processes = {}
     # careful not to iterate the dictionary and delete from it at the same time, so make a copy of the list of keys first
-    for current_tile in list(remaining_tiles.keys()):
-        try:
-            tile_info = remaining_tiles[current_tile][0]
-        except KeyError:  # the tile was running and in the list but got removed while we were looping on the cached list of tiles
-            continue
-        tile_info.resolution = current_tile.resolution  # set this each time for each resolution listed in the data object
-
-        if not current_tile.nav_flag and current_tile.dtype == ENC:
-            del remaining_tiles[current_tile]
+    for hash, tile_info in remaining_tiles.items():
+        if not tile_info.for_nav and tile_info.datatype == ENC:
             continue
         # to make a full utm zone database, take the tile_info and set geometry and tile to None.
         # need to make a copy first
         # tile_info.geometry, tile_info.tile = None, None
         # full_db = create_world_db(config['data_dir'], tile_info, dtype, current_tile.nav_flag_value)
-        db = create_world_db(config['data_dir'], tile_info, current_tile.dtype, current_tile.nav_flag)
+        db = create_world_db(config['data_dir'], tile_info)
         max_t = datetime(1, 1, 1); last_action=None
         for k, v in db.transaction_groups.items():
             if v.ttime > max_t: 

@@ -48,10 +48,10 @@ CONFIG_SECTION = 'insert'
 print("\nremove the hack setting the bruty and nbs directories into the python path\n")
 
 
-def launch(world_db, view_pk_id, config_pth, tablenames, for_navigation_flag=(True, True), override_epsg=NO_OVERRIDE, extra_debug=False, new_console=True,
+def launch(world_db, view_pk_id, config_pth, tablenames, use_navigation_flag=True, override_epsg=NO_OVERRIDE, extra_debug=False, new_console=True,
            lock=None, exclude=None, crop=False, log_path=None, env_path=r'', env_name='', minimized=False,
            fingerprint="", delete_existing=False, log_level=logging.INFO):
-    """ for_navigation_flag = (use_nav_flag, nav_flag_value)
+    """
 
     fingerprint is being used to find the processes that are running.
     Because of launching cmd.exe there is no direct communication to the python process.
@@ -87,11 +87,8 @@ def launch(world_db, view_pk_id, config_pth, tablenames, for_navigation_flag=(Tr
         combine_args.extend(["-k", str(view_pk_id)])
         combine_args.extend(["-b", str(world_db_path)])
         combine_args.extend(["-c", str(config_pth)])
-        if not for_navigation_flag[0]:  # not using the navigation flag
+        if not use_navigation_flag:  # not using the navigation flag
             combine_args.append("-i")
-        else:  # using the navigation flag, so  see if it should be True (default) or False (needs arg)
-            if not for_navigation_flag[1]:
-                combine_args.append("-n")
         combine_args.extend(['--log_level', str(log_level)])
         if crop:
             combine_args.append('-r')
@@ -125,7 +122,7 @@ def launch(world_db, view_pk_id, config_pth, tablenames, for_navigation_flag=(Tr
     else:
         raise Exception("same console multiprocessing is untested")
         # could actually do the same subprocess.Popen in the same console, or multiprocessing which would remove need for psutil, or use dask(?)
-        multiprocessing.Process(target=process_nbs_database, args = (db, conn_info), kwargs={'for_navigation_flag':(use_nav_flag, nav_flag_value),
+        multiprocessing.Process(target=process_nbs_database, args = (db, conn_info), kwargs={'use_navigation_flag':use_nav_flag,
                              'override_epsg':override, 'extra_debug':debug_config})
     return ret
 
@@ -282,11 +279,9 @@ def main(config):
     tile_manager = TileManager(config, max_tries, allow_res=debug_config)
     tile_processes = {}
     try:
-        loop = 0
-        while is_service or loop < 1:  # run forever if a service, otherwise run until all tiles are combined
-            loop += 1
+        tile_manager.refresh_tiles_list(needs_combining=True)
+        while is_service or tile_manager.remaining_tiles:  # run forever if a service, otherwise run until all tiles are combined
             # @TODO we need to change the log file occasionally to prevent it from getting too large
-            tile_manager.refresh_tiles_list(needs_combining=True)
             # @TODO print("Move to unit test")
             # tile_manager.refresh_tiles_list(needs_combining=False)
             # for x in range(15):
@@ -297,11 +292,17 @@ def main(config):
             # raise
             while tile_manager.remaining_tiles:
                 next_tile = tile_manager.pick_next_tile(tile_processes)
-                # careful not to iterate the dictionary and delete from it at the same time, so make a copy of the list of keys first
+                if next_tile is None:
+                    # remove finished processes from the list or this becomes an infinite loop
+                    remove_finished_processes(tile_processes, tile_manager)
+                    if is_service:
+                        break
+                    else:
+                        sleep(10)
 
                 do_keyboard_actions(remaining_tiles, tile_processes)
 
-                LOGGER.info(f"starting combine for {tile_info} {next_tile.resolution}m {next_tile.datatype}, for_navigation:{next_tile.for_nav}" +
+                LOGGER.info(f"starting combine for {next_tile}" +
                             f"\n  {len(remaining_tiles)} remain including the {len(tile_processes) + 1} currently running")
                 if not next_tile.for_nav and next_tile.datatype == ENC:
                     LOGGER.debug(f"  Skipping ENC with for_navigation=False since all ENC data must be for navigation")
@@ -314,17 +315,13 @@ def main(config):
                 # tile_info.geometry, tile_info.tile = None, None
                 # full_db = create_world_db(config['data_dir'], tile_info, dtype, current_tile.nav_flag_value)
                 try:
-                    db = create_world_db(config['data_dir'], tile_info, current_tile.dtype, current_tile.nav_flag, log_level=log_level)
+                    db = create_world_db(config['data_dir'], tile_info, log_level=log_level)
                 except (sqlite3.OperationalError, OSError) as e:
                     # this happened as a network issue - we will skip it for now and come back and give the network some time to recover
                     # but we will count it as a retry in case there is a corrupted file or something
                     msg = traceback.format_exc()
-                    LOGGER.warning(f"Exception accessing bruty db for {tile_info} {current_tile.resolution}m {current_tile.dtype}:\n{msg}")
+                    LOGGER.warning(f"Exception accessing bruty db for {tile_info}:\n{msg}")
                     time.sleep(5)
-                    remaining_tiles[current_tile].count += 1
-
-
-
                 else:
                     try:
                         # Lock all the database so we can write safely
@@ -336,44 +333,46 @@ def main(config):
                         lock.acquire()
                         override = db.db.epsg if config.getboolean('override', False) else NO_OVERRIDE
                         tablenames = [tile_info.metadata_table_name(tile_info.datatype)]
-                        fingerprint = str(current_tile.hash_id) + "_" + datetime.now().isoformat()
+                        fingerprint = str(next_tile.hash_id()) + "_" + datetime.now().isoformat()
                         if debug_launch:
                             use_locks(port)
                             setup_call_logger(db.db.data_path)
                             # NOTICE -- this function will not write to the combine_spec_view table with the status codes etc.
-                            ret = process_nbs_database(db, conn_info, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
-                                                       extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(current_tile.dtype==ENC),
+                            ret = process_nbs_database(db, conn_info, next_tile, use_navigation_flag=use_nav_flag,
+                                                       extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(next_tile.datatype==ENC),
                                                        delete_existing=delete_existing, log_level=log_level, view_pk_id=tile_info.view_id)
-                            errors = perform_qc_checks(db.db.data_path, conn_info, (use_nav_flag, current_tile.nav_flag), repair=True, check_last_insert=False)
-                            del remaining_tiles[current_tile]
+                            errors = perform_qc_checks(db.db.data_path, conn_info, (use_nav_flag, next_tile.for_nav), repair=True, check_last_insert=False)
+                            del remaining_tiles[next_tile]
+                            del tile_manager.priorities[next_tile.priority][next_tile.pb][next_tile.hash_id()]
                         else:
                             remove_finished_processes(tile_processes, tile_manager)
+                            get_refresh = False
                             while len(tile_processes) >= max_processes:  # wait for at least one process to finish
                                 time.sleep(10)
                                 do_keyboard_actions(remaining_tiles, tile_processes)
                                 remove_finished_processes(tile_processes, tile_manager)
-
-                            pid = launch(db, tile_info.view_id, config._source_filename, tablenames, for_navigation_flag=(use_nav_flag, current_tile.nav_flag),
-                                         override_epsg=override, extra_debug=debug_config, lock=port, exclude=exclude, crop=(current_tile.dtype==ENC),
+                                if is_service:
+                                    get_refresh = True
+                            if get_refresh:  # restart the while loop with an updated list of tiles
+                                break
+                            pid = launch(db, tile_info.view_id, config._source_filename, tablenames, use_navigation_flag=use_nav_flag,
+                                         override_epsg=override, extra_debug=debug_config, lock=port, exclude=exclude, crop=(next_tile.datatype==ENC),
                                          log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
                                          fingerprint=fingerprint, delete_existing=delete_existing, log_level=log_level)
                             running_process = ConsoleProcessTracker(["python", fingerprint, "combine.py"])
                             if running_process.console.last_pid != pid:
                                 LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
                             else:
-                                LOGGER.debug(f"Started PID {pid} for {tile_info} {current_tile.resolution}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
+                                LOGGER.debug(f"Started PID {pid} for {next_tile}")
 
                             # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
-                            tile_processes[current_tile] = TileProcess(running_process, tile_info, db, fingerprint, lock)
+                            tile_processes[next_tile.hash_id()] = TileProcess(running_process, tile_info, db, fingerprint, lock)
                         raise "Change all the things (iter_tiles) using hash_id which now includes datatype, res, not_for_nav"
                         del lock  # unlocks if the lock wasn't stored in the tile_process
                     except AlreadyLocked:
-                        LOGGER.debug(f"delay combine due to data lock for {tile_info} {current_tile.resolution}m {current_tile.dtype}, for_navigation:{current_tile.nav_flag}")
-            # remove finished processes from the list or this becomes an infinite loop
-            remove_finished_processes(tile_processes, tile_manager)
+                        LOGGER.debug(f"delay combine due to data lock for {tile_info}")
+            tile_manager.refresh_tiles_list(needs_combining=True)
 
-            if len(remaining_tiles) > 0:  # not all files have finished, give time for processing or locks to finish
-                time.sleep(10)
     except UserCancelled:
         pass
     except Exception as e:
@@ -383,78 +382,6 @@ def main(config):
         LOGGER.error(traceback.format_exc())
         LOGGER.error(msg)
 
-    old = """
-    db_path = pathlib.Path(config['combined_datapath'])
-    try:  # see if there is an exising Bruty database
-        db = WorldDatabase.open(db_path)
-    except FileNotFoundError:  # create an empty bruty database
-        with NameLock(db_path, "wb", EXCLUSIVE) as _creation_lock:  # this will wait for the file to be available
-            # on the slim chance that another process was making the database, let's check again since we now own the lock
-            try:  # see if there is an exising Bruty database (in case someone else was making it at the same time)
-                db = WorldDatabase.open(db_path)
-            except FileNotFoundError:  # really create an empty bruty database
-                try:
-                    resx, resy = map(float, config['resolution'].split(','))
-                except:
-                    resx = resy = float(config['resolution'])
-
-                if resx > 4:
-                    zoom = 10
-                elif resx > 2:
-                    zoom = 11
-                elif resx > 1:
-                    zoom = 12
-                else:
-                    zoom = 13
-                LOGGER.debug(f'zoom = {zoom}')
-                # NAD823 zone 19 = 26919.  WGS84 would be 32619
-                epsg = int(config['epsg'])
-                # use this to align the database to something else (like caris for testing)
-                offset_x = config.getfloat('offset_x', 0)
-                offset_y = config.getfloat('offset_y', 0)
-                db = WorldDatabase(
-                    UTMTileBackendExactRes(resx, resy, epsg, RasterHistory, DiskHistory, TiffStorage, db_path,
-                                           offset_x=offset_x, offset_y=offset_y, zoom_level=zoom))
-
-    conn_info = connect_params_from_config(config)
-    override = db.db.epsg if config.getboolean('override', False) else NO_OVERRIDE
-    use_nav_flag = config.getboolean('use_for_navigation_flag', True)
-    nav_flag_value = config.getboolean('for_navigation_equals', True)
-
-    process_nbs_database(db_path, conn_info, for_navigation_flag=(use_nav_flag, nav_flag_value),
-                         override_epsg=override, extra_debug=debug_config)
-    """
-    # avoid putting in the project directory as pycharm then tries to cache everything I think
-    # data_dir = pathlib.Path("c:\\data\\nbs\\test_data_output")
-    # def make_clean_dir(name):
-    #     use_dir = data_dir.joinpath(name)
-    #     if os.path.exists(use_dir):
-    #         shutil.rmtree(use_dir, onerror=onerr)
-    #     os.makedirs(use_dir)
-    #     return use_dir
-    # subdir = r"test_pbc_19_exact_multi_locks"
-    # db_path = data_dir.joinpath(subdir)
-    # make_clean_dir(subdir)
-
-    # # create logger with 'spam_application'
-    # logger = logging.getLogger('process_nbs')
-    # logger.setLevel(logging.DEBUG)
-    # # create file handler which logs even debug messages
-    # fh = logging.FileHandler(db_path.joinpath('process_nbs.log'))
-    # fh.setLevel(logging.DEBUG)
-    # # create console handler with a higher log level
-    # ch = logging.StreamHandler()
-    # ch.setLevel(logging.INFO)
-    # # create formatter and add it to the handlers
-    # formatter = logging.Formatter('%(asctime)s - %(name)s - %(message)s')
-    # fh.setFormatter(formatter)
-    # ch.setFormatter(formatter)
-    # # add the handlers to the logger
-    # logger.addHandler(fh)
-    # logger.addHandler(ch)
-    #
-
-    # db_path = make_clean_dir(r"test_pbc_19_db")  # reset the database
 
 
 if __name__ == '__main__':
@@ -475,10 +402,3 @@ if __name__ == '__main__':
     # Runs the main function for each config specified in sys.argv
     run_command_line_configs(main, "Insert", section="COMBINE", log_suffix="_combine_tiles")
 
-
-# "V:\NBS_Data\PBA_Alaska_UTM03N_Modeling"
-# UTMN 03 through 07 folders exist
-# /metadata/pba_alaska_utm03n_modeling
-# same each utm has a table
-# \\nos.noaa\OCS\HSD\Projects\NBS\NBS_Data\PBA_Alaska_UTM03N_Modeling
-# v drive literal

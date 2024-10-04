@@ -39,7 +39,7 @@ def main(config):
             if not user_res or res in user_res:
                 db_path = pathlib.Path(config['data_dir']).joinpath(tile_info.bruty_db_name())
                 conn_info.tablenames = [tile_info.metadata_table_name()]
-                errors = perform_qc_checks(db_path, conn_info, (True, tile_info.not_for_nav), repair=repair)
+                errors = perform_qc_checks(db_path, conn_info, (True, tile_info.for_nav), repair=repair)
                 # a missing database (like ENC_not_for_nav) returns None
                 if errors is not None and any(errors):
                     LOGGER.warning(f"{db_path}:\n  last insert finished without errors: {not errors[4]}\n"
