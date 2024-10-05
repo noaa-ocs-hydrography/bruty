@@ -155,8 +155,7 @@ def remove_finished_processes(tile_processes, tile_manager):
                 time.sleep(5)
             LOGGER.info(f"Combine {reason} for {old_tile.tile_info}")
             try:
-                del tile_manager.remaining_tiles[key]  # remove the tile from the list of tiles to process in the future
-                del tile_manager.priorities[old_tile.priority][old_tile.pb][key]
+                tile_manager.remove(old_tile)  # remove the tile from the list of tiles to process in the future
             except KeyError:
                 pass  # the records will disappear from the manager when refreshed from postgres and the code sees it was running
             del tile_processes[key]  # remove the instance from our list of active processes
@@ -167,7 +166,7 @@ def do_keyboard_actions(remaining_tiles, tile_processes):
     if action == QUIT:
         raise UserCancelled("User pressed keyboard quit")
     elif action == HELP:
-        descr_of_running_processes = '\n'.join([f'{prc.tile_info} {k.resolution} {k.dtype}' for k, prc in tile_processes.items()])
+        descr_of_running_processes = '\n'.join([f'{prc.tile_info}' for k, prc in tile_processes.items()])
         print(f"Remaining tiles: {len(remaining_tiles)}\nCurrently running:{len(tile_processes)}\n{descr_of_running_processes}")
 
 @dataclass
@@ -175,8 +174,10 @@ class TileRuns:
     info: TileInfo
     count: int
 
-
+#
 class TileManager:
+    RUNNING_PRIORITY = -999
+
     def __init__(self, config, max_tries, allow_res=False):
         self.config = config
         self.max_tries = max_tries
@@ -200,7 +201,7 @@ class TileManager:
 
     def refresh_tiles_list(self, needs_combining=False):
         self.remaining_tiles = {}
-        for tile_info in iterate_tiles_table(self.config, only_needs_to_combine=needs_combining, max_retries=self.max_tries):
+        for tile_info in iterate_tiles_table(self.config, only_needs_to_combine=needs_combining, ignore_running=False, max_retries=self.max_tries):
             res = tile_info.resolution
             if self.user_res and res not in self.user_res:
                 continue
@@ -214,13 +215,20 @@ class TileManager:
         # The remaining_tiles list is already sorted by tile number, so we can just sort by priority and then by production branch
         self.priorities = {}
         for hash, tile in self.remaining_tiles.items():
+            use_priority = self._revised_priority(tile)
             try:
-                self.priorities[tile.priority][tile.pb][hash] = tile
+                self.priorities[use_priority][tile.pb][hash] = tile
             except KeyError:
                 try:
-                    self.priorities[tile.priority][tile.pb] = {hash: tile}
+                    self.priorities[use_priority][tile.pb] = {hash: tile}
                 except KeyError:
-                    self.priorities[tile.priority] = {tile.pb: {hash: tile}}
+                    self.priorities[use_priority] = {tile.pb: {hash: tile}}
+    @staticmethod
+    def _revised_priority(tile):
+        use_priority = tile.priority if not tile.is_running else TileManager.RUNNING_PRIORITY
+        if use_priority is None:
+            use_priority = 0
+        return use_priority
 
     def pick_next_tile(self, currently_running):
         # currently_running: dict(TileProcess)
@@ -242,6 +250,13 @@ class TileManager:
                     if hash not in currently_running:
                         return tile
         return None
+    def remove(self, tile):
+        try:
+            hash = tile.hash_id()
+            del self.remaining_tiles[hash]
+            del self.priorities[self._revised_priority(tile)][tile.pb][hash]
+        except KeyError:
+            pass
 
 def main(config):
     """
@@ -253,7 +268,7 @@ def main(config):
     debug_config = config.getboolean('DEBUG', False)
     minimized = config.getboolean('MINIMIZED', False)
     delete_existing = config.getboolean('delete_existing_if_cleanup_needed', False)
-    is_service = config.getboolean('run_as_service', False)
+    is_service = config.getboolean('RUN_AS_SERVICE', False)
     env_path = config.get('environment_path')
     env_name = config.get('environment_name')
     port = config.get('lock_server_port', None)
@@ -265,7 +280,7 @@ def main(config):
     log_level = get_log_level(config)
     exclude = parse_multiple_values(config.get('exclude_ids', ''))
     root, cfg_name = os.path.split(config._source_filename)
-    log_path=os.path.join(root, "logs", cfg_name)
+    log_path = os.path.join(root, "logs", cfg_name)
     if debug_config:
         show_logger_handlers(LOGGER)
     use_nav_flag = True  # config.getboolean('use_for_navigation_flag', True)
@@ -280,7 +295,7 @@ def main(config):
     tile_processes = {}
     try:
         tile_manager.refresh_tiles_list(needs_combining=True)
-        while is_service or tile_manager.remaining_tiles:  # run forever if a service, otherwise run until all tiles are combined
+        while is_service or tile_manager.remaining_tiles or tile_processes:  # run forever if a service, otherwise run until all tiles are combined
             # @TODO we need to change the log file occasionally to prevent it from getting too large
             # @TODO print("Move to unit test")
             # tile_manager.refresh_tiles_list(needs_combining=False)
@@ -290,25 +305,24 @@ def main(config):
             #     tile_processes[next_tile.hash_id()] = TileProcess(None, next_tile, None, 1, None)
             # print(tile_processes)
             # raise
+            all_priorities = list(tile_manager.priorities.keys())
+            # we will try to restart tiles that say they are running in case they crashed without filling the end_time field (meaning they are not actually running)
+            if all_priorities == [tile_manager.RUNNING_PRIORITY] or (is_service and not all_priorities):
+                if all_priorities == [tile_manager.RUNNING_PRIORITY]:
+                    LOGGER.info("Waiting to give running tiles time to finish")
+                else:
+                    LOGGER.info("Waiting to before checking for more tiles to process")
+                sleep(60)
             while tile_manager.remaining_tiles:
                 next_tile = tile_manager.pick_next_tile(tile_processes)
-                if next_tile is None:
-                    # remove finished processes from the list or this becomes an infinite loop
-                    remove_finished_processes(tile_processes, tile_manager)
-                    if is_service:
-                        break
-                    else:
-                        sleep(10)
 
-                do_keyboard_actions(remaining_tiles, tile_processes)
+                do_keyboard_actions(tile_manager.remaining_tiles, tile_processes)
 
                 LOGGER.info(f"starting combine for {next_tile}" +
                             f"\n  {len(remaining_tiles)} remain including the {len(tile_processes) + 1} currently running")
                 if not next_tile.for_nav and next_tile.datatype == ENC:
                     LOGGER.debug(f"  Skipping ENC with for_navigation=False since all ENC data must be for navigation")
-                    hash = next_tile.hash_id()
-                    del tile_manager.remaining_tiles[hash]
-                    del tile_manager.priorities[next_tile.priority][next_tile.pb][hash]
+                    tile_manager.remove(next_tile)
                     continue
                 # to make a full utm zone database, take the tile_info and set geometry and tile to None.
                 # need to make a copy first
@@ -342,8 +356,7 @@ def main(config):
                                                        extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(next_tile.datatype==ENC),
                                                        delete_existing=delete_existing, log_level=log_level, view_pk_id=tile_info.view_id)
                             errors = perform_qc_checks(db.db.data_path, conn_info, (use_nav_flag, next_tile.for_nav), repair=True, check_last_insert=False)
-                            del remaining_tiles[next_tile]
-                            del tile_manager.priorities[next_tile.priority][next_tile.pb][next_tile.hash_id()]
+                            tile_manager.remove(next_tile)
                         else:
                             remove_finished_processes(tile_processes, tile_manager)
                             get_refresh = False
@@ -371,6 +384,7 @@ def main(config):
                         del lock  # unlocks if the lock wasn't stored in the tile_process
                     except AlreadyLocked:
                         LOGGER.debug(f"delay combine due to data lock for {tile_info}")
+            remove_finished_processes(tile_processes, tile_manager)
             tile_manager.refresh_tiles_list(needs_combining=True)
 
     except UserCancelled:

@@ -141,7 +141,9 @@ class TileInfo:
         else:
             cursor = connection_info
         pg_update(cursor, table, where, **kwargs)
-
+    @property
+    def is_running(self):
+        return (self.start_time is not None) and ((self.end_time is None) or self.start_time > self.end_time)
     def update_table_record(self, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), database=None, table=None, **kwargs):
         where = {"b_id": tile_info.view_id}
         self.update_table(connection_info, where, database, table, **kwargs)
@@ -310,13 +312,14 @@ def create_world_db(root_path, tile_info: TileInfo, log_level=logging.INFO):
     return db
 
 
-def get_tiles_records(config, only_needs_to_combine=False, max_retries=3):
+def get_tiles_records(config, needs_to_combine=False, ignore_running=False, max_retries=3):
     """ Read the NBS postgres tile_specifications database for the bruty_tile table and, if not existing,
     create Bruty databases for the area of interest for the polygon listed in the postgres table.
     """
     tiles = parse_ints_with_ranges(config.get('tiles', ""))
     zones = parse_ints_with_ranges(config.get('zones', ""))
     production_branches = parse_multiple_values(config.get('production_branches', ""))
+    dtypes = parse_multiple_values(config.get('dtypes', ""))
     datums = parse_multiple_values(config.get('datums', ""))
     force = config.getboolean('force_build', False)
 
@@ -327,19 +330,21 @@ def get_tiles_records(config, only_needs_to_combine=False, max_retries=3):
     # then read the geometry from the view of the equivalent area/records
     # grab them all at run time so that if records are changed during the run we at least know all the geometries should have been from the run time
     conditions = []
-    if only_needs_to_combine:
-        conditions.append(f"""((end_time > start_time  OR -- finished running previously or  
-                            (start_time IS NULL AND combine_time IS NOT NULL)) -- never ran
-                            AND 
-                            (combine_time IS NOT NULL AND
+    if ignore_running:
+        conditions.append(f"""(end_time > start_time  OR -- finished running previously or
+                                start_time IS NULL) -- never ran""")
+    if needs_to_combine:
+        conditions.append(f"""(combine_time IS NOT NULL AND
                              ((start_time IS NULL OR combine_time > start_time) OR -- not started yet
-                              (exit_code > 0 AND (tries IS NULL OR tries < {max_retries}))))) -- failed with a positive exit code""")
+                              (exit_code > 0 AND (tries IS NULL OR tries < {max_retries})))) -- failed with a positive exit code""")
     if production_branches:  # put strings in single quotes
-        conditions.append(f"""production_branch IN ({', '.join(["'"+pb.upper()+"'" for pb in production_branches])})""")
+        conditions.append(f"""UPPER(production_branch) IN ({', '.join(["'"+pb.upper()+"'" for pb in production_branches])})""")
     if zones:
         conditions.append(f"utm IN ({', '.join([str(utm) for utm in zones])})")
     if tiles:
         conditions.append(f"tile IN ({', '.join([str(t) for t in tiles])})")
+    if dtypes:
+        conditions.append(f"""LOWER(datatype) IN ({', '.join(["'" + dt.lower() + "'" for dt in dtypes])})""")
     if datums:  # put strings in single quotes
         conditions.append(f"""datum IN ({', '.join(["'"+str(d)+"'" for d in datums])})""")
     if max_retries:
@@ -359,8 +364,8 @@ def get_tiles_records(config, only_needs_to_combine=False, max_retries=3):
     connection.close()
     return records
 
-def iterate_tiles_table(config, only_needs_to_combine=False, max_retries=3):
-    records = get_tiles_records(config, only_needs_to_combine, max_retries)
+def iterate_tiles_table(config, only_needs_to_combine=False, ignore_running=False, max_retries=3):
+    records = get_tiles_records(config, needs_to_combine=only_needs_to_combine, ignore_running=ignore_running, max_retries=max_retries)
     for review_tile in records:
         info = TileInfo(**review_tile)
         # determine if this tile should be processed
