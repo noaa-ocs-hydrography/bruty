@@ -319,7 +319,7 @@ def main(config):
                 do_keyboard_actions(tile_manager.remaining_tiles, tile_processes)
 
                 LOGGER.info(f"starting combine for {next_tile}" +
-                            f"\n  {len(remaining_tiles)} remain including the {len(tile_processes) + 1} currently running")
+                            f"\n  {len(tile_manager.remaining_tiles)} remain including the {len(tile_processes) + 1} currently running")
                 if not next_tile.for_nav and next_tile.datatype == ENC:
                     LOGGER.debug(f"  Skipping ENC with for_navigation=False since all ENC data must be for navigation")
                     tile_manager.remove(next_tile)
@@ -329,12 +329,12 @@ def main(config):
                 # tile_info.geometry, tile_info.tile = None, None
                 # full_db = create_world_db(config['data_dir'], tile_info, dtype, current_tile.nav_flag_value)
                 try:
-                    db = create_world_db(config['data_dir'], tile_info, log_level=log_level)
+                    db = create_world_db(config['data_dir'], next_tile, log_level=log_level)
                 except (sqlite3.OperationalError, OSError) as e:
                     # this happened as a network issue - we will skip it for now and come back and give the network some time to recover
                     # but we will count it as a retry in case there is a corrupted file or something
                     msg = traceback.format_exc()
-                    LOGGER.warning(f"Exception accessing bruty db for {tile_info}:\n{msg}")
+                    LOGGER.warning(f"Exception accessing bruty db for {next_tile}:\n{msg}")
                     time.sleep(5)
                 else:
                     try:
@@ -346,7 +346,7 @@ def main(config):
                         lock = Lock(db.metadata_filename().with_suffix(".lock"), fail_when_locked=True, flags=LockFlags.EXCLUSIVE|LockFlags.NON_BLOCKING)
                         lock.acquire()
                         override = db.db.epsg if config.getboolean('override', False) else NO_OVERRIDE
-                        tablenames = [tile_info.metadata_table_name(tile_info.datatype)]
+                        tablenames = [next_tile.metadata_table_name()]
                         fingerprint = str(next_tile.hash_id()) + "_" + datetime.now().isoformat()
                         if debug_launch:
                             use_locks(port)
@@ -354,21 +354,21 @@ def main(config):
                             # NOTICE -- this function will not write to the combine_spec_view table with the status codes etc.
                             ret = process_nbs_database(db, conn_info, next_tile, use_navigation_flag=use_nav_flag,
                                                        extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(next_tile.datatype==ENC),
-                                                       delete_existing=delete_existing, log_level=log_level, view_pk_id=tile_info.view_id)
+                                                       delete_existing=delete_existing, log_level=log_level)
                             errors = perform_qc_checks(db.db.data_path, conn_info, (use_nav_flag, next_tile.for_nav), repair=True, check_last_insert=False)
-                            tile_manager.remove(next_tile)
                         else:
                             remove_finished_processes(tile_processes, tile_manager)
                             get_refresh = False
                             while len(tile_processes) >= max_processes:  # wait for at least one process to finish
-                                time.sleep(10)
-                                do_keyboard_actions(remaining_tiles, tile_processes)
+                                for n in range(5):  # make the keyboard respond more often
+                                    time.sleep(2)
+                                    do_keyboard_actions(tile_manager.remaining_tiles, tile_processes)
                                 remove_finished_processes(tile_processes, tile_manager)
                                 if is_service:
                                     get_refresh = True
                             if get_refresh:  # restart the while loop with an updated list of tiles
                                 break
-                            pid = launch(db, tile_info.view_id, config._source_filename, tablenames, use_navigation_flag=use_nav_flag,
+                            pid = launch(db, next_tile.view_id, config._source_filename, tablenames, use_navigation_flag=use_nav_flag,
                                          override_epsg=override, extra_debug=debug_config, lock=port, exclude=exclude, crop=(next_tile.datatype==ENC),
                                          log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
                                          fingerprint=fingerprint, delete_existing=delete_existing, log_level=log_level)
@@ -379,11 +379,12 @@ def main(config):
                                 LOGGER.debug(f"Started PID {pid} for {next_tile}")
 
                             # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
-                            tile_processes[next_tile.hash_id()] = TileProcess(running_process, tile_info, db, fingerprint, lock)
+                            tile_processes[next_tile.hash_id()] = TileProcess(running_process, next_tile, db, fingerprint, lock)
                         raise "Change all the things (iter_tiles) using hash_id which now includes datatype, res, not_for_nav"
                         del lock  # unlocks if the lock wasn't stored in the tile_process
                     except AlreadyLocked:
-                        LOGGER.debug(f"delay combine due to data lock for {tile_info}")
+                        LOGGER.debug(f"delay combine due to data lock for {next_tile}")
+                    tile_manager.remove(next_tile)
             remove_finished_processes(tile_processes, tile_manager)
             tile_manager.refresh_tiles_list(needs_combining=True)
 

@@ -145,7 +145,7 @@ class TileInfo:
     def is_running(self):
         return (self.start_time is not None) and ((self.end_time is None) or self.start_time > self.end_time)
     def update_table_record(self, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), database=None, table=None, **kwargs):
-        where = {"b_id": tile_info.view_id}
+        where = {self.VIEW_ID: self.view_id}
         self.update_table(connection_info, where, database, table, **kwargs)
 
     def update_table_status(self,  connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), database=None, table=None):
