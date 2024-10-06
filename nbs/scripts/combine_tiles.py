@@ -32,8 +32,8 @@ from nbs.bruty.utils import onerr, user_action, popen_kwargs, ConsoleProcessTrac
 from nbs.scripts.tile_specs import TileInfo
 from nbs.configs import get_logger, run_command_line_configs, parse_multiple_values, show_logger_handlers, get_log_level
 # , iter_configs, set_stream_logging, log_config, parse_multiple_values, make_family_of_logs
-from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, connect_params_from_config, connection_with_retries
-from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, TileToProcess, TileProcess
+from nbs.bruty.nbs_postgres import ENC, connect_params_from_config
+from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, TileToProcess, TileProcess, TileManager
 from nbs.scripts.combine import process_nbs_database, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, perform_qc_checks
 from nbs.debugging import get_call_logger, setup_call_logger, log_calls
 
@@ -174,89 +174,7 @@ class TileRuns:
     info: TileInfo
     count: int
 
-#
-class TileManager:
-    RUNNING_PRIORITY = -999
 
-    def __init__(self, config, max_tries, allow_res=False):
-        self.config = config
-        self.max_tries = max_tries
-        self.allow_res = allow_res
-        self.user_dtypes, self.user_res = None, None
-        self.read_user_settings(self.allow_res)
-        self.remaining_tiles = {}
-
-    def read_user_settings(self, allow_res=False):
-        try:
-            self.user_dtypes = [dt.strip() for dt in parse_multiple_values(self.config['dtypes'])]
-        except KeyError:
-            self.user_dtypes = None
-        try:
-            if allow_res:
-                self.user_res = [float(dt.strip()) for dt in parse_multiple_values(self.config['res'])]
-            else:
-                self.user_res = None
-        except KeyError:
-            self.user_res = None
-
-    def refresh_tiles_list(self, needs_combining=False):
-        self.remaining_tiles = {}
-        for tile_info in iterate_tiles_table(self.config, only_needs_to_combine=needs_combining, ignore_running=False, max_retries=self.max_tries):
-            res = tile_info.resolution
-            if self.user_res and res not in self.user_res:
-                continue
-            for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
-                if self.user_dtypes and dtype not in self.user_dtypes:
-                    continue
-                for nav_flag_value in (True, False):
-                    self.remaining_tiles[tile_info.hash_id()] = tile_info
-
-        # sort remaining_tiles by priority and then by balance of production branches
-        # The remaining_tiles list is already sorted by tile number, so we can just sort by priority and then by production branch
-        self.priorities = {}
-        for hash, tile in self.remaining_tiles.items():
-            use_priority = self._revised_priority(tile)
-            try:
-                self.priorities[use_priority][tile.pb][hash] = tile
-            except KeyError:
-                try:
-                    self.priorities[use_priority][tile.pb] = {hash: tile}
-                except KeyError:
-                    self.priorities[use_priority] = {tile.pb: {hash: tile}}
-    @staticmethod
-    def _revised_priority(tile):
-        use_priority = tile.priority if not tile.is_running else TileManager.RUNNING_PRIORITY
-        if use_priority is None:
-            use_priority = 0
-        return use_priority
-
-    def pick_next_tile(self, currently_running):
-        # currently_running: dict(TileProcess)
-
-        # pick the highest priority tile
-        for priority in sorted(self.priorities.keys(), reverse=True):
-            # balance the production branches
-            # find the number of each production branch that is currently running
-            # default the count to 0 for each production branch in case none are running
-            pb_counts = {pb: 0 for pb in self.priorities[priority].keys()}
-            for tile_process in currently_running.values():
-                try:
-                    pb_counts[tile_process.tile_info.pb] += 1
-                except KeyError:  # something is running and no more of its production branch are in the list
-                    pb_counts[tile_process.tile_info.pb] = 1
-
-            for pb in sorted(pb_counts.keys(), key=lambda x: pb_counts[x]):
-                for hash, tile in self.priorities[priority][pb].items():
-                    if hash not in currently_running:
-                        return tile
-        return None
-    def remove(self, tile):
-        try:
-            hash = tile.hash_id()
-            del self.remaining_tiles[hash]
-            del self.priorities[self._revised_priority(tile)][tile.pb][hash]
-        except KeyError:
-            pass
 
 def main(config):
     """

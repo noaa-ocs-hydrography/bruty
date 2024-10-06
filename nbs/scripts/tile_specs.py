@@ -14,7 +14,8 @@ from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, Bruty
 from nbs.bruty.raster_data import TiffStorage, LayersEnum
 from nbs.bruty.history import DiskHistory, RasterHistory, AccumulationHistory
 from nbs.configs import get_logger, run_configs, parse_ints_with_ranges, parse_multiple_values, iter_configs, set_stream_logging, log_config, make_family_of_logs
-from nbs.bruty.nbs_postgres import NOT_NAV, get_nbs_records, get_sorting_info, get_transform_metadata, connect_params_from_config, hash_id
+from nbs.bruty.nbs_postgres import NOT_NAV, get_nbs_records, get_sorting_info, get_transform_metadata, \
+    connect_params_from_config, hash_id,REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT
 from nbs.bruty.world_raster_database import WorldDatabase, use_locks, UTMTileBackendExactRes, NO_OVERRIDE
 from nbs.bruty.utils import ConsoleProcessTracker
 
@@ -28,6 +29,57 @@ UNHANDLED_EXCEPTION = 99
 _debug = False
 ogr.UseExceptions()
 LOGGER = get_logger('nbs.bruty.create_tiles')
+
+class BrutyOperation:
+    OPERATION = ''
+    START_TIME = 'start_time'
+    END_TIME = 'end_time'
+    EXIT_CODE = 'code'
+    WARNINGS_LOG = 'warnings_log'
+    INFO_LOG = 'info_log'
+    REQUEST_TIME = 'request_time'
+    TRIES = 'tries'
+
+    def __init__(self, record=None):
+        if record:
+            self.read(record)
+
+    def read(self, record):
+        self.start_time = record[self.START_TIME]
+        self.end_time = record[self.END_TIME]
+        self.exit_code = record[self.EXIT_CODE]
+        self.warnings_log = record[self.WARNINGS_LOG]
+        self.info_log = record[self.INFO_LOG]
+        self.tries = record[self.TRIES]
+
+
+class CombineOperation(BrutyOperation):
+    OPERATION = 'combine'
+    # I wanted these to be properties but needed access from just a class name
+    # and I wanted it to look like a string not a method so am defining in both classes (without the complexity of a class factory)
+    START_TIME = OPERATION + "_" + BrutyOperation.START_TIME
+    END_TIME = OPERATION + "_" + BrutyOperation.END_TIME
+    EXIT_CODE = OPERATION + "_" + BrutyOperation.EXIT_CODE
+    WARNINGS_LOG = OPERATION + "_" + BrutyOperation.WARNINGS_LOG
+    INFO_LOG = OPERATION + "_" + BrutyOperation.INFO_LOG
+    REQUEST_TIME = OPERATION + "_" + BrutyOperation.REQUEST_TIME
+    TRIES = OPERATION + "_" + BrutyOperation.TRIES
+
+    def __init__(self, record=None):
+        super().__init__(record)
+
+class ExportOperation(BrutyOperation):
+    OPERATION = 'export'
+    START_TIME = OPERATION + "_" + BrutyOperation.START_TIME
+    END_TIME = OPERATION + "_" + BrutyOperation.END_TIME
+    EXIT_CODE = OPERATION + "_" + BrutyOperation.EXIT_CODE
+    WARNINGS_LOG = OPERATION + "_" + BrutyOperation.WARNINGS_LOG
+    INFO_LOG = OPERATION + "_" + BrutyOperation.INFO_LOG
+    REQUEST_TIME = OPERATION + "_" + BrutyOperation.REQUEST_TIME
+    TRIES = OPERATION + "_" + BrutyOperation.TRIES
+
+    def __init__(self, record=None):
+        super().__init__(record)
 
 
 class TileInfo:
@@ -47,11 +99,9 @@ class TileInfo:
     FOR_NAV = 'for_navigation'
     DATATYPE = 'datatype'
     VIEW_ID = 'b_id'
-    START_TIME = 'start_time'
-    END_TIME = 'end_time'
-    EXIT_CODE = 'exit_code'
     TRIES = 'tries'
     PRIORITY = 'priority'
+    DATA_LOCATION = 'data_location'
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
@@ -77,9 +127,10 @@ class TileInfo:
 
         self.out_of_date = review_tile[self.OUT_OF_DATE]
         self.summary = review_tile[self.SUMMARY]
-        self.start_time = review_tile[self.START_TIME]
-        self.end_time = review_tile[self.END_TIME]
-        self.exit_code = review_tile[self.EXIT_CODE]
+        self.combine = CombineOperation(review_tile)
+        self.export = ExportOperation(review_tile)
+        self.data_location = review_tile[self.DATA_LOCATION]
+
         self.epsg = review_tile['st_srid']
         self.geometry = review_tile['geometry'] if 'geometry_buffered' not in review_tile else review_tile['geometry_buffered']
         self.public = review_tile['combine_public']  # public - included "unqualified"
@@ -141,9 +192,18 @@ class TileInfo:
         else:
             cursor = connection_info
         pg_update(cursor, table, where, **kwargs)
+
+    def _is_running(self, obj):
+        return (obj.start_time is not None) and ((obj.end_time is None) or (obj.start_time > obj.end_time))
+
     @property
-    def is_running(self):
-        return (self.start_time is not None) and ((self.end_time is None) or self.start_time > self.end_time)
+    def combine_is_running(self):
+        return self._is_running(self.combine)
+
+    @property
+    def export_is_running(self):
+        return self._is_running(self.export)
+
     def update_table_record(self, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), database=None, table=None, **kwargs):
         where = {self.VIEW_ID: self.view_id}
         self.update_table(connection_info, where, database, table, **kwargs)
@@ -164,9 +224,13 @@ class TileInfo:
         #     where ({self.PB},{self.UTM},{self.HEMISPHERE},{self.TILE},{self.DATUM},{self.LOCALITY},{self.RESOLUTION}, {self.DATATYPE},{self.NOT_FOR_NAV})=(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         #     (self.out_of_date, self.summary, self.pb, self.utm, self.hemi.upper(), self.tile, self.datum, self.locality, self.resolution, self.datatype, self.not_for_nav))
         cursor.execute(
-            f"""update {table} set ({self.START_TIME},{self.END_TIME},{self.EXIT_CODE},{self.OUT_OF_DATE},{self.SUMMARY},{self.TRIES})=(%s, %s, %s, %s, %s, %s) 
+            f"""update {table} set ({self.combine.START_TIME},{self.combine.END_TIME},{self.combine.EXIT_CODE},{self.combine.WARNINGS_LOG},{self.combine.INFO_LOG},
+            {self.export.START_TIME},{self.export.END_TIME},{self.export.EXIT_CODE},{self.export.WARNINGS_LOG},{self.export.INFO_LOG},
+            {self.OUT_OF_DATE},{self.SUMMARY},{self.TRIES})=(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
             where ({self.VIEW_ID})=(%s)""",
-            (self.start_time, self.end_time, self.exit_code, self.out_of_date, self.summary, self.tries, self.view_id))
+            (self.combine.start_time, self.combine.end_time, self.combine.exit_code, self.combine.warnings_log, self.combine.info_log,
+             self.export.start_time, self.export.end_time, self.export.exit_code, self.export.warnings_log, self.export.info_log,
+             self.out_of_date, self.summary, self.tries, self.view_id))
 
     @property
     def geometry(self):
@@ -282,6 +346,90 @@ class TileToProcess:
     closing: float = 0
 
 
+class TileManager:
+    RUNNING_PRIORITY = -999
+
+    def __init__(self, config, max_tries, allow_res=False):
+        self.config = config
+        self.max_tries = max_tries
+        self.allow_res = allow_res
+        self.user_dtypes, self.user_res = None, None
+        self.read_user_settings(self.allow_res)
+        self.remaining_tiles = {}
+
+    def read_user_settings(self, allow_res=False):
+        try:
+            self.user_dtypes = [dt.strip() for dt in parse_multiple_values(self.config['dtypes'])]
+        except KeyError:
+            self.user_dtypes = None
+        try:
+            if allow_res:
+                self.user_res = [float(dt.strip()) for dt in parse_multiple_values(self.config['res'])]
+            else:
+                self.user_res = None
+        except KeyError:
+            self.user_res = None
+
+    def refresh_tiles_list(self, needs_combining=False):
+        self.remaining_tiles = {}
+        for tile_info in iterate_tiles_table(self.config, only_needs_to_combine=needs_combining, max_retries=self.max_tries):
+            res = tile_info.resolution
+            if self.user_res and res not in self.user_res:
+                continue
+            for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
+                if self.user_dtypes and dtype not in self.user_dtypes:
+                    continue
+                for nav_flag_value in (True, False):
+                    self.remaining_tiles[tile_info.hash_id()] = tile_info
+
+        # sort remaining_tiles by priority and then by balance of production branches
+        # The remaining_tiles list is already sorted by tile number, so we can just sort by priority and then by production branch
+        self.priorities = {}
+        for hash, tile in self.remaining_tiles.items():
+            use_priority = self._revised_priority(tile)
+            try:
+                self.priorities[use_priority][tile.pb][hash] = tile
+            except KeyError:
+                try:
+                    self.priorities[use_priority][tile.pb] = {hash: tile}
+                except KeyError:
+                    self.priorities[use_priority] = {tile.pb: {hash: tile}}
+    @staticmethod
+    def _revised_priority(tile):
+        use_priority = tile.priority if not tile.is_running else TileManager.RUNNING_PRIORITY
+        if use_priority is None:
+            use_priority = 0
+        return use_priority
+
+    def pick_next_tile(self, currently_running):
+        # currently_running: dict(TileProcess)
+
+        # pick the highest priority tile
+        for priority in sorted(self.priorities.keys(), reverse=True):
+            # balance the production branches
+            # find the number of each production branch that is currently running
+            # default the count to 0 for each production branch in case none are running
+            pb_counts = {pb: 0 for pb in self.priorities[priority].keys()}
+            for tile_process in currently_running.values():
+                try:
+                    pb_counts[tile_process.tile_info.pb] += 1
+                except KeyError:  # something is running and no more of its production branch are in the list
+                    pb_counts[tile_process.tile_info.pb] = 1
+
+            for pb in sorted(pb_counts.keys(), key=lambda x: pb_counts[x]):
+                for hash, tile in self.priorities[priority][pb].items():
+                    if hash not in currently_running:
+                        return tile
+        return None
+    def remove(self, tile):
+        try:
+            hash = tile.hash_id()
+            del self.remaining_tiles[hash]
+            del self.priorities[self._revised_priority(tile)][tile.pb][hash]
+        except KeyError:
+            pass
+
+
 def create_world_db(root_path, tile_info: TileInfo, log_level=logging.INFO):
     full_path = pathlib.Path(root_path).joinpath(tile_info.bruty_db_name())
 
@@ -312,7 +460,7 @@ def create_world_db(root_path, tile_info: TileInfo, log_level=logging.INFO):
     return db
 
 
-def get_tiles_records(config, needs_to_combine=False, ignore_running=False, max_retries=3):
+def get_tiles_records(config, needs_to_combine=False, needs_to_export=False, ignore_combine_running=False, ignore_export_running=False, max_retries=3):
     """ Read the NBS postgres tile_specifications database for the bruty_tile table and, if not existing,
     create Bruty databases for the area of interest for the polygon listed in the postgres table.
     """
@@ -330,13 +478,21 @@ def get_tiles_records(config, needs_to_combine=False, ignore_running=False, max_
     # then read the geometry from the view of the equivalent area/records
     # grab them all at run time so that if records are changed during the run we at least know all the geometries should have been from the run time
     conditions = []
-    if ignore_running:
-        conditions.append(f"""(end_time > start_time  OR -- finished running previously or
-                                start_time IS NULL) -- never ran""")
+    def ignore_running(cls):
+        conditions.append(f"""({cls.END_TIME} > {cls.START_TIME}  OR -- finished running previously or
+                                {cls.START_TIME} IS NULL) -- never ran""")
+    if ignore_combine_running:
+        ignore_running(CombineOperation)
+    if ignore_export_running:
+        ignore_running(ExportOperation)
+    def needs_processing(cls):
+        conditions.append(f"""({cls.REQUEST_TIME} IS NOT NULL AND
+                             (({cls.START_TIME} IS NULL OR {cls.REQUEST_TIME} > {cls.START_TIME}) OR -- not started yet
+                              ({cls.EXIT_CODE} > 0 AND ({cls.TRIES} IS NULL OR {cls.TRIES} < {max_retries})))) -- failed with a positive exit code""")
     if needs_to_combine:
-        conditions.append(f"""(combine_time IS NOT NULL AND
-                             ((start_time IS NULL OR combine_time > start_time) OR -- not started yet
-                              (exit_code > 0 AND (tries IS NULL OR tries < {max_retries})))) -- failed with a positive exit code""")
+        needs_processing(CombineOperation)
+    if needs_to_export:
+        needs_processing(ExportOperation)
     if production_branches:  # put strings in single quotes
         conditions.append(f"""UPPER(production_branch) IN ({', '.join(["'"+pb.upper()+"'" for pb in production_branches])})""")
     if zones:
@@ -347,8 +503,6 @@ def get_tiles_records(config, needs_to_combine=False, ignore_running=False, max_
         conditions.append(f"""LOWER(datatype) IN ({', '.join(["'" + dt.lower() + "'" for dt in dtypes])})""")
     if datums:  # put strings in single quotes
         conditions.append(f"""datum IN ({', '.join(["'"+str(d)+"'" for d in datums])})""")
-    if max_retries:
-        conditions.append(f"""(tries is NULL OR tries<{max_retries})""")
     if not force:
         conditions.append(f"""(build IS TRUE)""")
     where_clause = "\nAND ".join(conditions)  # a comment at the end was making this fail, so put a leading newline
@@ -364,8 +518,10 @@ def get_tiles_records(config, needs_to_combine=False, ignore_running=False, max_
     connection.close()
     return records
 
-def iterate_tiles_table(config, only_needs_to_combine=False, ignore_running=False, max_retries=3):
-    records = get_tiles_records(config, needs_to_combine=only_needs_to_combine, ignore_running=ignore_running, max_retries=max_retries)
+def iterate_tiles_table(config, only_needs_to_combine=False, only_needs_to_export=False,
+                        ignore_combine_running=False, ignore_export_running=False, max_retries=3):
+    records = get_tiles_records(config, needs_to_combine=only_needs_to_combine, ignore_combine_running=ignore_combine_running,
+                                needs_to_export=only_needs_to_export, ignore_export_running=ignore_export_running, max_retries=max_retries)
     for review_tile in records:
         info = TileInfo(**review_tile)
         # determine if this tile should be processed

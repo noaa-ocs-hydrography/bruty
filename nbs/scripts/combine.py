@@ -249,8 +249,8 @@ def process_nbs_database(world_db, conn_info, tile_info, use_navigation_flag=Tru
                         warnings_log = f"'{h.baseFilename}'"
             # if not extra_debug:
             print('turn this off for debug\n'*80)
-            tile_info.update_table_record(conn_info, start_time="NOW()", tries="COALESCE(tries, 0) + 1",
-                                  data_location=f"'{world_db_path}'", info_log=info_log, warnings_log=warnings_log)
+            tile_info.update_table_record(conn_info, **{tile_info.combine.START_TIME: "NOW()", tile_info.TRIES: "COALESCE(tries, 0) + 1",
+                                  tile_info.DATA_LOCATION: f"'{world_db_path}'", tile_info.combine.INFO_LOG: info_log, tile_info.combine.WARNINGS_LOG: warnings_log})
 
     if ret == SUCCEEDED:
         sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, (use_navigation_flag, tile_info.for_nav), exclude=exclude)
@@ -263,7 +263,7 @@ def process_nbs_database(world_db, conn_info, tile_info, use_navigation_flag=Tru
         ret = process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug, override_epsg, crop=crop, log_level=log_level)
         # if not extra_debug:
         print('turn this off for debug\n'*80)
-        tile_info.update_table_record(conn_info, end_time="NOW()", exit_code=ret)
+        tile_info.update_table_record(conn_info, **{tile_info.combine.END_TIME: "NOW()", tile_info.combine.EXIT_CODE:ret})
     return ret
 
 
@@ -706,7 +706,7 @@ if __name__ == "__main__":
             LOGGER.error(traceback.format_exc())
             LOGGER.error(msg)
             ret = UNHANDLED_EXCEPTION
-            TileInfo.update_table(conn_info, f"b_id={args.combine_pk_id}", end_time="NOW()", exit_code=ret)
+            TileInfo.update_table(conn_info, f"b_id={args.combine_pk_id}", **{tile_info.combine.END_TIME: "NOW()", tile_info.combine.exit_code: ret})  # using the raw
         if args.fingerprint:
             try:
                 db = WorldDatabase.open(args.bruty_path)
