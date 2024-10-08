@@ -444,10 +444,13 @@ class TileManager:
                 except KeyError:  # something is running and no more of its production branch are in the list
                     pb_counts[tile_process.tile_info.pb] = 1
 
+            # sort the production_branches by the number of tiles running
             for pb in sorted(pb_counts.keys(), key=lambda x: pb_counts[x]):
-                for hash, tile in self.priorities[priority][pb].items():
-                    if hash not in currently_running:
-                        return tile
+                # if the production branch has tiles at the current priority level then return the first one that isn't running
+                if pb in self.priorities[priority]:
+                    for hash, tile in self.priorities[priority][pb].items():
+                        if hash not in currently_running:
+                            return tile
         return None
     def remove(self, tile):
         # The processing loop removes the tile from the remaining_tiles list as part of its processing loop.
