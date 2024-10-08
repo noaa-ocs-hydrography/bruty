@@ -108,7 +108,7 @@ def main(config):
             tile_info.out_of_date = True
         conn_info.database = "tile_specifications"
         conn, cursor = connection_with_retries(conn_info)
-        tile_info.update_table_status(cursor)
+        tile_info.update_combine_status(cursor)
         conn.commit()
 
 

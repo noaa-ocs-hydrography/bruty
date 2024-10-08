@@ -1,4 +1,5 @@
 import os
+import sys
 import pickle
 import pprint
 import sys
@@ -249,8 +250,8 @@ def process_nbs_database(world_db, conn_info, tile_info, use_navigation_flag=Tru
                         warnings_log = f"'{h.baseFilename}'"
             # if not extra_debug:
             print('turn this off for debug\n'*80)
-            tile_info.update_table_record(conn_info, **{tile_info.combine.START_TIME: "NOW()", tile_info.TRIES: "COALESCE(tries, 0) + 1",
-                                  tile_info.DATA_LOCATION: f"'{world_db_path}'", tile_info.combine.INFO_LOG: info_log, tile_info.combine.WARNINGS_LOG: warnings_log})
+            tile_info.update_table_record(conn_info, **{tile_info.combine.START_TIME: "NOW()", tile_info.combine.TRIES: f"COALESCE({tile_info.combine.TRIES}, 0) + 1",
+                                  tile_info.combine.DATA_LOCATION: f"'{world_db_path}'", tile_info.combine.INFO_LOG: info_log, tile_info.combine.WARNINGS_LOG: warnings_log})
 
     if ret == SUCCEEDED:
         sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, (use_navigation_flag, tile_info.for_nav), exclude=exclude)
@@ -263,7 +264,7 @@ def process_nbs_database(world_db, conn_info, tile_info, use_navigation_flag=Tru
         ret = process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug, override_epsg, crop=crop, log_level=log_level)
         # if not extra_debug:
         print('turn this off for debug\n'*80)
-        tile_info.update_table_record(conn_info, **{tile_info.combine.END_TIME: "NOW()", tile_info.combine.EXIT_CODE:ret})
+        tile_info.update_table_record(conn_info, **{tile_info.combine.END_TIME: "NOW()", tile_info.combine.EXIT_CODE: ret})
     return ret
 
 
@@ -604,8 +605,8 @@ def make_parser():
                         help="location to config file for connection info")
     parser.add_argument("-t", "--table", action='append', type=str, dest="tables", metavar='table', default=[],
                         help="table to read from postgres database, can specify more than once")
-    parser.add_argument("-k", "--combine_pk_id", action='append', type=str, dest="combine_pk_id", metavar='combine_pk_id', default="",
-                        help="table to read from postgres database, can specify more than once")
+    parser.add_argument("-k", "--combine_pk_id", type=str, dest="combine_pk_id", default="",
+                        help="view id of the tile to process")
     parser.add_argument("-x", "--exclude", action='append', type=int, dest="exclude", default=[],
                         help="nbs_ids to exclude from the combine process")
     parser.add_argument("-b", "--bruty_path", type=str, metavar='bruty_path', default="",
@@ -634,6 +635,7 @@ def make_parser():
 
 
 if __name__ == "__main__":
+    print(sys.argv)
     parser = make_parser()
     args = parser.parse_args()
     if args.show_help or not args.bruty_path or not args.tables:

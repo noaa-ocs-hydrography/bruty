@@ -126,13 +126,12 @@ def launch(world_db, view_pk_id, config_pth, tablenames, use_navigation_flag=Tru
                              'override_epsg':override, 'extra_debug':debug_config})
     return ret
 
-
+# attribute(@feature, 'combine_start_time') is not NULL and ((attribute(@feature, 'combine_start_time') > attribute(@feature, 'combine_end_time')) or ((attribute(@feature, 'combine_start_time') is not NULL and attribute(@feature, 'combine_end_time') is NULL)))
 def remove_finished_processes(tile_processes, tile_manager):
     for key in list(tile_processes.keys()):
         if not tile_processes[key].console_process.is_running():
             old_tile = tile_processes[key].tile_info
             try:
-                retry = False
                 if tile_processes[key].succeeded():
                     reason = "finished"
                 # 3 is the combine code for bad/missing data
@@ -149,11 +148,11 @@ def remove_finished_processes(tile_processes, tile_manager):
                 # treat it like an unhandled exception in the subprocess - retry and increment the count
                 # also wait a moment to let the network recover in case that helps
                 msg = traceback.format_exc()
-                LOGGER.warning(f"Exception accessing bruty db for {old_tile.tile_info}:\n{msg}")
+                LOGGER.warning(f"Exception accessing bruty db for {old_tile}:\n{msg}")
                 reason = "failed with a sqlite Operational error or OSError"
                 retry = True
                 time.sleep(5)
-            LOGGER.info(f"Combine {reason} for {old_tile.tile_info}")
+            LOGGER.info(f"Combine for {old_tile} {reason} ")
             try:
                 tile_manager.remove(old_tile)  # remove the tile from the list of tiles to process in the future
             except KeyError:
@@ -230,14 +229,14 @@ def main(config):
                     LOGGER.info("Waiting to give running tiles time to finish")
                 else:
                     LOGGER.info("Waiting to before checking for more tiles to process")
-                sleep(60)
+                time.sleep(60)
             while tile_manager.remaining_tiles:
                 next_tile = tile_manager.pick_next_tile(tile_processes)
 
                 do_keyboard_actions(tile_manager.remaining_tiles, tile_processes)
 
                 LOGGER.info(f"starting combine for {next_tile}" +
-                            f"\n  {len(tile_manager.remaining_tiles)} remain including the {len(tile_processes) + 1} currently running")
+                            f"\n  {len(tile_manager.remaining_tiles)} remain including the {len(tile_processes)} currently running")
                 if not next_tile.for_nav and next_tile.datatype == ENC:
                     LOGGER.debug(f"  Skipping ENC with for_navigation=False since all ENC data must be for navigation")
                     tile_manager.remove(next_tile)
@@ -264,7 +263,7 @@ def main(config):
                         lock = Lock(db.metadata_filename().with_suffix(".lock"), fail_when_locked=True, flags=LockFlags.EXCLUSIVE|LockFlags.NON_BLOCKING)
                         lock.acquire()
                         override = db.db.epsg if config.getboolean('override', False) else NO_OVERRIDE
-                        tablenames = [next_tile.metadata_table_name()]
+                        conn_info.tablenames = [next_tile.metadata_table_name()]
                         fingerprint = str(next_tile.hash_id()) + "_" + datetime.now().isoformat()
                         if debug_launch:
                             use_locks(port)
@@ -286,7 +285,7 @@ def main(config):
                                     get_refresh = True
                             if get_refresh:  # restart the while loop with an updated list of tiles
                                 break
-                            pid = launch(db, next_tile.view_id, config._source_filename, tablenames, use_navigation_flag=use_nav_flag,
+                            pid = launch(db, next_tile.combine_id, config._source_filename, conn_info.tablenames, use_navigation_flag=use_nav_flag,
                                          override_epsg=override, extra_debug=debug_config, lock=port, exclude=exclude, crop=(next_tile.datatype==ENC),
                                          log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
                                          fingerprint=fingerprint, delete_existing=delete_existing, log_level=log_level)
@@ -298,7 +297,6 @@ def main(config):
 
                             # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
                             tile_processes[next_tile.hash_id()] = TileProcess(running_process, next_tile, db, fingerprint, lock)
-                        raise "Change all the things (iter_tiles) using hash_id which now includes datatype, res, not_for_nav"
                         del lock  # unlocks if the lock wasn't stored in the tile_process
                     except AlreadyLocked:
                         LOGGER.debug(f"delay combine due to data lock for {next_tile}")
