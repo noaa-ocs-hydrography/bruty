@@ -62,7 +62,7 @@ class ConnectionInfo:
     tablenames: tuple = ()
 
 
-def hash_id(product_branch: str, zone: int, hemi: str, tile: int, datum: str, res: int, datatype: str, nav_flag: bool):
+def hash_id(*args):
     """ Get a 64 bit integer to use with the pg_try_advisory_lock_shared or pg_try_advisory_lock functions
 
     Parameters
@@ -84,7 +84,8 @@ def hash_id(product_branch: str, zone: int, hemi: str, tile: int, datum: str, re
         the 64 bit hash value as an integer for easy use with postgres locks
 
     """
-    lock_string = f"{product_branch.lower()}_{zone}{hemi}_{tile}_{datum.lower()}_{res}_{datatype}_{nav_flag}".encode()
+
+    lock_string = "_".join([str(v) for v in args]).encode()
     digest = blake2b(lock_string, digest_size=8).hexdigest()
     id = int(digest, 16)
     return id

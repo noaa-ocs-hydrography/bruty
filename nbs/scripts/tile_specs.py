@@ -91,31 +91,20 @@ class ExportOperation(BrutyOperation):
 
 class TileInfo:
     SOURCE_DATABASE = "tile_specifications"
-    SOURCE_TABLE = "combine_spec_view"
-    RESOLUTIONS_TABLE = "combine_spec_resolutions"
-    TILES_TABLE = "combine_spec_tiles"
+    SOURCE_TABLE = "spec_tiles"
 
-    OUT_OF_DATE = "out_of_date"
-    SUMMARY = "change_summary"
     PB = 'production_branch'
     UTM = 'utm'
     TILE = 'tile'
     DATUM = 'datum'
     LOCALITY = 'locality'
     HEMISPHERE = 'hemisphere'
-    RESOLUTION = "resolution"
-    CLOSING_DISTANCE = 'closing_distance'
-    FOR_NAV = 'for_navigation'
-    DATATYPE = 'datatype'
-    COMBINE_ID = 'b_id'
     PRIORITY = 'priority'
-    DATA_LOCATION = 'data_location'
     COMBINE_PUBLIC = 'combine_public'
     COMBINE_INTERNAL = 'combine_internal'
     COMBINE_NAVIGATION = 'combine_navigation'
     BUILD = 'build'
-    RESOLUTION_ID = 'res_id'
-
+    TILE_ID = 't_id'
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
@@ -131,19 +120,42 @@ class TileInfo:
         self.datum = review_tile[self.DATUM]
         self.build = review_tile[self.BUILD]
         self.locality = review_tile[self.LOCALITY]
+        self.public = review_tile[self.COMBINE_PUBLIC]  # public - included "unqualified"
+        self.internal = review_tile[self.COMBINE_INTERNAL]  # includes sensitive
+        self.navigation = review_tile[self.COMBINE_NAVIGATION]  # only QC'd (qualified) data
+
+    def is_running(self):
+        raise NotImplementedError
+
+    def __repr__(self):
+        return f"TileInfo:{self.pb}_{self.utm}{self.hemi}_{self.tile}_{self.locality}"
+
+    def hash_id(self):
+        return hash_id(self.pb, self.utm, self.hemi, self.tile, self.datum)
+
+    @property
+    def base_name(self):
+        return "_".join([self.pb, self.locality, f"utm{self.utm}{self.hemi}", self.datum])
+
+
+
+class ResolutionTileInfo(TileInfo):
+    SOURCE_TABLE = "spec_resolutions"
+
+    RESOLUTION = "resolution"
+    CLOSING_DISTANCE = 'closing_distance'
+    RESOLUTION_ID = 'r_id'
+    TILE_ID = 'tile_id'
+
+    def __init__(self, **review_tile):
+        # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
+        #   and make a different init not based on the combine_spec table layout
+        super().__init__(**review_tile)
         self.resolution = review_tile[self.RESOLUTION]
         self.closing_dist = review_tile[self.CLOSING_DISTANCE]
-        self.datatype = review_tile[self.DATATYPE]
-        self.for_nav = review_tile[self.FOR_NAV]
-        self.combine_id = review_tile[self.COMBINE_ID]
         self.res_tile_id = review_tile[self.RESOLUTION_ID]
-        self.priority = review_tile[self.PRIORITY] if review_tile[self.PRIORITY] else 0  # if None, make it 0
-
-        self.out_of_date = review_tile[self.OUT_OF_DATE]
-        self.summary = review_tile[self.SUMMARY]
-        self.combine = CombineOperation(review_tile)
         self.export = ExportOperation(review_tile)
-
+        self.priority = review_tile[self.PRIORITY] if review_tile[self.PRIORITY] else 0  # if None, make it 0
         try:
             self.epsg = review_tile['st_srid']
         except KeyError:
@@ -152,18 +164,132 @@ class TileInfo:
             self.geometry = review_tile['geometry'] if 'geometry_buffered' not in review_tile else review_tile['geometry_buffered']
         except KeyError:
             self.geometry = None
-        self.public = review_tile[self.COMBINE_PUBLIC]  # public - included "unqualified"
-        self.internal = review_tile[self.COMBINE_INTERNAL]  # includes sensitive
-        self.navigation = review_tile[self.COMBINE_NAVIGATION]  # only QC'd (qualified) data
-        # for_nav = review_tile.get("for_nav", True)
-        # self.for_nav = "" if for_nav else "not_for_navigation"
-        # self.data_type = review_tile.get("dtype", "")
 
     def __repr__(self):
-        return f"TileInfo:{self.pb}_{self.utm}{self.hemi}_{self.tile}_{self.locality}_{self.datatype}_{self.resolution}m_{'nav' if self.for_nav else 'NOT_NAV'}"
+        return super().__repr__()+f"_{self.resolution}m"
 
     def hash_id(self):
-        return hash_id(self.pb, self.utm, self.hemi, self.tile, self.datum, self.resolution, self.datatype, self.for_nav)
+        return super().hash_id(), self.resolution  # hash_id(self.resolution)
+
+    def is_running(self):
+        return self.export.is_running()
+
+    @property
+    def geometry(self):
+        return self._geom
+
+    @geometry.setter
+    def geometry(self, geom):
+        if geom is None:
+            self._geom = None
+            self.minx, self.miny = None, None
+            self.maxx, self.maxy = None, None
+        else:
+            try:
+                minx, maxx, miny, maxy = geom.GetEnvelope()
+                g = geom
+            except AttributeError:
+                try:
+                    minx, miny, maxx, maxy = geom.bounds
+                    g = geom
+                except:
+                    try:
+                        g = ogr.CreateGeometryFromWkb(bytes.fromhex(geom))
+                        minx, maxx, miny, maxy = g.GetEnvelope()
+                        # Out[44]: (-74.4, -73.725, 40.2, 40.5)
+
+                        # g.GetGeometryRef(0).GetPoints()
+                        # Out[48]:
+                        # [(-73.95, 40.2), (-74.1, 40.2), (-74.1, 40.425),  (-74.4, 40.425), (-74.4, 40.5),
+                        #  (-73.725, 40.5), (-73.725, 40.35), (-73.95, 40.35), (-73.95, 40.2)]
+                    except (RuntimeError, AttributeError):
+                        # *************************************************************************************************
+                        # USING SHAPELY
+                        g = wkb.loads(geom, hex=True)
+                        minx, miny, maxx, maxy = g.bounds
+            self._geom = g
+            self.minx = minx
+            self.miny = miny
+            self.maxx = maxx
+            self.maxy = maxy
+
+    @property
+    def tile_name(self):
+        names = [self.base_name]
+        if self.tile not in (None, ""):  # putting tile before the type makes it sort better by name
+            names.append(f"Tile{self.tile}")
+        if self.resolution not in (None, ""):  # putting tile before the type makes it sort better by name
+            use_res = self.resolution
+            if int(self.resolution) == self.resolution:  # remove the decimal point if it's exact integer ("4" instead of "4.0")
+                use_res = int(self.resolution)
+            names.append("res" + str(use_res))
+        return "_".join(names)
+
+    @property
+    def full_name(self):
+        names = [self.tile_name]
+        # Resolution is now in the Tile_name since combines are node based and have to be done custom for each resolution
+        # use_res = self.resolution
+        # if int(self.resolution) == self.resolution:  # remove the decimal point if it's exact integer ("4" instead of "4.0")
+        #     use_res = int(self.resolution)
+        # names.append(str(use_res))
+        return "_".join(names)
+
+    def update_export_status(self,  connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), database=None, table=None):
+        if database is None:
+            database = self.SOURCE_DATABASE
+        if table is None:
+            table = self.RESOLUTIONS_TABLE
+        if isinstance(connection_info, ConnectionInfo):
+            conn_info = ConnectionInfo(database, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [table])
+            conn, cursor = connection_with_retries(conn_info)
+        else:
+            cursor = connection_info
+        # trying to just save the b_id from the combine_spec_view and use that to update the combine_spec_bruty table
+        # cursor.execute(
+        #     f"""update {tablename} set ({self.OUT_OF_DATE},{self.SUMMARY})=(%s, %s)
+        #     where ({self.PB},{self.UTM},{self.HEMISPHERE},{self.TILE},{self.DATUM},{self.LOCALITY},{self.RESOLUTION}, {self.DATATYPE},{self.NOT_FOR_NAV})=(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        #     (self.out_of_date, self.summary, self.pb, self.utm, self.hemi.upper(), self.tile, self.datum, self.locality, self.resolution, self.datatype, self.not_for_nav))
+        cursor.execute(
+            f"""update {table} set ({self.export.START_TIME},{self.export.END_TIME},{self.export.EXIT_CODE},{self.export.WARNINGS_LOG},
+            {self.export.INFO_LOG},{self.export.TRIES})=(%s, %s, %s, %s, %s, %s) 
+            where ({self.RESOLUTION_ID})=(%s)""",
+            (self.export.start_time, self.export.end_time, self.export.exit_code, self.export.warnings_log, self.export.info_log, self.export.tries,
+             self.res_tile_id))
+
+
+class CombineTileInfo(ResolutionTileInfo):
+    SOURCE_TABLE = "spec_combines"
+    VIEW_TABLE = "view_individual_combines"
+
+    DATA_LOCATION = 'data_location'
+    COMBINE_ID = 'b_id'
+    FOR_NAV = 'for_navigation'
+    DATATYPE = 'datatype'
+    RESOLUTION_ID = 'res_id'
+    OUT_OF_DATE = "out_of_date"
+    SUMMARY = "change_summary"
+
+    def __init__(self, **review_tile):
+        # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
+        #   and make a different init not based on the combine_spec table layout
+        super().__init__(**review_tile)
+
+        self.datatype = review_tile[self.DATATYPE]
+        self.for_nav = review_tile[self.FOR_NAV]
+        self.combine_id = review_tile[self.COMBINE_ID]
+        self.combine = CombineOperation(review_tile)
+        self.out_of_date = review_tile[self.OUT_OF_DATE]
+        self.summary = review_tile[self.SUMMARY]
+
+    def __repr__(self):
+        return super().__repr__()+f"_{self.datatype}_{'nav' if self.for_nav else 'NOT_NAV'}"
+
+    def hash_id(self):
+        return super().hash_id(), hash_id(self.datatype, self.for_nav)
+
+    def is_running(self):
+        return self.combine.is_running() or self.export.is_running()
 
     @classmethod
     def from_combine_spec_view(cls, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), pk_id, database=None, table=None):
@@ -232,98 +358,11 @@ class TileInfo:
         #     where ({self.PB},{self.UTM},{self.HEMISPHERE},{self.TILE},{self.DATUM},{self.LOCALITY},{self.RESOLUTION}, {self.DATATYPE},{self.NOT_FOR_NAV})=(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         #     (self.out_of_date, self.summary, self.pb, self.utm, self.hemi.upper(), self.tile, self.datum, self.locality, self.resolution, self.datatype, self.not_for_nav))
         cursor.execute(
-            f"""update {table} set ({self.combine.START_TIME},{self.combine.END_TIME},{self.combine.EXIT_CODE},{self.combine.WARNINGS_LOG},{self.combine.INFO_LOG},{self.combine.TRIES},
-            {self.OUT_OF_DATE},{self.SUMMARY})=(%s, %s, %s, %s, %s, %s, %s, %s) 
+            f"""update {table} set ({self.combine.START_TIME},{self.combine.END_TIME},{self.combine.EXIT_CODE},{self.combine.WARNINGS_LOG},
+            {self.combine.INFO_LOG},{self.combine.TRIES})=(%s, %s, %s, %s, %s, %s) 
             where ({self.COMBINE_ID})=(%s)""",
             (self.combine.start_time, self.combine.end_time, self.combine.exit_code, self.combine.warnings_log, self.combine.info_log, self.combine.tries,
-             self.out_of_date, self.summary, self.combine_id))
-
-    def update_export_status(self,  connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), database=None, table=None):
-        if database is None:
-            database = self.SOURCE_DATABASE
-        if table is None:
-            table = self.RESOLUTIONS_TABLE
-        if isinstance(connection_info, ConnectionInfo):
-            conn_info = ConnectionInfo(database, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [table])
-            conn, cursor = connection_with_retries(conn_info)
-        else:
-            cursor = connection_info
-        # trying to just save the b_id from the combine_spec_view and use that to update the combine_spec_bruty table
-        # cursor.execute(
-        #     f"""update {tablename} set ({self.OUT_OF_DATE},{self.SUMMARY})=(%s, %s)
-        #     where ({self.PB},{self.UTM},{self.HEMISPHERE},{self.TILE},{self.DATUM},{self.LOCALITY},{self.RESOLUTION}, {self.DATATYPE},{self.NOT_FOR_NAV})=(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-        #     (self.out_of_date, self.summary, self.pb, self.utm, self.hemi.upper(), self.tile, self.datum, self.locality, self.resolution, self.datatype, self.not_for_nav))
-        cursor.execute(
-            f"""update {table} set ({self.export.START_TIME},{self.export.END_TIME},{self.export.EXIT_CODE},{self.export.WARNINGS_LOG},{self.export.INFO_LOG},{self.export.TRIES})
-            =(%s, %s, %s, %s, %s, %s) 
-            where ({self.RESOLUTION_ID})=(%s)""",
-            (self.export.start_time, self.export.end_time, self.export.exit_code, self.export.warnings_log, self.export.info_log, self.export.tries,
-             self.res_tile_id))
-
-    @property
-    def geometry(self):
-        return self._geom
-
-    @geometry.setter
-    def geometry(self, geom):
-        if geom is None:
-            self._geom = None
-            self.minx, self.miny = None, None
-            self.maxx, self.maxy = None, None
-        else:
-            try:
-                minx, maxx, miny, maxy = geom.GetEnvelope()
-                g = geom
-            except AttributeError:
-                try:
-                    minx, miny, maxx, maxy = geom.bounds
-                    g = geom
-                except:
-                    try:
-                        g = ogr.CreateGeometryFromWkb(bytes.fromhex(geom))
-                        minx, maxx, miny, maxy = g.GetEnvelope()
-                        # Out[44]: (-74.4, -73.725, 40.2, 40.5)
-
-                        # g.GetGeometryRef(0).GetPoints()
-                        # Out[48]:
-                        # [(-73.95, 40.2), (-74.1, 40.2), (-74.1, 40.425),  (-74.4, 40.425), (-74.4, 40.5),
-                        #  (-73.725, 40.5), (-73.725, 40.35), (-73.95, 40.35), (-73.95, 40.2)]
-                    except (RuntimeError, AttributeError):
-                        # *************************************************************************************************
-                        # USING SHAPELY
-                        g = wkb.loads(geom, hex=True)
-                        minx, miny, maxx, maxy = g.bounds
-            self._geom = g
-            self.minx = minx
-            self.miny = miny
-            self.maxx = maxx
-            self.maxy = maxy
-
-    @property
-    def base_name(self):
-        return "_".join([self.pb, self.locality, f"utm{self.utm}{self.hemi}", self.datum])
-
-    @property
-    def tile_name(self):
-        names = [self.base_name]
-        if self.tile not in (None, ""):  # putting tile before the type makes it sort better by name
-            names.append(f"Tile{self.tile}")
-        if self.resolution not in (None, ""):  # putting tile before the type makes it sort better by name
-            use_res = self.resolution
-            if int(self.resolution) == self.resolution:  # remove the decimal point if it's exact integer ("4" instead of "4.0")
-                use_res = int(self.resolution)
-            names.append("res" + str(use_res))
-        return "_".join(names)
-
-    @property
-    def full_name(self):
-        names = [self.tile_name]
-        # Resolution is now in the Tile_name since combines are node based and have to be done custom for each resolution
-        # use_res = self.resolution
-        # if int(self.resolution) == self.resolution:  # remove the decimal point if it's exact integer ("4" instead of "4.0")
-        #     use_res = int(self.resolution)
-        # names.append(str(use_res))
-        return "_".join(names)
+             self.combine_id))
 
     def metadata_table_name(self, dtype: str=None):
         if dtype is None:
@@ -397,18 +436,27 @@ class TileManager:
                 self.user_res = None
         except KeyError:
             self.user_res = None
+        self.process_combines = self.config.getboolean('process_combines', True)
+        self.process_exports = self.config.getboolean('process_exports', True)
 
-    def refresh_tiles_list(self, needs_combining=False):
+    def refresh_tiles_list(self, needs_combining=False, needs_exporting=False):
         self.remaining_tiles = {}
-        for tile_info in iterate_tiles_table(self.config, only_needs_to_combine=needs_combining, max_retries=self.max_tries):
-            res = tile_info.resolution
-            if self.user_res and res not in self.user_res:
-                continue
-            for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
-                if self.user_dtypes and dtype not in self.user_dtypes:
+        if self.process_combines:
+            for tile_info in iterate_combine_table(self.config, needs_to_process=needs_combining, max_retries=self.max_tries):
+                res = tile_info.resolution
+                if self.user_res and res not in self.user_res:
                     continue
-                for nav_flag_value in (True, False):
-                    self.remaining_tiles[tile_info.hash_id()] = tile_info
+                for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
+                    if self.user_dtypes and dtype not in self.user_dtypes:
+                        continue
+                    for nav_flag_value in (True, False):
+                        self.remaining_tiles[tile_info.hash_id()] = tile_info
+        if self.process_exports:
+            for tile_info in iterate_export_table(self.config, needs_to_process=needs_exporting, max_retries=self.max_tries):
+                res = tile_info.resolution
+                if self.user_res and res not in self.user_res:
+                    continue
+                self.remaining_tiles[tile_info.hash_id()] = tile_info
 
         # sort remaining_tiles by priority and then by balance of production branches
         # The remaining_tiles list is already sorted by tile number, so we can just sort by priority and then by production branch
@@ -424,7 +472,7 @@ class TileManager:
                     self.priorities[use_priority] = {tile.pb: {hash: tile}}
     @staticmethod
     def _revised_priority(tile):
-        use_priority = tile.priority if not (tile.combine.is_running() or tile.export.is_running()) else TileManager.RUNNING_PRIORITY
+        use_priority = tile.priority if not tile.is_running() else TileManager.RUNNING_PRIORITY
         if use_priority is None:
             use_priority = 0
         return use_priority
@@ -496,59 +544,51 @@ def create_world_db(root_path, tile_info: TileInfo, log_level=logging.INFO):
         raise BrutyError(f"Existing Bruty data has resolution of {db.res_x} but requested Tile {tile_info.full_name} wants at least {tile_info.resolution}")
     return db
 
-
-def get_tiles_records(config, needs_to_combine=False, needs_to_export=False, exclude_combine_running=False, exclude_export_running=False, max_retries=3):
-    """ Read the NBS postgres tile_specifications database for the bruty_tile table and, if not existing,
-    create Bruty databases for the area of interest for the polygon listed in the postgres table.
-    """
+def basic_conditions(config):
     tiles = parse_ints_with_ranges(config.get('tiles', ""))
     zones = parse_ints_with_ranges(config.get('zones', ""))
     production_branches = parse_multiple_values(config.get('production_branches', ""))
-    dtypes = parse_multiple_values(config.get('dtypes', ""))
     datums = parse_multiple_values(config.get('datums', ""))
     force = config.getboolean('force_build', False)
-
-    conn_info = connect_params_from_config(config)
-    conn_info.database = "tile_specifications"
-    connection, cursor = connection_with_retries(conn_info)
-    # tile specs are now being held in views, so we have to read the combine_specs table
-    # then read the geometry from the view of the equivalent area/records
-    # grab them all at run time so that if records are changed during the run we at least know all the geometries should have been from the run time
     conditions = []
-    def exclude_running(cls):
-        conditions.append(f"""({cls.END_TIME} > {cls.START_TIME}  OR -- finished running previously or
-                                {cls.START_TIME} IS NULL) -- never ran""")
-    if exclude_combine_running:
-        exclude_running(CombineOperation)
-    if exclude_export_running:
-        exclude_running(ExportOperation)
-    def needs_processing(cls):
-        conditions.append(f"""({cls.REQUEST_TIME} IS NOT NULL AND 
-                                -- never started, hasn't finished, or has a positive exit code and hasn't retried too many times
-                               (({cls.START_TIME} IS NULL OR {cls.END_TIME} IS NULL OR {cls.REQUEST_TIME} > {cls.START_TIME} OR {cls.START_TIME} > {cls.END_TIME})
-                                 OR ({cls.EXIT_CODE} > 0 AND ({cls.TRIES} IS NULL OR {cls.TRIES} < {max_retries})))) -- failed with a positive exit code""")
-    if needs_to_combine:
-        needs_processing(CombineOperation)
-    if needs_to_export:
-        needs_processing(ExportOperation)
     if production_branches:  # put strings in single quotes
         conditions.append(f"""UPPER(production_branch) IN ({', '.join(["'"+pb.upper()+"'" for pb in production_branches])})""")
     if zones:
         conditions.append(f"utm IN ({', '.join([str(utm) for utm in zones])})")
     if tiles:
         conditions.append(f"tile IN ({', '.join([str(t) for t in tiles])})")
-    if dtypes:
-        conditions.append(f"""LOWER(datatype) IN ({', '.join(["'" + dt.lower() + "'" for dt in dtypes])})""")
     if datums:  # put strings in single quotes
         conditions.append(f"""datum IN ({', '.join(["'"+str(d)+"'" for d in datums])})""")
     if not force:
         conditions.append(f"""(build IS TRUE)""")
+    return conditions
+
+def exclude_running_condition(cls):
+    return f"""({cls.END_TIME} > {cls.START_TIME}  OR -- finished running previously or
+                            {cls.START_TIME} IS NULL) -- never ran"""
+
+def needs_processing(cls, max_retries=3):
+    return f"""({cls.REQUEST_TIME} IS NOT NULL AND 
+                 -- never started, hasn't finished, or has a positive exit code and hasn't retried too many times
+                 (({cls.START_TIME} IS NULL OR {cls.END_TIME} IS NULL OR {cls.REQUEST_TIME} > {cls.START_TIME} OR {cls.START_TIME} > {cls.END_TIME})
+                   OR ({cls.EXIT_CODE} > 0 AND ({cls.TRIES} IS NULL OR {cls.TRIES} < {max_retries})))) -- failed with a positive exit code"""
+
+def get_export_records(config, needs_to_process=False, exclude_running=False, max_retries=3):
+    conn_info = connect_params_from_config(config)
+    conn_info.database = "tile_specifications"
+    connection, cursor = connection_with_retries(conn_info)
+    conditions = basic_conditions(config)
+    if needs_to_process:
+        conditions.append(needs_processing(ExportOperation, max_retries=max_retries))
+    if exclude_running:
+        conditions.append(exclude_running(ExportOperation))
     where_clause = "\nAND ".join(conditions)  # a comment at the end was making this fail, so put a leading newline
     if where_clause:
         where_clause = " WHERE " + where_clause
-    # This is very similar to the combine_spec_view except we are getting the geometry_buffered and its SRID which are not in the view because of QGIS performance
-    cursor.execute(f"""SELECT B.*, R.*, ST_SRID(geometry_buffered), TI.* 
-                       FROM combine_spec_bruty B JOIN combine_spec_resolutions R ON (B.res_id = R.r_id) JOIN combine_spec_tiles TI ON (R.tile_id = TI.t_id)
+    # This is the tiles with their resolutions and the SRID is based on geometry_buffered
+    cursor.execute(f"""SELECT R.*, ST_SRID(geometry_buffered), TI.* 
+                       FROM spec_resolutions R 
+                       JOIN spec_tiles TI ON (R.tile_id = TI.t_id)
                        {where_clause}
                        ORDER BY priority DESC, tile ASC
                        """)
@@ -556,23 +596,49 @@ def get_tiles_records(config, needs_to_combine=False, needs_to_export=False, exc
     connection.close()
     return records
 
-def iterate_tiles_table(config, only_needs_to_combine=False, only_needs_to_export=False,
-                        exclude_combine_running=False, exclude_export_running=False, max_retries=3):
-    records = get_tiles_records(config, needs_to_combine=only_needs_to_combine, exclude_combine_running=exclude_combine_running,
-                                needs_to_export=only_needs_to_export, exclude_export_running=exclude_export_running, max_retries=max_retries)
+def get_combine_records(config, needs_to_process=False, exclude_running=False, max_retries=3):
+    """ Read the NBS postgres tile_specifications database for the bruty_tile table and, if not existing,
+    create Bruty databases for the area of interest for the polygon listed in the postgres table.
+    """
+    dtypes = parse_multiple_values(config.get('dtypes', ""))
+
+    conn_info = connect_params_from_config(config)
+    conn_info.database = "tile_specifications"
+    connection, cursor = connection_with_retries(conn_info)
+    # tile specs are now being held in views, so we have to read the combine_specs table
+    # then read the geometry from the view of the equivalent area/records
+    # grab them all at run time so that if records are changed during the run we at least know all the geometries should have been from the run time
+    conditions = basic_conditions(config)
+    if needs_to_process:
+        conditions.append(needs_processing(CombineOperation, max_retries=max_retries))
+    if exclude_running:
+        conditions.append(exclude_running(CombineOperation))
+    if dtypes:
+        conditions.append(f"""LOWER(datatype) IN ({', '.join(["'" + dt.lower() + "'" for dt in dtypes])})""")
+    where_clause = "\nAND ".join(conditions)  # a comment at the end was making this fail, so put a leading newline
+    if where_clause:
+        where_clause = " WHERE " + where_clause
+    # This is very similar to the combine_spec_view except we are getting the geometry_buffered and its SRID which are not in the view because of QGIS performance
+    cursor.execute(f"""SELECT B.*, R.*, ST_SRID(geometry_buffered), TI.* 
+                       FROM {CombineTileInfo.SOURCE_TABLE} B 
+                       JOIN {ResolutionTileInfo.SOURCE_TABLE} R ON (B.res_id = R.r_id) 
+                       JOIN {TileInfo.SOURCE_TABLE} TI ON (R.tile_id = TI.t_id)
+                       {where_clause}
+                       ORDER BY priority DESC, tile ASC
+                       """)
+    records = cursor.fetchall()
+    connection.close()
+    return records
+
+def iterate_export_table(config, needs_to_process=False, exclude_running=False, max_retries=3):
+    records = get_export_records(config, needs_to_process=needs_to_process, exclude_running=exclude_running, max_retries=max_retries)
     for review_tile in records:
-        info = TileInfo(**review_tile)
-        # determine if this tile should be processed
-        # if not (force or info.build):
-        #     continue
-        # if production_branches and info.pb not in production_branches:
-        #     continue
-        # if datums and info.datum not in datums:
-        #     continue
-        # if tiles and int(info.tile) not in tiles:
-        #     continue
-        # if zones and info.utm not in zones:
-        #     continue
-        # yield db or do a callback function?
+        info = ResolutionTileInfo(**review_tile)
+        yield info
+
+def iterate_combine_table(config, needs_to_process=False, exclude_running=False, max_retries=3):
+    records = get_combine_records(config, needs_to_process=needs_to_process, exclude_running=exclude_running, max_retries=max_retries)
+    for review_tile in records:
+        info = CombineTileInfo(**review_tile)
         yield info
 

@@ -33,7 +33,7 @@ from nbs.scripts.tile_specs import TileInfo
 from nbs.configs import get_logger, run_command_line_configs, parse_multiple_values, show_logger_handlers, get_log_level
 # , iter_configs, set_stream_logging, log_config, parse_multiple_values, make_family_of_logs
 from nbs.bruty.nbs_postgres import ENC, connect_params_from_config
-from nbs.scripts.tile_specs import iterate_tiles_table, create_world_db, TileToProcess, TileProcess, TileManager
+from nbs.scripts.tile_specs import create_world_db, TileToProcess, TileProcess, TileManager
 from nbs.scripts.combine import process_nbs_database, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, perform_qc_checks
 from nbs.debugging import get_call_logger, setup_call_logger, log_calls
 
@@ -421,11 +421,11 @@ def main(config):
     tile_manager = TileManager(config, max_tries, allow_res=debug_config)
     tile_processes = {}
     try:
-        tile_manager.refresh_tiles_list(needs_combining=True)
+        tile_manager.refresh_tiles_list(needs_combining=True, needs_exporting=True)
         while is_service or tile_manager.remaining_tiles or tile_processes:  # run forever if a service, otherwise run until all tiles are combined
             # @TODO we need to change the log file occasionally to prevent it from getting too large
             # @TODO print("Move to unit test")
-            # tile_manager.refresh_tiles_list(needs_combining=False)
+            # tile_manager.refresh_tiles_list(needs_combining=False, needs_exporting=False)
             # for x in range(15):
             #     next_tile = tile_manager.pick_next_tile(tile_processes)
             #     print(next_tile)
@@ -467,7 +467,7 @@ def main(config):
                     tile_processes[tile_info.hash_id()] = returned_process
                 tile_manager.remove(tile_info)
             remove_finished_processes(tile_processes, tile_manager)
-            tile_manager.refresh_tiles_list(needs_combining=True)
+            tile_manager.refresh_tiles_list(needs_combining=True, needs_exporting=True)
 
     except UserCancelled:
         pass
