@@ -234,6 +234,8 @@ def process_nbs_database(world_db, conn_info, tile_info, use_navigation_flag=Tru
         p = pathlib.Path(world_db_path)
         if not p.is_dir():  # the path to the sqlite file?
             p = p.parent
+        # @TODO now that we made tables for each datatype and tiles we could row lock the table rather than the advisory lock
+        #    see https://www.postgresql.org/docs/current/sql-select.html#SQL-FOR-UPDATE-SHARE
         lck = AdvisoryLock(p.name, conn_info, EXCLUSIVE | NON_BLOCKING)
         try:
             lck.acquire()
@@ -617,8 +619,6 @@ def make_parser():
                         default=False, help="DELETE THE EXISTING DATA AND START FROM SCRATCH IF ANY CLEANUP WAS NEEDED")
     parser.add_argument("-e", "--override_epsg", type=int, metavar='override_epsg', default=NO_OVERRIDE,
                         help="override incoming data epsg with this value")
-    parser.add_argument("-l", "--lock_server", type=int, metavar='lock_server', default=None,
-                        help="override incoming data epsg with this value")
     parser.add_argument('-i', '--ignore_for_navigation', action='store_true', dest='ignore_for_nav',
                         default=False, help="ignore the for_navigation flag")
     parser.add_argument('-r', action='store_true', dest='crop',
@@ -649,7 +649,7 @@ if __name__ == "__main__":
         conn_info = connect_params_from_config(config)
 
         conn_info.tablenames = args.tables
-        use_locks(args.lock_server)
+        use_locks(None)  # @TODO change all locks to use postgres
 
         log_level = convert_to_logging_level(args.log_level)
 

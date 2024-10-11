@@ -658,24 +658,30 @@ except ImportError:
             raise ImportError
 else:
     class AdvisoryLock:
-        def __init__(self, identifier, conn_info,
+        def __init__(self, identifiers, conn_info,
                 timeout: float = DEFAULT_TIMEOUT,
                 check_interval: float = DEFAULT_CHECK_INTERVAL,
                 flags: LockFlags = LOCK_METHOD):
             """Lock manager with build-in timeout.  Can be acquired multiple times.
 
-            identifier -- a string or integer.  Strings will be turned to lower case (for cross platform reasons) and hashed into an integer
+            identifier -- a string, bytestring, integer or list/tuple of ints and strings.
+                Strings will be turned to lower case (for cross platform reasons) and hashed into an integer
             timeout -- timeout when trying to acquire a lock
             check_interval -- check interval while waiting
             flags -- a combination of the bitflags EXCLUSIVE, SHARED, NON_BLOCKING (default is EXCLUSIVE | NON_BLOCKING)
             """
-            self.raw_identifier = identifier
-            if isinstance(identifier, int):
-                self.identifier = identifier
-            else:
-                h = hashlib.blake2b(digest_size=8)
-                h.update(str(identifier).lower().encode("utf8"))
-                self.identifier = int.from_bytes(h.digest(), 'big', signed=True)  # need signed for the sql call
+            self.raw_identifier = identifiers
+            if isinstance(identifiers, (str, bytes)) or not hasattr(identifiers, '__iter__'):
+                identifiers = [identifiers]
+            lock_ids = []
+            for identifier in identifiers:
+                if isinstance(identifier, int):
+                    new_id = identifier
+                else:
+                    h = hashlib.blake2b(digest_size=8)
+                    h.update(str(identifier).lower().encode("utf8"))
+                    new_id = int.from_bytes(h.digest(), 'big', signed=True)  # need signed for the sql call
+                lock_ids.append(new_id)
             self.connection = connect_with_retries(database=conn_info.database, user=conn_info.username, password=conn_info.password,
                                                    host=conn_info.hostname, port=conn_info.port)
             self.cursor = self.connection.cursor()
@@ -685,20 +691,19 @@ else:
             self.check_interval: float = check_interval
             self.flags: LockFlags = flags
             if flags == EXCLUSIVE:
-                self.acquire_func = "select pg_advisory_lock"
-                self.release_func = "select pg_advisory_unlock"
+                acquire_func = "pg_advisory_lock"
+                release_func = "pg_advisory_unlock"
             elif flags == EXCLUSIVE | NON_BLOCKING:
-                self.acquire_func = "select pg_try_advisory_lock"
-                self.release_func = "select pg_advisory_unlock"
+                acquire_func = "pg_try_advisory_lock"
+                release_func = "pg_advisory_unlock"
             elif flags == SHARED:
-                self.acquire_func = "select pg_advisory_lock_shared"
-                self.release_func = "select pg_advisory_unlock_shared"
+                acquire_func = "pg_advisory_lock_shared"
+                release_func = "pg_advisory_unlock_shared"
             elif flags == SHARED | NON_BLOCKING:
-                self.acquire_func = "select pg_try_advisory_lock_shared"
-                self.release_func = "select pg_advisory_unlock_shared"
-            ident_str = "(%d)" % self.identifier
-            self.acquire_func += ident_str
-            self.release_func += ident_str
+                acquire_func = "pg_try_advisory_lock_shared"
+                release_func = "pg_advisory_unlock_shared"
+            self.acquire_func = "select " + ", ".join(f"{acquire_func}(%d)" % idn for idn in lock_ids)
+            self.release_func = "select " + ", ".join(f"{release_func}(%d)" % idn for idn in lock_ids)
 
         def acquire(self, timeout: float = None, check_interval: float = None):
             """Acquire the locked filehandle.
@@ -720,6 +725,8 @@ else:
                 # Try to lock
                 self.cursor.execute(self.acquire_func)
                 success = self.cursor.fetchone()[0]
+                if not(self.flags & NON_BLOCKING):
+                    success = True  # blocking doesn't bother returning a True code since it just waits til success
                 if not success:
                     # Wait a bit
                     time.sleep(check_interval)

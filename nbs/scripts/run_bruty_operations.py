@@ -33,7 +33,7 @@ from nbs.scripts.tile_specs import TileInfo
 from nbs.configs import get_logger, run_command_line_configs, parse_multiple_values, show_logger_handlers, get_log_level
 # , iter_configs, set_stream_logging, log_config, parse_multiple_values, make_family_of_logs
 from nbs.bruty.nbs_postgres import ENC, connect_params_from_config
-from nbs.scripts.tile_specs import create_world_db, TileToProcess, TileProcess, TileManager
+from nbs.scripts.tile_specs import create_world_db, TileToProcess, TileProcess, TileManager, ResolutionTileInfo, CombineTileInfo
 from nbs.scripts.combine import process_nbs_database, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, perform_qc_checks
 from nbs.debugging import get_call_logger, setup_call_logger, log_calls
 
@@ -45,6 +45,7 @@ debug_launch = False
 LOGGER = get_logger('nbs.bruty.insert')
 CONFIG_SECTION = 'insert'
 profiling = False
+use_nav_flag = True
 
 # FIXME
 print("\nremove the hack setting the bruty and nbs directories into the python path\n")
@@ -100,7 +101,7 @@ def launch_export(config_path, cache_file, tile_cache, export_time,
 
 
 def launch_combine(world_db, view_pk_id, config_pth, tablenames, use_navigation_flag=True, override_epsg=NO_OVERRIDE, extra_debug=False, new_console=True,
-           lock=None, exclude=None, crop=False, log_path=None, env_path=r'', env_name='', minimized=False,
+           exclude=None, crop=False, log_path=None, env_path=r'', env_name='', minimized=False,
            fingerprint="", delete_existing=False, log_level=logging.INFO):
     """
 
@@ -149,8 +150,6 @@ def launch_combine(world_db, view_pk_id, config_pth, tablenames, use_navigation_
             combine_args.append("--debug")
         if delete_existing:
             combine_args.append("--delete")
-        if lock:
-            combine_args.extend(["-l", lock])
         if log_path:
             combine_args.extend(["-g", log_path])
         if fingerprint:
@@ -230,6 +229,8 @@ def export_tile(tile_info, config, conn_info):
     use_cached_enc_meta = config.getboolean('USE_CACHED_ENC_METADATA', False)
     env_path = config.get('environment_path')
     env_name = config.get('environment_name')
+    log_level = get_log_level(config)
+
     locks = []
     try:
         raise Exception("change this to WHERE combine_spec_bruty.res_id = tile_info.r_id rather than iterating the types+for_nav")
@@ -326,12 +327,17 @@ def export_tile(tile_info, config, conn_info):
     return return_process
 
 
-def combine_tile(tile_info, config, conn_info):
+def combine_tile(tile_info, config, conn_info, debug_config=False, log_path=""):
     if not tile_info.for_nav and tile_info.datatype == ENC:
         LOGGER.debug(f"  Skipping ENC with for_navigation=False since all ENC data must be for navigation")
         return
     env_path = config.get('environment_path')
     env_name = config.get('environment_name')
+    log_level = get_log_level(config)
+    exclude = parse_multiple_values(config.get('exclude_ids', ''))
+    delete_existing = config.getboolean('delete_existing_if_cleanup_needed', False)
+    minimized = config.getboolean('MINIMIZED', False)
+
     # to make a full utm zone database, take the tile_info and set geometry and tile to None.
     # need to make a copy first
     # tile_info.geometry, tile_info.tile = None, None
@@ -347,7 +353,7 @@ def combine_tile(tile_info, config, conn_info):
         return_process = None
     else:
         try:
-            # Lock all the database so we can write safely
+            # Lock all the databases so we can write safely
             # -- this is only effective on one OS
             # so if linux is combining and Windows tries to export they won't see each others locks.
             # We're adding a postgres lock which is cross platform inside the combine.py and tile_export.py
@@ -358,7 +364,6 @@ def combine_tile(tile_info, config, conn_info):
             conn_info.tablenames = [tile_info.metadata_table_name()]
             fingerprint = str(tile_info.hash_id()) + "_" + datetime.now().isoformat()
             if debug_launch:
-                use_locks(port)
                 setup_call_logger(db.db.data_path)
                 # NOTICE -- this function will not write to the combine_spec_view table with the status codes etc.
                 ret = process_nbs_database(db, conn_info, tile_info, use_navigation_flag=use_nav_flag,
@@ -368,7 +373,7 @@ def combine_tile(tile_info, config, conn_info):
                 return_process = None
             else:
                 pid = launch_combine(db, tile_info.combine_id, config._source_filename, conn_info.tablenames, use_navigation_flag=use_nav_flag,
-                                     override_epsg=override, extra_debug=debug_config, lock=port, exclude=exclude, crop=(tile_info.datatype == ENC),
+                                     override_epsg=override, extra_debug=debug_config, exclude=exclude, crop=(tile_info.datatype == ENC),
                                      log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
                                      fingerprint=fingerprint, delete_existing=delete_existing, log_level=log_level)
                 running_process = ConsoleProcessTracker(["python", fingerprint, "combine.py"])
@@ -394,22 +399,18 @@ def main(config):
 
     quitter = False
     debug_config = config.getboolean('DEBUG', False)
-    minimized = config.getboolean('MINIMIZED', False)
-    delete_existing = config.getboolean('delete_existing_if_cleanup_needed', False)
     is_service = config.getboolean('RUN_AS_SERVICE', False)
-    port = config.get('lock_server_port', None)
-    use_locks(port)
+    # port = config.get('lock_server_port', None)
+    use_locks(None)  # @ TODO change this to only be using Postgres locks - either row locks on a table or advisory locks
     ignore_pids = psutil.pids()
     max_processes = config.getint('processes', 5)
     max_tries = config.getint('max_retries', 3)
     conn_info = connect_params_from_config(config)
-    log_level = get_log_level(config)
-    exclude = parse_multiple_values(config.get('exclude_ids', ''))
     root, cfg_name = os.path.split(config._source_filename)
     log_path = os.path.join(root, "logs", cfg_name)
     if debug_config:
         show_logger_handlers(LOGGER)
-    use_nav_flag = True  # config.getboolean('use_for_navigation_flag', True)
+    # use_nav_flag = True  # config.getboolean('use_for_navigation_flag', True)
 
     global debug_launch
     debug_launch = interactive_debug and debug_config and max_processes < 2
@@ -459,10 +460,10 @@ def main(config):
 
                 LOGGER.info(f"starting operation for {tile_info}" +
                             f"\n  {len(tile_manager.remaining_tiles)} remain including the {len(tile_processes)} currently running")
-                if isinstance(tile_info, ExportTile):
+                if isinstance(tile_info, ResolutionTileInfo):
                     returned_process = export_tile(tile_info, config, conn_info)
-                elif isinstance(tile_info, CombineTile):
-                    returned_process = combine_tile(tile_info, config, conn_info)
+                elif isinstance(tile_info, CombineTileInfo):
+                    returned_process = combine_tile(tile_info, config, conn_info, debug_config=debug_config, log_path=log_path)
                 if returned_process is not None:
                     tile_processes[tile_info.hash_id()] = returned_process
                 tile_manager.remove(tile_info)
