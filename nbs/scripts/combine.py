@@ -24,7 +24,7 @@ from nbs.bruty.utils import onerr, user_action, remove_file, QUIT, HELP
 from nbs.configs import get_logger, read_config, log_config, make_family_of_logs, show_logger_handlers, convert_to_logging_level
 from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_metadata, ConnectionInfo, connect_params_from_config
 from nbs.scripts.convert_csar import convert_csar_python
-from nbs.scripts.tile_specs import TileInfo, create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION
+from nbs.scripts.tile_specs import TileInfo, CombineTileInfo, ResolutionTileInfo, create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION
 from nbs_utils.points_utils import to_npz
 from nbs.debugging import log_calls, get_call_logger, get_dbg_log_path, setup_call_logger
 
@@ -234,7 +234,11 @@ def process_nbs_database(world_db, conn_info, tile_info, use_navigation_flag=Tru
         p = pathlib.Path(world_db_path)
         if not p.is_dir():  # the path to the sqlite file?
             p = p.parent
-        # @TODO now that we made tables for each datatype and tiles we could row lock the table rather than the advisory lock
+        # NOTE now that we made tables for each datatype and tiles we could row lock the table rather than the advisory lock
+        # However row locks are automatically released at the end of the transaction so we would need to keep the transaction open
+        # and not commiting will mean the start_time wouldn't update and we wouldn't know if the process was running.
+        # unless we can see locks from QGIS.
+        # NOW trying locking rows by "for update" and "skip locked" in the select statement to make a view of what is running
         #    see https://www.postgresql.org/docs/current/sql-select.html#SQL-FOR-UPDATE-SHARE
         lck = AdvisoryLock(p.name, conn_info, EXCLUSIVE | NON_BLOCKING)
         try:
@@ -252,6 +256,7 @@ def process_nbs_database(world_db, conn_info, tile_info, use_navigation_flag=Tru
                         warnings_log = f"'{h.baseFilename}'"
             # if not extra_debug:
             print('turn this off for debug\n'*80)
+            raise "Need to make a connection with autocommmit=False to use row locks"
             tile_info.update_table_record(conn_info, **{tile_info.combine.START_TIME: "NOW()", tile_info.combine.TRIES: f"COALESCE({tile_info.combine.TRIES}, 0) + 1",
                                   tile_info.combine.DATA_LOCATION: f"'{world_db_path}'", tile_info.combine.INFO_LOG: info_log, tile_info.combine.WARNINGS_LOG: warnings_log})
 
@@ -708,7 +713,7 @@ if __name__ == "__main__":
             LOGGER.error(traceback.format_exc())
             LOGGER.error(msg)
             ret = UNHANDLED_EXCEPTION
-            TileInfo.update_table(conn_info, f"b_id={args.combine_pk_id}", **{tile_info.combine.END_TIME: "NOW()", tile_info.combine.exit_code: ret})  # using the raw
+            TileInfo.update_table(conn_info, f"{CombineTileInfo.COMBINE_ID}={args.combine_pk_id}", **{tile_info.combine.END_TIME: "NOW()", tile_info.combine.exit_code: ret})  # using the raw
         if args.fingerprint:
             try:
                 db = WorldDatabase.open(args.bruty_path)

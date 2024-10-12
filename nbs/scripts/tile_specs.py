@@ -3,6 +3,7 @@ import pathlib
 from dataclasses import dataclass
 import logging
 import re
+import time
 
 import numpy
 import psycopg2
@@ -46,16 +47,13 @@ class BrutyOperation:
             self.read(record)
 
     def read(self, record):
-        self.start_time = record[self.START_TIME]
-        self.end_time = record[self.END_TIME]
-        self.exit_code = record[self.EXIT_CODE]
-        self.warnings_log = record[self.WARNINGS_LOG]
-        self.info_log = record[self.INFO_LOG]
-        self.tries = record[self.TRIES]
-        self.data_location = record[self.DATA_LOCATION]
-
-    def is_running(self):
-        return (self.start_time is not None) and ((self.end_time is None) or (self.start_time > self.end_time))
+        self.start_time = record.get(self.START_TIME, None)
+        self.end_time = record.get(self.END_TIME, None)
+        self.exit_code = record.get(self.EXIT_CODE, None)
+        self.tries = record.get(self.TRIES, None)
+        self.warnings_log = record.get(self.WARNINGS_LOG, None)
+        self.info_log = record.get(self.INFO_LOG, None)
+        self.data_location = record.get(self.DATA_LOCATION, None)
 
 
 class CombineOperation(BrutyOperation):
@@ -100,11 +98,12 @@ class TileInfo:
     LOCALITY = 'locality'
     HEMISPHERE = 'hemisphere'
     PRIORITY = 'priority'
-    COMBINE_PUBLIC = 'combine_public'
-    COMBINE_INTERNAL = 'combine_internal'
-    COMBINE_NAVIGATION = 'combine_navigation'
+    EXPORT_PUBLIC = 'combine_public'
+    EXPORT_INTERNAL = 'combine_internal'
+    EXPORT_NAVIGATION = 'combine_navigation'
     BUILD = 'build'
     TILE_ID = 't_id'
+    IS_LOCKED = 'is_locked'
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
@@ -118,14 +117,17 @@ class TileInfo:
         self.utm = review_tile[self.UTM]
         self.tile = review_tile[self.TILE]
         self.datum = review_tile[self.DATUM]
-        self.build = review_tile[self.BUILD]
         self.locality = review_tile[self.LOCALITY]
-        self.public = review_tile[self.COMBINE_PUBLIC]  # public - included "unqualified"
-        self.internal = review_tile[self.COMBINE_INTERNAL]  # includes sensitive
-        self.navigation = review_tile[self.COMBINE_NAVIGATION]  # only QC'd (qualified) data
+        # if NULL, make it 0 -- using the ternary operator lets us make Null be -1 without changing the value of 0
+        self.priority = review_tile[self.PRIORITY] if review_tile.get(self.PRIORITY, None) is not None else 0
+        self.build = review_tile.get(self.BUILD, None)
+        self.public = review_tile.get(self.EXPORT_PUBLIC, None)  # public - included "unqualified"
+        self.internal = review_tile.get(self.EXPORT_INTERNAL, None)  # includes sensitive
+        self.navigation = review_tile.get(self.EXPORT_NAVIGATION, None)  # only QC'd (qualified) data
+        self.is_locked = review_tile.get(self.IS_LOCKED, None)
 
     def is_running(self):
-        raise NotImplementedError
+        return self.is_locked
 
     def __repr__(self):
         return f"TileInfo:{self.pb}_{self.utm}{self.hemi}_{self.tile}_{self.locality}"
@@ -152,14 +154,10 @@ class ResolutionTileInfo(TileInfo):
         #   and make a different init not based on the combine_spec table layout
         super().__init__(**review_tile)
         self.resolution = review_tile[self.RESOLUTION]
-        self.closing_dist = review_tile[self.CLOSING_DISTANCE]
-        self.res_tile_id = review_tile[self.RESOLUTION_ID]
+        self.closing_dist = review_tile.get(self.CLOSING_DISTANCE, None)
+        self.res_tile_id = review_tile.get(self.RESOLUTION_ID, None)
         self.export = ExportOperation(review_tile)
-        self.priority = review_tile[self.PRIORITY] if review_tile[self.PRIORITY] else 0  # if None, make it 0
-        try:
-            self.epsg = review_tile['st_srid']
-        except KeyError:
-            self.epsg = None
+        self.epsg = review_tile.get('st_srid', None)
         try:
             self.geometry = review_tile['geometry'] if 'geometry_buffered' not in review_tile else review_tile['geometry_buffered']
         except KeyError:
@@ -170,9 +168,6 @@ class ResolutionTileInfo(TileInfo):
 
     def hash_id(self):
         return super().hash_id(), self.resolution  # hash_id(self.resolution)
-
-    def is_running(self):
-        return self.export.is_running()
 
     @property
     def geometry(self):
@@ -245,7 +240,7 @@ class ResolutionTileInfo(TileInfo):
             conn, cursor = connection_with_retries(conn_info)
         else:
             cursor = connection_info
-        # trying to just save the b_id from the combine_spec_view and use that to update the combine_spec_bruty table
+        # trying to just save the c_id from the combine_spec_view and use that to update the combine_spec_bruty table
         # cursor.execute(
         #     f"""update {tablename} set ({self.OUT_OF_DATE},{self.SUMMARY})=(%s, %s)
         #     where ({self.PB},{self.UTM},{self.HEMISPHERE},{self.TILE},{self.DATUM},{self.LOCALITY},{self.RESOLUTION}, {self.DATATYPE},{self.NOT_FOR_NAV})=(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
@@ -263,7 +258,7 @@ class CombineTileInfo(ResolutionTileInfo):
     VIEW_TABLE = "view_individual_combines"
 
     DATA_LOCATION = 'data_location'
-    COMBINE_ID = 'b_id'
+    COMBINE_ID = 'c_id'
     FOR_NAV = 'for_navigation'
     DATATYPE = 'datatype'
     RESOLUTION_ID = 'res_id'
@@ -279,17 +274,14 @@ class CombineTileInfo(ResolutionTileInfo):
         self.for_nav = review_tile[self.FOR_NAV]
         self.combine_id = review_tile[self.COMBINE_ID]
         self.combine = CombineOperation(review_tile)
-        self.out_of_date = review_tile[self.OUT_OF_DATE]
-        self.summary = review_tile[self.SUMMARY]
+        self.out_of_date = review_tile.get(self.OUT_OF_DATE, None)
+        self.summary = review_tile.get(self.SUMMARY, None)
 
     def __repr__(self):
         return super().__repr__()+f"_{self.datatype}_{'nav' if self.for_nav else 'NOT_NAV'}"
 
     def hash_id(self):
         return super().hash_id(), hash_id(self.datatype, self.for_nav)
-
-    def is_running(self):
-        return self.combine.is_running() or self.export.is_running()
 
     @classmethod
     def from_combine_spec_view(cls, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), pk_id, database=None, table=None):
@@ -302,7 +294,7 @@ class CombineTileInfo(ResolutionTileInfo):
             conn, cursor = connection_with_retries(conn_info)
         else:
             cursor = connection_info
-        cursor.execute(f"""SELECT * from {table} WHERE b_id={pk_id}""",)
+        cursor.execute(f"""SELECT * from {table} WHERE {cls.COMBINE_ID}={pk_id}""",)
         record = cursor.fetchone()
         return cls(**record)
 
@@ -352,7 +344,7 @@ class CombineTileInfo(ResolutionTileInfo):
             conn, cursor = connection_with_retries(conn_info)
         else:
             cursor = connection_info
-        # trying to just save the b_id from the combine_spec_view and use that to update the combine_spec_bruty table
+        # trying to just save the c_id from the combine_spec_view and use that to update the combine_spec_bruty table
         # cursor.execute(
         #     f"""update {tablename} set ({self.OUT_OF_DATE},{self.SUMMARY})=(%s, %s)
         #     where ({self.PB},{self.UTM},{self.HEMISPHERE},{self.TILE},{self.DATUM},{self.LOCALITY},{self.RESOLUTION}, {self.DATATYPE},{self.NOT_FOR_NAV})=(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
@@ -446,11 +438,7 @@ class TileManager:
                 res = tile_info.resolution
                 if self.user_res and res not in self.user_res:
                     continue
-                for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
-                    if self.user_dtypes and dtype not in self.user_dtypes:
-                        continue
-                    for nav_flag_value in (True, False):
-                        self.remaining_tiles[tile_info.hash_id()] = tile_info
+                self.remaining_tiles[tile_info.hash_id()] = tile_info
         if self.process_exports:
             for tile_info in iterate_export_table(self.config, needs_to_process=needs_exporting, max_retries=self.max_tries):
                 res = tile_info.resolution
@@ -563,30 +551,74 @@ def basic_conditions(config):
         conditions.append(f"""(build IS TRUE)""")
     return conditions
 
-def exclude_running_condition(cls):
-    return f"""({cls.END_TIME} > {cls.START_TIME}  OR -- finished running previously or
-                            {cls.START_TIME} IS NULL) -- never ran"""
+# def exclude_running_condition(cls):
+#     # SELECT (c_id NOT IN (SELECT c_id FROM spec_combines FOR UPDATE SKIP LOCKED)) as running FROM spec_combines
+#     return f"""({cls.END_TIME} > {cls.START_TIME}  OR -- finished running previously or
+#                             {cls.START_TIME} IS NULL) -- never ran"""
 
-def needs_processing(cls, max_retries=3):
+def needs_processing_condition(cls, max_retries=3):
     return f"""({cls.REQUEST_TIME} IS NOT NULL AND 
                  -- never started, hasn't finished, or has a positive exit code and hasn't retried too many times
                  (({cls.START_TIME} IS NULL OR {cls.END_TIME} IS NULL OR {cls.REQUEST_TIME} > {cls.START_TIME} OR {cls.START_TIME} > {cls.END_TIME})
                    OR ({cls.EXIT_CODE} > 0 AND ({cls.TRIES} IS NULL OR {cls.TRIES} < {max_retries})))) -- failed with a positive exit code"""
+    # Seems that the time check is slow in SQL but fast in python, so grab the columns and do the check in python
 
-def get_export_records(config, needs_to_process=False, exclude_running=False, max_retries=3):
+def needs_processing(record, operation_type, max_retries=3):
+    t = record[operation_type.REQUEST_TIME]
+    process = False
+    if t is not None:
+        s = record[operation_type.START_TIME]
+        e = record[operation_type.END_TIME]
+        if s is None or e is None:
+            process = True
+        elif t>s or s>e:
+            process = True
+        elif record[operation_type.EXIT_CODE] > 0 and record[operation_type.TRIES] < max_retries:
+            process = True
+    return process
+
+def lock_column_query(table_name, alias, do_lookup=True, col_name=TileInfo.IS_LOCKED):
+    if do_lookup:
+        # the R comes from the table alias in the execute statement below
+
+        lock_column = f"""(SELECT ({alias}.ctid NOT IN (SELECT ctid FROM {table_name} FOR UPDATE SKIP LOCKED))) as {col_name}"""
+    else:
+        lock_column = f"False as {col_name}"
+    return lock_column
+
+def get_export_records(config, needs_to_process=False, get_lock_status=True, max_retries=3):
+    """
+    Parameters
+    ----------
+    config
+    needs_to_process
+        This is very slow in SQL, so it's better to do this in python
+    get_lock_status
+    max_retries
+
+    Returns
+    -------
+
+    """
     conn_info = connect_params_from_config(config)
-    conn_info.database = "tile_specifications"
+    conn_info.database = TileInfo.SOURCE_DATABASE
     connection, cursor = connection_with_retries(conn_info)
     conditions = basic_conditions(config)
     if needs_to_process:
-        conditions.append(needs_processing(ExportOperation, max_retries=max_retries))
-    if exclude_running:
-        conditions.append(exclude_running(ExportOperation))
+        conditions.append(needs_processing_condition(ExportOperation, max_retries=max_retries))
     where_clause = "\nAND ".join(conditions)  # a comment at the end was making this fail, so put a leading newline
     if where_clause:
         where_clause = " WHERE " + where_clause
+    lock_query = lock_column_query(ResolutionTileInfo.SOURCE_TABLE, "R", get_lock_status)
     # This is the tiles with their resolutions and the SRID is based on geometry_buffered
-    cursor.execute(f"""SELECT R.*, ST_SRID(geometry_buffered), TI.* 
+    # SELECT R.*, ST_SRID(geometry_buffered), TI.*, {lock_query}
+    # Querying the geometry is very slow - do a query when we need that specific record
+    # and doing the time check in python is faster than doing it in SQL
+    cursor.execute(f"""SELECT {TileInfo.TILE}, {TileInfo.UTM}, {TileInfo.PB},{TileInfo.DATUM}, {TileInfo.LOCALITY}, {TileInfo.HEMISPHERE},
+                            {TileInfo.EXPORT_PUBLIC}, {TileInfo.EXPORT_INTERNAL}, {TileInfo.EXPORT_NAVIGATION}, {TileInfo.PRIORITY}, {TileInfo.BUILD},
+                            {ExportOperation.START_TIME}, {ExportOperation.END_TIME}, {ExportOperation.EXIT_CODE}, {ExportOperation.TRIES}, {ExportOperation.REQUEST_TIME},
+                            {ResolutionTileInfo.RESOLUTION}, {ResolutionTileInfo.CLOSING_DISTANCE}, 
+                            {lock_query} 
                        FROM spec_resolutions R 
                        JOIN spec_tiles TI ON (R.tile_id = TI.t_id)
                        {where_clause}
@@ -596,30 +628,50 @@ def get_export_records(config, needs_to_process=False, exclude_running=False, ma
     connection.close()
     return records
 
-def get_combine_records(config, needs_to_process=False, exclude_running=False, max_retries=3):
+def get_combine_records(config, needs_to_process=False, get_lock_status=True, max_retries=3):
     """ Read the NBS postgres tile_specifications database for the bruty_tile table and, if not existing,
     create Bruty databases for the area of interest for the polygon listed in the postgres table.
+
+    Parameters
+    ----------
+    config
+    needs_to_process
+        This is very slow in SQL, so it's better to do this in python
+    get_lock_status
+    max_retries
+
+    Returns
+    -------
+
     """
     dtypes = parse_multiple_values(config.get('dtypes', ""))
 
     conn_info = connect_params_from_config(config)
-    conn_info.database = "tile_specifications"
+    conn_info.database = TileInfo.SOURCE_DATABASE
     connection, cursor = connection_with_retries(conn_info)
     # tile specs are now being held in views, so we have to read the combine_specs table
     # then read the geometry from the view of the equivalent area/records
     # grab them all at run time so that if records are changed during the run we at least know all the geometries should have been from the run time
     conditions = basic_conditions(config)
     if needs_to_process:
-        conditions.append(needs_processing(CombineOperation, max_retries=max_retries))
-    if exclude_running:
-        conditions.append(exclude_running(CombineOperation))
+        conditions.append(needs_processing_condition(CombineOperation, max_retries=max_retries))
     if dtypes:
         conditions.append(f"""LOWER(datatype) IN ({', '.join(["'" + dt.lower() + "'" for dt in dtypes])})""")
     where_clause = "\nAND ".join(conditions)  # a comment at the end was making this fail, so put a leading newline
     if where_clause:
         where_clause = " WHERE " + where_clause
+    lock_query = lock_column_query(CombineTileInfo.SOURCE_TABLE, "B", get_lock_status)
     # This is very similar to the combine_spec_view except we are getting the geometry_buffered and its SRID which are not in the view because of QGIS performance
-    cursor.execute(f"""SELECT B.*, R.*, ST_SRID(geometry_buffered), TI.* 
+    # Actually it seems that when querying the whole table it's significantly faster to get less columns, so just get the critical ones then query the rest when needed.
+    # The killer is the geometry, a query without geometry is taking 0.5 seconds, with geometry it's taking 25 seconds
+    # Using the time comparison as SQL would take a 0.6 second query to 13 seconds
+    # SELECT B.*, R.*, ST_SRID(geometry_buffered), TI.*, {lock_query}
+    cursor.execute(f"""SELECT {TileInfo.TILE}, {TileInfo.UTM}, {TileInfo.PB},{TileInfo.DATUM}, {TileInfo.LOCALITY}, {TileInfo.HEMISPHERE}, 
+                            {TileInfo.PRIORITY}, {TileInfo.BUILD},
+                            {CombineOperation.START_TIME}, {CombineOperation.END_TIME}, {CombineOperation.EXIT_CODE}, {CombineOperation.TRIES}, {CombineOperation.REQUEST_TIME},
+                            {ResolutionTileInfo.RESOLUTION}, 
+                            {CombineTileInfo.DATATYPE}, {CombineTileInfo.FOR_NAV}, {CombineTileInfo.COMBINE_ID},  
+                            {lock_query} 
                        FROM {CombineTileInfo.SOURCE_TABLE} B 
                        JOIN {ResolutionTileInfo.SOURCE_TABLE} R ON (B.res_id = R.r_id) 
                        JOIN {TileInfo.SOURCE_TABLE} TI ON (R.tile_id = TI.t_id)
@@ -630,15 +682,19 @@ def get_combine_records(config, needs_to_process=False, exclude_running=False, m
     connection.close()
     return records
 
-def iterate_export_table(config, needs_to_process=False, exclude_running=False, max_retries=3):
-    records = get_export_records(config, needs_to_process=needs_to_process, exclude_running=exclude_running, max_retries=max_retries)
+def iterate_export_table(config, needs_to_process=False, get_lock_status=True, max_retries=3):
+    records = get_export_records(config, get_lock_status=get_lock_status, max_retries=max_retries)
     for review_tile in records:
+        if needs_to_process and not needs_processing(review_tile, ExportOperation, max_retries=max_retries):
+            continue
         info = ResolutionTileInfo(**review_tile)
         yield info
 
-def iterate_combine_table(config, needs_to_process=False, exclude_running=False, max_retries=3):
-    records = get_combine_records(config, needs_to_process=needs_to_process, exclude_running=exclude_running, max_retries=max_retries)
+def iterate_combine_table(config, needs_to_process=False, get_lock_status=True, max_retries=3):
+    records = get_combine_records(config, get_lock_status=get_lock_status, max_retries=max_retries)
     for review_tile in records:
+        if needs_to_process and not needs_processing(review_tile, CombineOperation, max_retries=max_retries):
+            continue
         info = CombineTileInfo(**review_tile)
         yield info
 

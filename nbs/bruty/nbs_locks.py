@@ -724,8 +724,9 @@ else:
             while timeout_end > current_time() and not success:
                 # Try to lock
                 self.cursor.execute(self.acquire_func)
-                success = self.cursor.fetchone()[0]
-                if not(self.flags & NON_BLOCKING):
+                if self.flags & NON_BLOCKING:
+                    success = all(self.cursor.fetchone())
+                else:
                     success = True  # blocking doesn't bother returning a True code since it just waits til success
                 if not success:
                     # Wait a bit

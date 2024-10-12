@@ -92,9 +92,12 @@ def hash_id(*args):
 
 
 # @TODO ?? switch to cursor_factory=NamedTupleCursor by default so usage is rec.name instead of rec['name']
-def connection_with_retries(conn_info:ConnectionInfo, cursor_factory=psycopg2.extras.DictCursor):
+def connection_with_retries(conn_info:ConnectionInfo, cursor_factory=psycopg2.extras.DictCursor, autocommit=True):
+    """ Connect to the database with a retry mechanism
+    autocommit should be set to False if you want to use row locks or other transactional features.
+    """
     connection = connect_with_retries(database=conn_info.database, user=conn_info.username, password=conn_info.password,
-                                      host=conn_info.hostname, port=conn_info.port)
+                                      host=conn_info.hostname, port=conn_info.port, autocommit=autocommit)
     cursor = connection.cursor(cursor_factory=cursor_factory)
     return connection, cursor
 
