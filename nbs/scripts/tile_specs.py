@@ -17,7 +17,7 @@ from nbs.bruty.history import DiskHistory, RasterHistory, AccumulationHistory
 from nbs.configs import get_logger, run_configs, parse_ints_with_ranges, parse_multiple_values, iter_configs, set_stream_logging, log_config, make_family_of_logs
 from nbs.bruty.nbs_postgres import NOT_NAV, get_nbs_records, get_sorting_info, get_transform_metadata, \
     connect_params_from_config, hash_id,REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT
-from nbs.bruty.world_raster_database import WorldDatabase, use_locks, UTMTileBackendExactRes, NO_OVERRIDE
+from nbs.bruty.world_raster_database import WorldDatabase, use_locks, UTMTileBackendExactRes, NO_OVERRIDE, BaseLockException
 from nbs.bruty.utils import ConsoleProcessTracker
 
 NO_DATA = -1
@@ -104,14 +104,20 @@ class TileInfo:
     BUILD = 'build'
     TILE_ID = 't_id'
     IS_LOCKED = 'is_locked'
+    PRIMARY_KEY = TILE_ID
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
         #   and make a different init not based on the combine_spec table layout
+        self.read_record(**review_tile)
+
+    def read_record(self, **review_tile):
         self.minx = None
         self.miny = None
         self.maxx = None
         self.maxy = None
+        self.conn = None
+        self.cursor = None
         self.hemi = review_tile[self.HEMISPHERE].lower()
         self.pb = review_tile[self.PB]
         self.utm = review_tile[self.UTM]
@@ -125,6 +131,7 @@ class TileInfo:
         self.internal = review_tile.get(self.EXPORT_INTERNAL, None)  # includes sensitive
         self.navigation = review_tile.get(self.EXPORT_NAVIGATION, None)  # only QC'd (qualified) data
         self.is_locked = review_tile.get(self.IS_LOCKED, None)
+        self.pk = review_tile[self.PRIMARY_KEY]
 
     def is_running(self):
         return self.is_locked
@@ -139,6 +146,26 @@ class TileInfo:
     def base_name(self):
         return "_".join([self.pb, self.locality, f"utm{self.utm}{self.hemi}", self.datum])
 
+    def acquire_lock(self, conn_info):
+        conn_copy = ConnectionInfo(CombineTileInfo.SOURCE_DATABASE, conn_info.username, conn_info.password, conn_info.hostname, conn_info.port,
+                                    [CombineTileInfo.SOURCE_TABLE])
+        self.conn, self.cursor = connection_with_retries(conn_copy, autocommit=False)
+        self.cursor.execute(f"""SELECT * FROM {self.SOURCE_TABLE} WHERE {self.PRIMARY_KEY}=%s FOR UPDATE SKIP LOCKED""", (self.pk,))
+        record = self.cursor.fetchone()
+        if record is None:
+            self.release_lock()
+            full_info = None
+            raise BaseLockException(f"Failed to acquire lock for {self} where PK={self.pk}")
+        else:
+            # udpate to the full record in case it was a partial record
+            self.read_record(**record)
+        return self.conn, self.cursor
+
+    def release_lock(self):
+        self.conn.commit()
+        self.conn.close()
+        self.conn = None
+        self.cursor = None
 
 
 class ResolutionTileInfo(TileInfo):
@@ -148,11 +175,15 @@ class ResolutionTileInfo(TileInfo):
     CLOSING_DISTANCE = 'closing_distance'
     RESOLUTION_ID = 'r_id'
     TILE_ID = 'tile_id'
+    PRIMARY_KEY = RESOLUTION_ID
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
         #   and make a different init not based on the combine_spec table layout
-        super().__init__(**review_tile)
+        self.read_record(**review_tile)
+
+    def read_record(self, **review_tile):
+        super().read_record(**review_tile)
         self.resolution = review_tile[self.RESOLUTION]
         self.closing_dist = review_tile.get(self.CLOSING_DISTANCE, None)
         self.res_tile_id = review_tile.get(self.RESOLUTION_ID, None)
@@ -264,11 +295,15 @@ class CombineTileInfo(ResolutionTileInfo):
     RESOLUTION_ID = 'res_id'
     OUT_OF_DATE = "out_of_date"
     SUMMARY = "change_summary"
+    PRIMARY_KEY = COMBINE_ID
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
         #   and make a different init not based on the combine_spec table layout
-        super().__init__(**review_tile)
+        self.read_record(**review_tile)
+
+    def read_record(self, **review_tile):
+        super().read_record(**review_tile)
 
         self.datatype = review_tile[self.DATATYPE]
         self.for_nav = review_tile[self.FOR_NAV]
@@ -298,20 +333,15 @@ class CombineTileInfo(ResolutionTileInfo):
         record = cursor.fetchone()
         return cls(**record)
 
-    @classmethod
-    def update_table(cls, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), where, database=None, table=None, **kwargs):
+    def update_table(self, where, **kwargs):
         """ Update a table based on a a dictionary (from kwargs) of values
+        Note, acquire_lock must have been called in order to open a connection, get a cursor and lock the record.
+        The function will raise a BaseLockException if the lock has not been acquired.
 
         Parameters
         ----------
-        cursor
-            open psycopg2 cursor
         where
             dictionary of column name(s) and value(s) to match
-        database
-            name of the database to update, default is the tile_specifications
-        table_name
-            name of the table to update, default is the combine_spec_view
         kwargs
             dictionary of column name and value to update.  Make sure to wrap strings in single quotes.
         Returns
@@ -319,42 +349,22 @@ class CombineTileInfo(ResolutionTileInfo):
         None
         """
 
-        if database is None:
-            database = cls.SOURCE_DATABASE
-        if table is None:
-            table = cls.SOURCE_TABLE
-        if isinstance(connection_info, ConnectionInfo):
-            conn_info = ConnectionInfo(database, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [table])
-            conn, cursor = connection_with_retries(conn_info)
-        else:
-            cursor = connection_info
-        pg_update(cursor, table, where, **kwargs)
+        # if database is None:
+        #     database = cls.SOURCE_DATABASE
+        # if table is None:
+        #     table = cls.SOURCE_TABLE
+        # if isinstance(connection_info, ConnectionInfo):
+        #     conn_info = ConnectionInfo(database, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [table])
+        #     conn, cursor = connection_with_retries(conn_info)
+        # else:
+        #     cursor = connection_info
+        if not self.cursor:
+            raise BaseLockException("No cursor to update the table")
+        pg_update(self.cursor, self.SOURCE_TABLE, where, **kwargs)
 
     def update_table_record(self, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), database=None, table=None, **kwargs):
         where = {self.COMBINE_ID: self.combine_id}
-        self.update_table(connection_info, where, database, table, **kwargs)
-
-    def update_combine_status(self, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), database=None, table=None):
-        if database is None:
-            database = self.SOURCE_DATABASE
-        if table is None:
-            table = self.SOURCE_TABLE
-        if isinstance(connection_info, ConnectionInfo):
-            conn_info = ConnectionInfo(database, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [table])
-            conn, cursor = connection_with_retries(conn_info)
-        else:
-            cursor = connection_info
-        # trying to just save the c_id from the combine_spec_view and use that to update the combine_spec_bruty table
-        # cursor.execute(
-        #     f"""update {tablename} set ({self.OUT_OF_DATE},{self.SUMMARY})=(%s, %s)
-        #     where ({self.PB},{self.UTM},{self.HEMISPHERE},{self.TILE},{self.DATUM},{self.LOCALITY},{self.RESOLUTION}, {self.DATATYPE},{self.NOT_FOR_NAV})=(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-        #     (self.out_of_date, self.summary, self.pb, self.utm, self.hemi.upper(), self.tile, self.datum, self.locality, self.resolution, self.datatype, self.not_for_nav))
-        cursor.execute(
-            f"""update {table} set ({self.combine.START_TIME},{self.combine.END_TIME},{self.combine.EXIT_CODE},{self.combine.WARNINGS_LOG},
-            {self.combine.INFO_LOG},{self.combine.TRIES})=(%s, %s, %s, %s, %s, %s) 
-            where ({self.COMBINE_ID})=(%s)""",
-            (self.combine.start_time, self.combine.end_time, self.combine.exit_code, self.combine.warnings_log, self.combine.info_log, self.combine.tries,
-             self.combine_id))
+        self.update_table(where, database, table, **kwargs)
 
     def metadata_table_name(self, dtype: str=None):
         if dtype is None:

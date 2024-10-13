@@ -203,7 +203,9 @@ def pg_update(cursor, table_name, where, **kwargs):
     """
     set_str = ', '.join([f"{k} = {v}" for k,v in kwargs.items()])
     where_str = ' AND '.join([f"{k} = {v}" for k,v in where.items()])
-    update_query = f"""UPDATE {table_name} SET {set_str} WHERE {where_str}"""
+    if where_str:
+        where_str = f"WHERE {where_str}"
+    update_query = f"""UPDATE {table_name} SET {set_str} {where_str}"""
     cursor.execute(update_query)
 
 def create_identity_column(table_name, start_val, conn_info: ConnectionInfo, col_name=NBS_ID_STR, force_restart=False, drop_add=False):

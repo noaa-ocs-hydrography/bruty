@@ -240,9 +240,10 @@ def process_nbs_database(world_db, conn_info, tile_info, use_navigation_flag=Tru
         # unless we can see locks from QGIS.
         # NOW trying locking rows by "for update" and "skip locked" in the select statement to make a view of what is running
         #    see https://www.postgresql.org/docs/current/sql-select.html#SQL-FOR-UPDATE-SHARE
-        lck = AdvisoryLock(p.name, conn_info, EXCLUSIVE | NON_BLOCKING)
+        # lck = AdvisoryLock(p.name, conn_info, EXCLUSIVE | NON_BLOCKING)
         try:
-            lck.acquire()
+            # lck.acquire()
+            conn, cursor = tile_info.acquire_lock()
         except BaseLockException:
             ret = TILE_LOCKED
         else:
@@ -257,7 +258,7 @@ def process_nbs_database(world_db, conn_info, tile_info, use_navigation_flag=Tru
             # if not extra_debug:
             print('turn this off for debug\n'*80)
             raise "Need to make a connection with autocommmit=False to use row locks"
-            tile_info.update_table_record(conn_info, **{tile_info.combine.START_TIME: "NOW()", tile_info.combine.TRIES: f"COALESCE({tile_info.combine.TRIES}, 0) + 1",
+            tile_info.update_table_record(**{tile_info.combine.START_TIME: "NOW()", tile_info.combine.TRIES: f"COALESCE({tile_info.combine.TRIES}, 0) + 1",
                                   tile_info.combine.DATA_LOCATION: f"'{world_db_path}'", tile_info.combine.INFO_LOG: info_log, tile_info.combine.WARNINGS_LOG: warnings_log})
 
     if ret == SUCCEEDED:
@@ -271,7 +272,7 @@ def process_nbs_database(world_db, conn_info, tile_info, use_navigation_flag=Tru
         ret = process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug, override_epsg, crop=crop, log_level=log_level)
         # if not extra_debug:
         print('turn this off for debug\n'*80)
-        tile_info.update_table_record(conn_info, **{tile_info.combine.END_TIME: "NOW()", tile_info.combine.EXIT_CODE: ret})
+        tile_info.update_table_record(**{tile_info.combine.END_TIME: "NOW()", tile_info.combine.EXIT_CODE: ret})
     return ret
 
 
