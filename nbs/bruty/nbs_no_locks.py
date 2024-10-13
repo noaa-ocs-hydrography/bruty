@@ -30,6 +30,8 @@ class FileLock:
         pass
 
 
+# @TODO make the arealock work with postgres advisory locks -- selecting one lock per (databasename, subtile X, subtile Y)
+#    Remember that we can select multiple locks at once with the postgres advisory lock -- see AdvisoryLock below
 class AreaLock:
     def __init__(self, *args, **kywds):
         pass

@@ -11,6 +11,7 @@ import subprocess
 import pathlib
 import shutil
 import logging
+import sqlite3
 import io
 
 import numpy
@@ -24,7 +25,8 @@ from nbs.bruty.utils import onerr, user_action, remove_file, QUIT, HELP
 from nbs.configs import get_logger, read_config, log_config, make_family_of_logs, show_logger_handlers, convert_to_logging_level
 from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_metadata, ConnectionInfo, connect_params_from_config
 from nbs.scripts.convert_csar import convert_csar_python
-from nbs.scripts.tile_specs import TileInfo, CombineTileInfo, ResolutionTileInfo, create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION
+from nbs.scripts.tile_specs import TileInfo, CombineTileInfo, ResolutionTileInfo, create_world_db, \
+    SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION, SQLITE_READ_FAILURE
 from nbs_utils.points_utils import to_npz
 from nbs.debugging import log_calls, get_call_logger, get_dbg_log_path, setup_call_logger
 
@@ -206,7 +208,7 @@ def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=
 
 
 @log_calls
-def process_nbs_database(world_db, conn_info, tile_info, use_navigation_flag=True, extra_debug=False, override_epsg=NO_OVERRIDE,
+def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=True, extra_debug=False, override_epsg=False,
                          exclude=None, crop=False, delete_existing=False, log_level=logging.INFO):
     """ Reads the NBS postgres metadata table to find all surveys in a region and insert them into a Bruty combined database.
 
@@ -228,12 +230,15 @@ def process_nbs_database(world_db, conn_info, tile_info, use_navigation_flag=Tru
     -------
 
     """
-    world_db_path = world_db if isinstance(world_db, (str, pathlib.Path)) else world_db.db.data_path
     ret = SUCCEEDED
-    if world_raster_database.NO_LOCK:  # NO_LOCK means that we are not allowing multiple processes to work on one Tile/database at the same time - so use an advisory lock on the whole thine
-        p = pathlib.Path(world_db_path)
-        if not p.is_dir():  # the path to the sqlite file?
-            p = p.parent
+    # NO_LOCK means that we are not allowing multiple processes to work on one Tile/database at the same time - so use a row lock on the whole thine
+    # If we allow multiple processes to work on the same bruty database then we will use advisory locks for each bruty database subtile that a survey overlaps
+    # @TODO we should change the NO_LOCK name to NO_LOCK=TRUE is REVIEW_TILE_LOCKS and  NO_LOCK=FALSE is AREA_LOCK to be clearer on what they do.
+    #   Both styles need locking.
+    p = pathlib.Path(root_path)
+    if not p.is_dir():  # the path to the sqlite file?
+        p = p.parent
+    if world_raster_database.NO_LOCK:
         # NOTE now that we made tables for each datatype and tiles we could row lock the table rather than the advisory lock
         # However row locks are automatically released at the end of the transaction so we would need to keep the transaction open
         # and not commiting will mean the start_time wouldn't update and we wouldn't know if the process was running.
@@ -243,23 +248,31 @@ def process_nbs_database(world_db, conn_info, tile_info, use_navigation_flag=Tru
         # lck = AdvisoryLock(p.name, conn_info, EXCLUSIVE | NON_BLOCKING)
         try:
             # lck.acquire()
-            conn, cursor = tile_info.acquire_lock()
+            conn, cursor = tile_info.acquire_lock(conn_info)
         except BaseLockException:
             ret = TILE_LOCKED
-        else:
-            warnings_log = "''"  # single quotes for postgres
-            info_log = "''"
-            for h in logging.getLogger("nbs").handlers:
-                if isinstance(h, logging.FileHandler):
-                    if f"{os.getpid()}.log" in h.baseFilename:
-                        info_log = f"'{h.baseFilename}'"  # single quotes for postgres
-                    elif f"{os.getpid()}.warn" in h.baseFilename:
-                        warnings_log = f"'{h.baseFilename}'"
-            # if not extra_debug:
-            print('turn this off for debug\n'*80)
-            raise "Need to make a connection with autocommmit=False to use row locks"
-            tile_info.update_table_record(**{tile_info.combine.START_TIME: "NOW()", tile_info.combine.TRIES: f"COALESCE({tile_info.combine.TRIES}, 0) + 1",
-                                  tile_info.combine.DATA_LOCATION: f"'{world_db_path}'", tile_info.combine.INFO_LOG: info_log, tile_info.combine.WARNINGS_LOG: warnings_log})
+    if ret == SUCCEEDED:
+        try:
+            db = create_world_db(p, tile_info, log_level=log_level)
+            override = db.db.epsg if override_epsg else NO_OVERRIDE
+            world_db_path = db.db.data_path
+        except (sqlite3.OperationalError, OSError) as e:
+            # this happened as a network issue - we will skip it for now and come back and give the network some time to recover
+            # but we will count it as a retry in case there is a corrupted file or something
+            msg = traceback.format_exc()
+            LOGGER.warning(f"Exception accessing bruty db for {tile_info}:\n{msg}")
+            ret = SQLITE_READ_FAILURE
+    if ret == SUCCEEDED and world_raster_database.NO_LOCK:
+        warnings_log = "''"  # single quotes for postgres
+        info_log = "''"
+        for h in logging.getLogger("nbs").handlers:
+            if isinstance(h, logging.FileHandler):
+                if f"{os.getpid()}.log" in h.baseFilename:
+                    info_log = f"'{h.baseFilename}'"  # single quotes for postgres
+                elif f"{os.getpid()}.warn" in h.baseFilename:
+                    warnings_log = f"'{h.baseFilename}'"
+        tile_info.update_table_record(**{tile_info.combine.START_TIME: "NOW()", tile_info.combine.TRIES: f"COALESCE({tile_info.combine.TRIES}, 0) + 1",
+                              tile_info.combine.DATA_LOCATION: f"'{world_db_path}'", tile_info.combine.INFO_LOG: info_log, tile_info.combine.WARNINGS_LOG: warnings_log})
 
     if ret == SUCCEEDED:
         sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, (use_navigation_flag, tile_info.for_nav), exclude=exclude)
@@ -269,7 +282,7 @@ def process_nbs_database(world_db, conn_info, tile_info, use_navigation_flag=Tru
             LOGGER.info(f"  for_navigation_flag used:{use_navigation_flag}")
             if use_navigation_flag:
                 LOGGER.info(f"  and for_navigation value must equal: {tile_info.for_nav}")
-        ret = process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug, override_epsg, crop=crop, log_level=log_level)
+        ret = process_nbs_records(world_db_path, names_list, sort_dict, comp, transform_metadata, extra_debug, override, crop=crop, log_level=log_level)
         # if not extra_debug:
         print('turn this off for debug\n'*80)
         tile_info.update_table_record(**{tile_info.combine.END_TIME: "NOW()", tile_info.combine.EXIT_CODE: ret})
@@ -623,8 +636,8 @@ def make_parser():
                         default=False, help="turn on debugging code")
     parser.add_argument('--delete', action='store_true', dest='delete_existing',
                         default=False, help="DELETE THE EXISTING DATA AND START FROM SCRATCH IF ANY CLEANUP WAS NEEDED")
-    parser.add_argument("-e", "--override_epsg", type=int, metavar='override_epsg', default=NO_OVERRIDE,
-                        help="override incoming data epsg with this value")
+    parser.add_argument("-e", "--override_epsg", action='store_true', dest='override_epsg', default=False,
+                        help="override incoming data epsg with the epsg of the geometry_buffer")
     parser.add_argument('-i', '--ignore_for_navigation', action='store_true', dest='ignore_for_nav',
                         default=False, help="ignore the for_navigation flag")
     parser.add_argument('-r', action='store_true', dest='crop',

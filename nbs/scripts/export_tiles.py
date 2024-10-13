@@ -50,48 +50,41 @@ if interactive_debug and sys.gettrace() is None:  # this only is set when a debu
 print("\nremove the hack setting the bruty and nbs directories into the python path\n")
 
 def launch(config_path, cache_file, tile_cache, export_time,
-           new_console=True, env_path=r'D:\languages\miniconda3\Scripts\activate', env_name='NBS', tile_id=(0, 0),
+           env_path=r'D:\languages\miniconda3\Scripts\activate', env_name='NBS', tile_id=(0, 0),
            decimals=None, minimized=False, remove_cache=False, fingerprint=""):
 
     """ for_navigation_flag = (use_nav_flag, nav_flag_value)
     """
-    # either launch in a new console with subprocess.popen or use multiprocessing.Process.  Could also consider dask.
-    if new_console:
-        # spawn a new console, activate a python environment and run the combine.py script with appropriate arguments
-        bruty_code = nbs.bruty.__path__._path[0]
-        bruty_root = str(pathlib.Path(bruty_code).parent.parent)
-        nbs_code = fuse_dev.__path__._path[0]
-        nbs_code = str(pathlib.Path(nbs_code).parent)
-        restore_dir = os.getcwd()
-        # os.chdir(pathlib.Path(__file__).parent.joinpath("..", "bruty"))  # change directory so we can run the tile_export script
-        # FIXME - hack overriding nbs and bruty paths
-        # looks like activate is overwriting the pythonpath, so specify it after the activate command
-        args = ['cmd.exe', '/K', 'set', f'pythonpath=&', 'set', 'TCL_LIBRARY=&', 'set',
-                'TIX_LIBRARY=&', 'set', 'TK_LIBRARY=&', env_path, env_name, '&',
-                'set', f'pythonpath={nbs_code};{bruty_root}&', 'python']
-        if profiling:
-            args.extend(["-m", "cProfile", "-o", str(pathlib.Path(config_path).parent) + f"\\timing{tile_id[0]}_{tile_id[1]}.profile"])
-        script_path = os.path.join(bruty_code, "tile_export.py")
-        args.extend([script_path, "-b", config_path, "-t", export_time, "-c", cache_file, "-i", tile_cache])
-        if remove_cache:
-            args.extend(["--remove_cache"])
-        if decimals is not None:
-            args.extend(["-d", str(decimals)])
-        if fingerprint:
-            args.extend(['-f', fingerprint])
-        # exiter closes the console if there was no error code, keeps it open if there was an error
-        args.extend(["&", r"..\scripts\exiter.bat", f"{SUCCEEDED}", f"{TILE_LOCKED}"])  # note && only joins commands if they succeed, so just use one ampersand
-        # because we are launching separate windows we can't use the subprocess.poll and returncode.
-        # maybe we should switch to just logs and not leave a window on the screen for the user to see
-        # that would make it easier to check the returncode
-        proc = subprocess.Popen(args, **popen_kwargs(activate=False, minimize=minimized))
-        # os.chdir(restore_dir)
-        ret = proc.pid, script_path
-    else:
-        raise Exception("same console multiprocessing is untested")
-        # could actually do the same subprocess.Popen in the same console, or multiprocessing which would remove need for psutil, or use dask(?)
-        multiprocessing.Process(target=process_nbs_database, args = (db, conn_info), kwargs={'for_navigation_flag':(use_nav_flag, nav_flag_value),
-                             'override_epsg':override, 'extra_debug':debug_config})
+    # spawn a new console, activate a python environment and run the combine.py script with appropriate arguments
+    bruty_code = nbs.bruty.__path__._path[0]
+    bruty_root = str(pathlib.Path(bruty_code).parent.parent)
+    nbs_code = fuse_dev.__path__._path[0]
+    nbs_code = str(pathlib.Path(nbs_code).parent)
+    restore_dir = os.getcwd()
+    # os.chdir(pathlib.Path(__file__).parent.joinpath("..", "bruty"))  # change directory so we can run the tile_export script
+    # FIXME - hack overriding nbs and bruty paths
+    # looks like activate is overwriting the pythonpath, so specify it after the activate command
+    args = ['cmd.exe', '/K', 'set', f'pythonpath=&', 'set', 'TCL_LIBRARY=&', 'set',
+            'TIX_LIBRARY=&', 'set', 'TK_LIBRARY=&', env_path, env_name, '&',
+            'set', f'pythonpath={nbs_code};{bruty_root}&', 'python']
+    if profiling:
+        args.extend(["-m", "cProfile", "-o", str(pathlib.Path(config_path).parent) + f"\\timing{tile_id[0]}_{tile_id[1]}.profile"])
+    script_path = os.path.join(bruty_code, "tile_export.py")
+    args.extend([script_path, "-b", config_path, "-t", export_time, "-c", cache_file, "-i", tile_cache])
+    if remove_cache:
+        args.extend(["--remove_cache"])
+    if decimals is not None:
+        args.extend(["-d", str(decimals)])
+    if fingerprint:
+        args.extend(['-f', fingerprint])
+    # exiter closes the console if there was no error code, keeps it open if there was an error
+    args.extend(["&", r"..\scripts\exiter.bat", f"{SUCCEEDED}", f"{TILE_LOCKED}"])  # note && only joins commands if they succeed, so just use one ampersand
+    # because we are launching separate windows we can't use the subprocess.poll and returncode.
+    # maybe we should switch to just logs and not leave a window on the screen for the user to see
+    # that would make it easier to check the returncode
+    proc = subprocess.Popen(args, **popen_kwargs(activate=False, minimize=minimized))
+    # os.chdir(restore_dir)
+    ret = proc.pid, script_path
     return ret
 
 def get_metadata(tile_info, conn_info, use_bruty_cached="", use_caches={}):

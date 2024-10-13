@@ -25,6 +25,7 @@ SUCCEEDED = 0
 DATA_ERRORS = 3
 TILE_LOCKED = 4
 FAILED_VALIDATION = 5
+SQLITE_READ_FAILURE = 6
 UNHANDLED_EXCEPTION = 99
 
 _debug = False
@@ -90,6 +91,7 @@ class ExportOperation(BrutyOperation):
 class TileInfo:
     SOURCE_DATABASE = "tile_specifications"
     SOURCE_TABLE = "spec_tiles"
+    JOINED_TABLE = "spec_tiles"
 
     PB = 'production_branch'
     UTM = 'utm'
@@ -109,6 +111,8 @@ class TileInfo:
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
         #   and make a different init not based on the combine_spec table layout
+        self.conn = None
+        self.cursor = None
         self.read_record(**review_tile)
 
     def read_record(self, **review_tile):
@@ -116,8 +120,6 @@ class TileInfo:
         self.miny = None
         self.maxx = None
         self.maxy = None
-        self.conn = None
-        self.cursor = None
         self.hemi = review_tile[self.HEMISPHERE].lower()
         self.pb = review_tile[self.PB]
         self.utm = review_tile[self.UTM]
@@ -140,6 +142,7 @@ class TileInfo:
         return f"TileInfo:{self.pb}_{self.utm}{self.hemi}_{self.tile}_{self.locality}"
 
     def hash_id(self):
+        """ Returns a hash of the tile info so it can be used as a dictionary key"""
         return hash_id(self.pb, self.utm, self.hemi, self.tile, self.datum)
 
     @property
@@ -147,6 +150,10 @@ class TileInfo:
         return "_".join([self.pb, self.locality, f"utm{self.utm}{self.hemi}", self.datum])
 
     def acquire_lock(self, conn_info):
+        """ Acquire a lock on the record in the database.
+        If successful, it will return the connection and cursor and update the record with the full record.
+        If not, it will raise a BaseLockException.
+        """
         conn_copy = ConnectionInfo(CombineTileInfo.SOURCE_DATABASE, conn_info.username, conn_info.password, conn_info.hostname, conn_info.port,
                                     [CombineTileInfo.SOURCE_TABLE])
         self.conn, self.cursor = connection_with_retries(conn_copy, autocommit=False)
@@ -157,6 +164,8 @@ class TileInfo:
             full_info = None
             raise BaseLockException(f"Failed to acquire lock for {self} where PK={self.pk}")
         else:
+            self.cursor.execute(f"""SELECT * FROM {self.JOINED_TABLE} WHERE {self.PRIMARY_KEY}=%s""", (self.pk,))
+            record = self.cursor.fetchone()
             # udpate to the full record in case it was a partial record
             self.read_record(**record)
         return self.conn, self.cursor
@@ -170,17 +179,17 @@ class TileInfo:
 
 class ResolutionTileInfo(TileInfo):
     SOURCE_TABLE = "spec_resolutions"
-
     RESOLUTION = "resolution"
     CLOSING_DISTANCE = 'closing_distance'
     RESOLUTION_ID = 'r_id'
     TILE_ID = 'tile_id'
     PRIMARY_KEY = RESOLUTION_ID
+    JOINED_TABLE = f"{SOURCE_TABLE} R JOIN {TileInfo.SOURCE_TABLE} TI ON (R.{TILE_ID}=TI.{TileInfo.PRIMARY_KEY})"
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
         #   and make a different init not based on the combine_spec table layout
-        self.read_record(**review_tile)
+        super().__init__(**review_tile)
 
     def read_record(self, **review_tile):
         super().read_record(**review_tile)
@@ -296,11 +305,13 @@ class CombineTileInfo(ResolutionTileInfo):
     OUT_OF_DATE = "out_of_date"
     SUMMARY = "change_summary"
     PRIMARY_KEY = COMBINE_ID
+    JOINED_TABLE = f"""{SOURCE_TABLE} C JOIN {ResolutionTileInfo.SOURCE_TABLE} R ON (C.{RESOLUTION_ID}=R.{ResolutionTileInfo.PRIMARY_KEY}) 
+                        JOIN {TileInfo.SOURCE_TABLE} TI ON (R.{ResolutionTileInfo.TILE_ID}=TI.{TileInfo.PRIMARY_KEY})"""
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
         #   and make a different init not based on the combine_spec table layout
-        self.read_record(**review_tile)
+        super().__init__(**review_tile)
 
     def read_record(self, **review_tile):
         super().read_record(**review_tile)
@@ -362,9 +373,9 @@ class CombineTileInfo(ResolutionTileInfo):
             raise BaseLockException("No cursor to update the table")
         pg_update(self.cursor, self.SOURCE_TABLE, where, **kwargs)
 
-    def update_table_record(self, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), database=None, table=None, **kwargs):
+    def update_table_record(self, **kwargs):
         where = {self.COMBINE_ID: self.combine_id}
-        self.update_table(where, database, table, **kwargs)
+        self.update_table(where, **kwargs)
 
     def metadata_table_name(self, dtype: str=None):
         if dtype is None:
@@ -384,19 +395,25 @@ class CombineTileInfo(ResolutionTileInfo):
 
 @dataclass
 class TileProcess:
+    """ A database instance can be passed into db.
+    Alternatively a string of the path can be passed into db and it will open the database when needed.
+    """
     console_process: ConsoleProcessTracker
     tile_info: TileInfo
     db: WorldDatabase
     fingerprint: str
-    lock: str = None
 
     def clear_finish_code(self):
+        if isinstance(self.db, (str, pathlib.Path)):
+            self.db = WorldDatabase.open(self.db)
         try:
             del self.db.completion_codes[self.fingerprint]
         except KeyError:
             pass
 
     def finish_code(self):
+        if isinstance(self.db, (str, pathlib.Path)):
+            self.db = WorldDatabase.open(self.db)
         try:
             return self.db.completion_codes[self.fingerprint].code
         except KeyError:
@@ -627,7 +644,7 @@ def get_export_records(config, needs_to_process=False, get_lock_status=True, max
     cursor.execute(f"""SELECT {TileInfo.TILE}, {TileInfo.UTM}, {TileInfo.PB},{TileInfo.DATUM}, {TileInfo.LOCALITY}, {TileInfo.HEMISPHERE},
                             {TileInfo.EXPORT_PUBLIC}, {TileInfo.EXPORT_INTERNAL}, {TileInfo.EXPORT_NAVIGATION}, {TileInfo.PRIORITY}, {TileInfo.BUILD},
                             {ExportOperation.START_TIME}, {ExportOperation.END_TIME}, {ExportOperation.EXIT_CODE}, {ExportOperation.TRIES}, {ExportOperation.REQUEST_TIME},
-                            {ResolutionTileInfo.RESOLUTION}, {ResolutionTileInfo.CLOSING_DISTANCE}, 
+                            {ResolutionTileInfo.RESOLUTION}, {ResolutionTileInfo.CLOSING_DISTANCE}, {ResolutionTileInfo.PRIMARY_KEY}, 
                             {lock_query} 
                        FROM spec_resolutions R 
                        JOIN spec_tiles TI ON (R.tile_id = TI.t_id)
@@ -680,7 +697,7 @@ def get_combine_records(config, needs_to_process=False, get_lock_status=True, ma
                             {TileInfo.PRIORITY}, {TileInfo.BUILD},
                             {CombineOperation.START_TIME}, {CombineOperation.END_TIME}, {CombineOperation.EXIT_CODE}, {CombineOperation.TRIES}, {CombineOperation.REQUEST_TIME},
                             {ResolutionTileInfo.RESOLUTION}, 
-                            {CombineTileInfo.DATATYPE}, {CombineTileInfo.FOR_NAV}, {CombineTileInfo.COMBINE_ID},  
+                            {CombineTileInfo.DATATYPE}, {CombineTileInfo.FOR_NAV}, {CombineTileInfo.PRIMARY_KEY},  
                             {lock_query} 
                        FROM {CombineTileInfo.SOURCE_TABLE} B 
                        JOIN {ResolutionTileInfo.SOURCE_TABLE} R ON (B.res_id = R.r_id) 

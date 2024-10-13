@@ -61,6 +61,7 @@ def start_server(port=5000):
     -------
 
     """
+    raise Exception("This is not working, Change to use AdvisoryLock with postgres")
     global manager
 
     try:
@@ -249,6 +250,9 @@ class TileLock(FileLock):
 
 
 # try this multilock idea to reduce the number of socket connections that result from calling many single lock instances
+# @TODO make the arealock work with postgres advisory locks -- selecting one lock per (databasename, subtile X, subtile Y)
+#    Remember that we can select multiple locks at once with the postgres advisory lock -- see AdvisoryLock below
+#    This is because our custom lock server was having an intermittent issue that would only pop up every couple days that I couldn't track down.
 class AreaLock(BaseLock):
     def __init__(self, tile_list, flags, conv_txy_to_path, sid=None, timeout=-1):
         """
