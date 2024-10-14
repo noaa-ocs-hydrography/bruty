@@ -44,7 +44,8 @@ from nbs.bruty.raster_data import LayersEnum
 from fuse_dev.fuse.fuse_processor import git_head_commit_id
 import nbs.scripts.combine
 from xipe_dev.xipe.raster import CONTRIBUTOR_BAND_NAME, ELEVATION_BAND_NAME, UNCERTAINTY_BAND_NAME, raster_band_name_index
-from nbs.scripts.tile_specs import create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS
+from nbs.scripts.tile_specs import create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, \
+    TileInfo, ResolutionTileInfo, CombineTileInfo
 
 
 LOGGER = get_logger('nbs.bruty.export')
@@ -1408,8 +1409,8 @@ def make_parser():
     #                     help="path to root folder of exports")
     parser.add_argument("-c", "--cache", type=str, metavar='cache', default='',  # nargs="+"
                         help="path to pickle file holding all_simple_records and sort_dict")
-    parser.add_argument("-i", "--tile_info", type=str, metavar='tile_info', default='',  # nargs="+"
-                        help="path to pickle file with tile_info instance")
+    parser.add_argument("-k", "--res_tile_pk_id", type=int, metavar='res_tile_pk_id',
+                        help=f"primary key of the tile to export from the {ResolutionTileInfo.SOURCE_TABLE} table")
     parser.add_argument("-t", "--export_time", type=str, metavar='export_time', default='',  # nargs="+"
                         help="export time to append to filenames")
     parser.add_argument("-d", "--decimals", type=int, metavar='decimals', default=None,  # nargs="+"
@@ -1454,10 +1455,6 @@ if __name__ == "__main__":
         config = config_file['EXPORT']
         # use_locks(args.lock_server)
         tile_info = pickle.load(open(args.tile_info, 'rb'))
-        cache = open(args.cache, 'rb')
-        all_simple_records = pickle.load(cache)
-        sort_dict = pickle.load(cache)
-        cache.close()
         if args.remove_cache:
             remove_file(args.cache, allow_permission_fail=True)
         comp = partial(nbs_survey_sort, sort_dict)

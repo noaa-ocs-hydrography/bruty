@@ -230,63 +230,72 @@ def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=Tr
     -------
 
     """
-    ret = SUCCEEDED
-    # NO_LOCK means that we are not allowing multiple processes to work on one Tile/database at the same time - so use a row lock on the whole thine
-    # If we allow multiple processes to work on the same bruty database then we will use advisory locks for each bruty database subtile that a survey overlaps
-    # @TODO we should change the NO_LOCK name to NO_LOCK=TRUE is REVIEW_TILE_LOCKS and  NO_LOCK=FALSE is AREA_LOCK to be clearer on what they do.
-    #   Both styles need locking.
-    p = pathlib.Path(root_path)
-    if not p.is_dir():  # the path to the sqlite file?
-        p = p.parent
-    if world_raster_database.NO_LOCK:
-        # NOTE now that we made tables for each datatype and tiles we could row lock the table rather than the advisory lock
-        # However row locks are automatically released at the end of the transaction so we would need to keep the transaction open
-        # and not commiting will mean the start_time wouldn't update and we wouldn't know if the process was running.
-        # unless we can see locks from QGIS.
-        # NOW trying locking rows by "for update" and "skip locked" in the select statement to make a view of what is running
-        #    see https://www.postgresql.org/docs/current/sql-select.html#SQL-FOR-UPDATE-SHARE
-        # lck = AdvisoryLock(p.name, conn_info, EXCLUSIVE | NON_BLOCKING)
-        try:
-            # lck.acquire()
-            conn, cursor = tile_info.acquire_lock(conn_info)
-        except BaseLockException:
-            ret = TILE_LOCKED
-    if ret == SUCCEEDED:
-        try:
-            db = create_world_db(p, tile_info, log_level=log_level)
-            override = db.db.epsg if override_epsg else NO_OVERRIDE
-            world_db_path = db.db.data_path
-        except (sqlite3.OperationalError, OSError) as e:
-            # this happened as a network issue - we will skip it for now and come back and give the network some time to recover
-            # but we will count it as a retry in case there is a corrupted file or something
-            msg = traceback.format_exc()
-            LOGGER.warning(f"Exception accessing bruty db for {tile_info}:\n{msg}")
-            ret = SQLITE_READ_FAILURE
-    if ret == SUCCEEDED and world_raster_database.NO_LOCK:
-        warnings_log = "''"  # single quotes for postgres
-        info_log = "''"
-        for h in logging.getLogger("nbs").handlers:
-            if isinstance(h, logging.FileHandler):
-                if f"{os.getpid()}.log" in h.baseFilename:
-                    info_log = f"'{h.baseFilename}'"  # single quotes for postgres
-                elif f"{os.getpid()}.warn" in h.baseFilename:
-                    warnings_log = f"'{h.baseFilename}'"
-        tile_info.update_table_record(**{tile_info.combine.START_TIME: "NOW()", tile_info.combine.TRIES: f"COALESCE({tile_info.combine.TRIES}, 0) + 1",
-                              tile_info.combine.DATA_LOCATION: f"'{world_db_path}'", tile_info.combine.INFO_LOG: info_log, tile_info.combine.WARNINGS_LOG: warnings_log})
-
-    if ret == SUCCEEDED:
-        sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, (use_navigation_flag, tile_info.for_nav), exclude=exclude)
-        clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=1, delete_existing=delete_existing, log_level=log_level)
-        if not names_list:  # still call process_nbs_records to have it write the transaction group records
-            LOGGER.info(f"No matching records found in tables {conn_info.tablenames}")
-            LOGGER.info(f"  for_navigation_flag used:{use_navigation_flag}")
-            if use_navigation_flag:
-                LOGGER.info(f"  and for_navigation value must equal: {tile_info.for_nav}")
-        ret = process_nbs_records(world_db_path, names_list, sort_dict, comp, transform_metadata, extra_debug, override, crop=crop, log_level=log_level)
-        # if not extra_debug:
+    try:
+        ret = SUCCEEDED
+        # NO_LOCK means that we are not allowing multiple processes to work on one Tile/database at the same time - so use a row lock on the whole thine
+        # If we allow multiple processes to work on the same bruty database then we will use advisory locks for each bruty database subtile that a survey overlaps
+        # @TODO we should change the NO_LOCK name to NO_LOCK=TRUE is REVIEW_TILE_LOCKS and  NO_LOCK=FALSE is AREA_LOCK to be clearer on what they do.
+        #   Both styles need locking.
+        p = pathlib.Path(root_path)
+        if not p.is_dir():  # the path to the sqlite file?
+            p = p.parent
         if world_raster_database.NO_LOCK:
-            tile_info.update_table_record(**{tile_info.combine.END_TIME: "NOW()", tile_info.combine.EXIT_CODE: ret})
-            tile_info.release_lock()
+            # NOTE now that we made tables for each datatype and tiles we could row lock the table rather than the advisory lock
+            # However row locks are automatically released at the end of the transaction so we would need to keep the transaction open
+            # and not commiting will mean the start_time wouldn't update and we wouldn't know if the process was running.
+            # unless we can see locks from QGIS.
+            # NOW trying locking rows by "for update" and "skip locked" in the select statement to make a view of what is running
+            #    see https://www.postgresql.org/docs/current/sql-select.html#SQL-FOR-UPDATE-SHARE
+            # lck = AdvisoryLock(p.name, conn_info, EXCLUSIVE | NON_BLOCKING)
+            try:
+                # lck.acquire()
+                conn, cursor = tile_info.acquire_lock(conn_info)
+            except BaseLockException:
+                ret = TILE_LOCKED
+        if ret == SUCCEEDED:
+            try:
+                db = create_world_db(p, tile_info, log_level=log_level)
+                override = db.db.epsg if override_epsg else NO_OVERRIDE
+                world_db_path = db.db.data_path
+            except (sqlite3.OperationalError, OSError) as e:
+                # this happened as a network issue - we will skip it for now and come back and give the network some time to recover
+                # but we will count it as a retry in case there is a corrupted file or something
+                msg = traceback.format_exc()
+                LOGGER.warning(f"Exception accessing bruty db for {tile_info}:\n{msg}")
+                ret = SQLITE_READ_FAILURE
+        if ret == SUCCEEDED and world_raster_database.NO_LOCK:
+            warnings_log = "''"  # single quotes for postgres
+            info_log = "''"
+            for h in logging.getLogger("nbs").handlers:
+                if isinstance(h, logging.FileHandler):
+                    if f"{os.getpid()}.log" in h.baseFilename:
+                        info_log = f"'{h.baseFilename}'"  # single quotes for postgres
+                    elif f"{os.getpid()}.warn" in h.baseFilename:
+                        warnings_log = f"'{h.baseFilename}'"
+            tile_info.update_table_record(**{tile_info.combine.START_TIME: "NOW()", tile_info.combine.TRIES: f"COALESCE({tile_info.combine.TRIES}, 0) + 1",
+                                  tile_info.combine.DATA_LOCATION: f"'{world_db_path}'", tile_info.combine.INFO_LOG: info_log, tile_info.combine.WARNINGS_LOG: warnings_log})
+
+        if ret == SUCCEEDED:
+            sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, (use_navigation_flag, tile_info.for_nav), exclude=exclude)
+            clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=1, delete_existing=delete_existing, log_level=log_level)
+            if not names_list:  # still call process_nbs_records to have it write the transaction group records
+                LOGGER.info(f"No matching records found in tables {conn_info.tablenames}")
+                LOGGER.info(f"  for_navigation_flag used:{use_navigation_flag}")
+                if use_navigation_flag:
+                    LOGGER.info(f"  and for_navigation value must equal: {tile_info.for_nav}")
+            ret = process_nbs_records(world_db_path, names_list, sort_dict, comp, transform_metadata, extra_debug, override, crop=crop, log_level=log_level)
+            # if not extra_debug:
+            if world_raster_database.NO_LOCK:
+                tile_info.update_table_record(**{tile_info.combine.END_TIME: "NOW()", tile_info.combine.EXIT_CODE: ret})
+                tile_info.release_lock()
+    except Exception as e:
+        if world_raster_database.NO_LOCK:
+            try:
+                tile_info.update_table_record(**{tile_info.combine.END_TIME: "NOW()", tile_info.combine.exit_code: UNHANDLED_EXCEPTION})  # using the raw
+                tile_info.release_lock()
+            except BaseLockException as lck:
+                pass  # error happened before the lock was acquired
+        raise e
     return ret
 
 
@@ -728,8 +737,8 @@ if __name__ == "__main__":
             LOGGER.error(traceback.format_exc())
             LOGGER.error(msg)
             ret = UNHANDLED_EXCEPTION
-            TileInfo.update_table(conn_info, f"{CombineTileInfo.COMBINE_ID}={args.combine_pk_id}", **{tile_info.combine.END_TIME: "NOW()", tile_info.combine.exit_code: ret})  # using the raw
-        if args.fingerprint:
+        # don't bother writing the completion code if the row was locked - it should just get called again
+        if args.fingerprint and ret != TILE_LOCKED:
             try:
                 db = WorldDatabase.open(args.bruty_path)
                 d = db.completion_codes.data_class()

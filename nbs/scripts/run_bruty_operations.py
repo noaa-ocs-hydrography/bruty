@@ -168,28 +168,7 @@ def remove_finished_processes(tile_processes, tile_manager):
     for key in list(tile_processes.keys()):
         if not tile_processes[key].console_process.is_running():
             old_tile = tile_processes[key].tile_info
-            try:
-                if tile_processes[key].succeeded():
-                    reason = "finished"
-                # 3 is the combine code for bad/missing data
-                elif tile_processes[key].finish_code() == DATA_ERRORS:
-                    reason = "ended with data errors"
-                # 4 is the code for LOCKED
-                elif tile_processes[key].finish_code() == TILE_LOCKED:
-                    reason = "LOCKED"
-                    tile_processes[key].clear_finish_code()  # remove record so we don't just pile up a lot of needless records
-                else:
-                    reason = "failed and will retry if not over the maximum retry count"
-            except (sqlite3.OperationalError, OSError) as e:
-                # this is happening when the network drive loses connection, not sure if it is recoverable.
-                # treat it like an unhandled exception in the subprocess - retry and increment the count
-                # also wait a moment to let the network recover in case that helps
-                msg = traceback.format_exc()
-                LOGGER.warning(f"Exception accessing bruty db for {old_tile}:\n{msg}")
-                reason = "failed with a sqlite Operational error or OSError"
-                retry = True
-                time.sleep(5)
-            LOGGER.info(f"Combine for {old_tile} {reason} ")
+            LOGGER.info(f"Combine for {old_tile} exited")
             try:
                 tile_manager.remove(old_tile)  # remove the tile from the list of tiles to process in the future
             except KeyError:
@@ -219,99 +198,38 @@ def export_tile(tile_info, config, conn_info):
     log_level = get_log_level(config)
 
     locks = []
-    try:
-        raise Exception("change this to WHERE combine_spec_bruty.res_id = tile_info.r_id rather than iterating the types+for_nav")
-        raise Exception("Lock the rows, See if all the combines are finished and if so then export - otherwise delay for now.")
-        for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
-            for for_nav in (True, False):
-                combine_path = pathlib.Path(config['data_dir']).joinpath(tile_info.bruty_db_name(dtype, for_nav))
-                raise Exception("change this to row locks in Postgres")
-                lock_path = WorldDatabase.metadata_filename_in_dir(combine_path).with_suffix(".lock")
-                os.makedirs(lock_path.parent, exist_ok=True)
-                lock = Lock(lock_path, fail_when_locked=True, flags=LockFlags.SHARED | LockFlags.NON_BLOCKING)
-                lock.acquire()
-                locks.append(lock)
-    except AlreadyLocked:  # release locks but don't remove from the list so we come back to it later
-        LOGGER.debug(f"Tile currently locked - {tile_info.full_name}")
-        for lock in locks:
-            lock.release()
-        return_process = None
-    else:  # try to export since all the combines locked
-        # if the product branch (pb) is new then read and cache the data in a pickle file to pass to the new console
-        # Also, if cached metadata from the combine is desired then read it every time
-        # since we don't know if all combines were done with the same metadata tables.
-        if tile_info.pb != cached_metadata_pb or tile_info.locality != cached_locality or \
-                tile_info != cached_utm or use_cached_meta or use_cached_enc_meta:
-            # determine the location of the cached metadata if any is to be used
-            cache_dir = config['data_dir'] if use_cached_meta or use_cached_enc_meta else ""
-            # determine which datatypes will use the cache
-            # (enc will normally use cached data, it's being auto-updated regularly which would create a need to constantly reprocess it)
-            cache_flags = {dtype: use_cached_meta for dtype in (REVIEWED, PREREVIEW, GMRT, SENSITIVE)}
-            cache_flags[ENC] = use_cached_enc_meta or use_cached_meta
+    return_process = None
+    tile_info.refresh_lock_status(conn_info)
+    if not tile_info.is_locked:
+        combine_ids = tile_info.get_related_combine_ids
+        lock_vals = CombineTileInfo.check_locks(conn_info, combine_ids)
+        if len(lock_vals) == len(combine_ids) and all([val[tile_info.IS_LOCKED] for val in lock_vals]):
+
             # read the metadata, either from postgres server or disk cache based on the caches flags
-            all_simple_records, sort_dict = get_metadata(tile_info, conn_info, use_bruty_cached=cache_dir, use_caches=cache_flags)
-            fobj, cache_file = tempfile.mkstemp(".cache.pickle")
-            os.close(fobj)
-            if not use_cached_meta or interactive_debug:
-                files_to_delete.append(cache_file)  # add the filename to a list to delete later
-            # put the records into a file for the export to use
-            meta_cache = open(cache_file, "wb")
-            pickle.dump(all_simple_records, meta_cache)
-            pickle.dump(sort_dict, meta_cache)
-            meta_cache.close()
-            cached_metadata_pb = tile_info.pb
-            cached_locality = tile_info.locality
-            cached_utm = tile_info.utm
+            # all_simple_records, sort_dict = get_metadata(tile_info, conn_info, use_bruty_cached=cache_dir, use_caches=cache_flags)
 
-        # closing_dist = tile_record[closing_index]
-
-        # to make a full utm zone database, take the tile_info and set geometry and tile to None.
-        # need to make a copy first
-        # tile_info.geometry, tile_info.tile = None, None
-        # full_db = create_world_db(config['data_dir'], tile_info, dtype, nav_flag_value)
-        if interactive_debug and debug_config and max_processes < 2:
-            comp = partial(nbs_survey_sort, sort_dict)
-            combine_and_export(config, tile_info, all_simple_records, comp, export_time, decimals)
-            del remaining_tiles[current_tile]
-            return_process = None
-        else:
-            try:
-                # store+check the success code in the 'qualified for navigation' database
-                db = create_world_db(config['data_dir'], tile_info, REVIEWED, True)
-            except sqlite3.OperationalError as e:
-                # this happened as a network issue - we will skip it for now and come back and give the network some time to recover
-                # but we will count it as a retry in case there is a corrupted file or something
-                msg = traceback.format_exc()
-                LOGGER.warning(f"Exception accessing bruty db for {tile_info} {current_tile.resolution}m {current_tile.dtype}:\n{msg}")
-                time.sleep(5)
-                remaining_tiles[current_tile][1] += 1
-                if remaining_tiles[current_tile][1] > max_tries:
-                    del remaining_tiles[current_tile]
+            # to make a full utm zone database, take the tile_info and set geometry and tile to None.
+            # need to make a copy first
+            # tile_info.geometry, tile_info.tile = None, None
+            # full_db = create_world_db(config['data_dir'], tile_info, dtype, nav_flag_value)
+            if interactive_debug and debug_config and max_processes < 2:
+                comp = partial(nbs_survey_sort, sort_dict)
+                combine_and_export(config, tile_info, all_simple_records, comp, export_time, decimals)
+                del remaining_tiles[current_tile]
                 return_process = None
             else:
-                fobj, tile_cache = tempfile.mkstemp(".tile.pickle")
-                os.close(fobj)
-                tile_cache_file = open(tile_cache, "wb")
-                pickle.dump(tile_info, tile_cache_file)
-                tile_cache_file.close()
-                files_to_delete.append(tile_cache)  # mark this to delete later
                 LOGGER.info(f"exporting {tile_info.full_name}")
-                fingerprint = str(current_tile.hash_id) + "_" + datetime.datetime.now().isoformat()
+                fingerprint = str(tile_info.hash_id) + "_" + datetime.datetime.now().isoformat()
 
-                pid, script_path = launch(config._source_filename, cache_file, tile_cache, export_time, env_path=env_path,
+                pid, script_path = launch_export(config._source_filename, export_time, env_path=env_path,
                                           env_name=env_name, tile_id=(tile_info.tile, tile_info.resolution), decimals=decimals, minimized=minimized,
-                                          remove_cache=use_cached_meta, fingerprint=fingerprint)
+                                          fingerprint=fingerprint)
                 running_process = ConsoleProcessTracker(["python", fingerprint, script_path])
                 if running_process.console.last_pid != pid:
                     LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
                 # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
-                return_process = TileProcess(running_process, tile_info, db, fingerprint, locks)
-        del locks  # releases if not stored in the tile_processes
-    raise Exception("Make the delete happen on the export code OR find a different way to pass the data.  Does the cache really take that long to read?")
-    for cache_file in files_to_delete:
-        # @TODO store the cache_file with the running process so it gets deleted sooner -
-        #   have to watch out in case more than one process use the same metadata cache
-        remove_file(cache_file)
+                return_process = TileProcess(running_process, tile_info, fingerprint)
+
     return return_process
 
 
@@ -338,27 +256,29 @@ def combine_tile(tile_info, config, conn_info, debug_config=False, log_path=""):
     db_path = pathlib.Path(config['data_dir']).joinpath(tile_info.bruty_db_name())
     conn_info.tablenames = [tile_info.metadata_table_name()]
     fingerprint = str(tile_info.hash_id()) + "_" + datetime.now().isoformat()
-    if debug_launch:
-        setup_call_logger(db_path)
-        # NOTICE -- this function will not write to the combine_spec_view table with the status codes etc.
-        ret = process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=use_nav_flag,
-                                   extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(tile_info.datatype == ENC),
-                                   delete_existing=delete_existing, log_level=log_level)
-        errors = perform_qc_checks(db_path, conn_info, (use_nav_flag, tile_info.for_nav), repair=True, check_last_insert=False)
-        return_process = None
-    else:
-        pid = launch_combine(root_path, tile_info.pk, config._source_filename, conn_info.tablenames, use_navigation_flag=use_nav_flag,
-                             override_epsg=override, extra_debug=debug_config, exclude=exclude, crop=(tile_info.datatype == ENC),
-                             log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
-                             fingerprint=fingerprint, delete_existing=delete_existing, log_level=log_level)
-        running_process = ConsoleProcessTracker(["python", fingerprint, "combine.py"])
-        if running_process.console.last_pid != pid:
-            LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
+    return_process = None
+    tile_info.refresh_lock_status(conn_info)
+    if not tile_info.is_locked:
+        if debug_launch:
+            setup_call_logger(db_path)
+            # NOTICE -- this function will not write to the combine_spec_view table with the status codes etc.
+            ret = process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=use_nav_flag,
+                                       extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(tile_info.datatype == ENC),
+                                       delete_existing=delete_existing, log_level=log_level)
+            errors = perform_qc_checks(db_path, conn_info, (use_nav_flag, tile_info.for_nav), repair=True, check_last_insert=False)
         else:
-            LOGGER.debug(f"Started PID {pid} for {tile_info}")
+            pid = launch_combine(root_path, tile_info.pk, config._source_filename, conn_info.tablenames, use_navigation_flag=use_nav_flag,
+                                 override_epsg=override, extra_debug=debug_config, exclude=exclude, crop=(tile_info.datatype == ENC),
+                                 log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
+                                 fingerprint=fingerprint, delete_existing=delete_existing, log_level=log_level)
+            running_process = ConsoleProcessTracker(["python", fingerprint, "combine.py"])
+            if running_process.console.last_pid != pid:
+                LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
+            else:
+                LOGGER.debug(f"Started PID {pid} for {tile_info}")
 
-        # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
-        return_process = TileProcess(running_process, tile_info, db_path, fingerprint)
+            # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
+            return_process = TileProcess(running_process, tile_info, fingerprint)
     return return_process
 
 def main(config):
@@ -401,7 +321,7 @@ def main(config):
             # for x in range(15):
             #     next_tile = tile_manager.pick_next_tile(tile_processes)
             #     print(next_tile)
-            #     tile_processes[next_tile.hash_id()] = TileProcess(None, next_tile, None, 1, None)
+            #     tile_processes[next_tile.hash_id()] = TileProcess(None, next_tile, 1)
             # print(tile_processes)
             # raise
             all_priorities = list(tile_manager.priorities.keys())
@@ -438,6 +358,7 @@ def main(config):
                     returned_process = export_tile(tile_info, config, conn_info)
                 if returned_process is not None:
                     tile_processes[tile_info.hash_id()] = returned_process
+                # If the tile was locked then we will still remove it and let the next refresh get the tile again
                 tile_manager.remove(tile_info)
             remove_finished_processes(tile_processes, tile_manager)
             tile_manager.refresh_tiles_list(needs_combining=True, needs_exporting=True)

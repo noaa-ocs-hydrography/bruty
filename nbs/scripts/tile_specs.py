@@ -135,8 +135,53 @@ class TileInfo:
         self.is_locked = review_tile.get(self.IS_LOCKED, None)
         self.pk = review_tile[self.PRIMARY_KEY]
 
-    def is_running(self):
+    def refresh_lock_status(self, conn_info:ConnectionInfo):
+        """ Update the self.is_locked value based on the database - if the record is not found then is_locked will be set to None
+
+        Parameters
+        ----------
+        conn_info
+
+        Returns
+        -------
+
+        """
+        locks = self.check_locks(conn_info, self.pk)
+        try:
+            self.is_locked = locks[0][self.IS_LOCKED]
+        except IndexError:
+            self.is_locked = None
         return self.is_locked
+
+    @classmethod
+    def check_locks(cls, conn_info:ConnectionInfo, pk_vals):
+        """ Check the lock status of multiple records
+        Parameters
+        ----------
+        conn_info
+            ConnectionInfo object
+        pk_vals
+            Primary key values to check
+
+        Returns
+        -------
+
+        """
+        conn_copy = ConnectionInfo(cls.SOURCE_DATABASE, conn_info.username, conn_info.password, conn_info.hostname, conn_info.port,
+                                    [cls.SOURCE_TABLE])
+        conn, cursor = connection_with_retries(conn_copy)
+        lock_query = lock_column_query(cls.SOURCE_TABLE, "MYTABLE", True)
+        # This is very similar to the combine_spec_view except we are getting the geometry_buffered and its SRID which are not in the view because of QGIS performance
+        # Actually it seems that when querying the whole table it's significantly faster to get less columns, so just get the critical ones then query the rest when needed.
+        # The killer is the geometry, a query without geometry is taking 0.5 seconds, with geometry it's taking 25 seconds
+        # Using the time comparison as SQL would take a 0.6 second query to 13 seconds
+        # SELECT B.*, R.*, ST_SRID(geometry_buffered), TI.*, {lock_query}
+        cursor.execute(f"""SELECT {cls.PRIMARY_KEY}, {lock_query} 
+                           FROM {cls.SOURCE_TABLE} MYTABLE
+                           WHERE {cls.PRIMARY_KEY} IN (%s)
+                           """, (pk_vals,))
+        records = cursor.fetchall()
+        return records
 
     def __repr__(self):
         return f"TileInfo:{self.pb}_{self.utm}{self.hemi}_{self.tile}_{self.locality}"
@@ -209,6 +254,14 @@ class ResolutionTileInfo(TileInfo):
 
     def hash_id(self):
         return super().hash_id(), self.resolution  # hash_id(self.resolution)
+
+    def get_related_combine_ids(self, conn_info:ConnectionInfo):
+        conn_copy = ConnectionInfo(CombineTileInfo.SOURCE_DATABASE, conn_info.username, conn_info.password, conn_info.hostname, conn_info.port,
+                                    [CombineTileInfo.SOURCE_TABLE])
+        conn, cursor = connection_with_retries(conn_copy)
+        cursor.execute(f"""SELECT {CombineTileInfo.COMBINE_ID} FROM {CombineTileInfo.SOURCE_TABLE} WHERE {CombineTileInfo.RESOLUTION_ID}=%s""", (self.pk,))
+        records = cursor.fetchall()
+        return [r[CombineTileInfo.COMBINE_ID] for r in records]
 
     def acquire_lock_and_combine_locks(self, conn_info):
         # lock the current record in the spec_resolutions table and set up a connection+cursor
@@ -415,27 +468,7 @@ class TileProcess:
     """
     console_process: ConsoleProcessTracker
     tile_info: TileInfo
-    db: WorldDatabase
     fingerprint: str
-
-    def clear_finish_code(self):
-        if isinstance(self.db, (str, pathlib.Path)):
-            self.db = WorldDatabase.open(self.db)
-        try:
-            del self.db.completion_codes[self.fingerprint]
-        except KeyError:
-            pass
-
-    def finish_code(self):
-        if isinstance(self.db, (str, pathlib.Path)):
-            self.db = WorldDatabase.open(self.db)
-        try:
-            return self.db.completion_codes[self.fingerprint].code
-        except KeyError:
-            return None
-
-    def succeeded(self):
-        return self.finish_code() == SUCCEEDED
 
 
 @dataclass(frozen=True)
@@ -502,7 +535,7 @@ class TileManager:
                     self.priorities[use_priority] = {tile.pb: {hash: tile}}
     @staticmethod
     def _revised_priority(tile):
-        use_priority = tile.priority if not tile.is_running() else TileManager.RUNNING_PRIORITY
+        use_priority = tile.priority if not tile.is_locked else TileManager.RUNNING_PRIORITY
         if use_priority is None:
             use_priority = 0
         return use_priority
