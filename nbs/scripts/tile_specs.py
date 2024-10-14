@@ -50,11 +50,23 @@ class BrutyOperation:
     def read(self, record):
         self.start_time = record.get(self.START_TIME, None)
         self.end_time = record.get(self.END_TIME, None)
+        self.request_time = record.get(self.REQUEST_TIME, None)
         self.exit_code = record.get(self.EXIT_CODE, None)
         self.tries = record.get(self.TRIES, None)
         self.warnings_log = record.get(self.WARNINGS_LOG, None)
         self.info_log = record.get(self.INFO_LOG, None)
         self.data_location = record.get(self.DATA_LOCATION, None)
+
+    def needs_processing(self, operation_type, max_retries=3):
+        process = False
+        if self.request_time is not None:
+            if self.start_time is None or self.end_time is None:
+                process = True
+            elif self.request_time > self.start_time or self.start_time > self.end_time:
+                process = True
+            elif self.exit_code > 0:
+                process = True
+        return process
 
 
 class CombineOperation(BrutyOperation):
@@ -154,6 +166,33 @@ class TileInfo:
         return self.is_locked
 
     @classmethod
+    def from_table(cls, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), pk_id, database=None, table=None):
+        """ Reads a records from the JOINED_TABLE based on the primary key and returns a TileInfo object
+        Parameters
+        ----------
+        connection_info
+        pk_id
+        database
+        table
+
+        Returns
+        -------
+
+        """
+        if database is None:
+            database = cls.SOURCE_DATABASE
+        if table is None:
+            table = cls.JOINED_TABLE
+        if isinstance(connection_info, ConnectionInfo):
+            conn_info = ConnectionInfo(database, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [table])
+            conn, cursor = connection_with_retries(conn_info)
+        else:
+            cursor = connection_info
+        cursor.execute(f"""SELECT * from {table} WHERE {cls.PRIMARY_KEY}={pk_id}""",)
+        record = cursor.fetchone()
+        return cls(**record)
+
+    @classmethod
     def check_locks(cls, conn_info:ConnectionInfo, pk_vals):
         """ Check the lock status of multiple records
         Parameters
@@ -167,6 +206,11 @@ class TileInfo:
         -------
 
         """
+        records = cls._get_records(conn_info, pk_vals, f"{cls.PRIMARY_KEY}", cls.SOURCE_TABLE)
+        return records
+
+    @classmethod
+    def _get_records(cls, conn_info:ConnectionInfo, pk_vals, select, table):
         conn_copy = ConnectionInfo(cls.SOURCE_DATABASE, conn_info.username, conn_info.password, conn_info.hostname, conn_info.port,
                                     [cls.SOURCE_TABLE])
         conn, cursor = connection_with_retries(conn_copy)
@@ -176,12 +220,29 @@ class TileInfo:
         # The killer is the geometry, a query without geometry is taking 0.5 seconds, with geometry it's taking 25 seconds
         # Using the time comparison as SQL would take a 0.6 second query to 13 seconds
         # SELECT B.*, R.*, ST_SRID(geometry_buffered), TI.*, {lock_query}
-        cursor.execute(f"""SELECT {cls.PRIMARY_KEY}, {lock_query} 
-                           FROM {cls.SOURCE_TABLE} MYTABLE
+        cursor.execute(f"""SELECT *, {lock_query} 
+                           FROM {cls.JOINED_TABLE} MYTABLE
                            WHERE {cls.PRIMARY_KEY} IN (%s)
                            """, (pk_vals,))
         records = cursor.fetchall()
-        return records
+
+    @classmethod
+    def get_full_records(cls, conn_info:ConnectionInfo, pk_vals):
+        """ Check the lock status of multiple records
+        Parameters
+        ----------
+        conn_info
+            ConnectionInfo object
+        pk_vals
+            Primary key values to check
+
+        Returns
+        -------
+
+        """
+        records = cls._get_records(conn_info, pk_vals, "*", cls.JOINED_TABLE)
+        return [cls(**record) for record in records]
+
 
     def __repr__(self):
         return f"TileInfo:{self.pb}_{self.utm}{self.hemi}_{self.tile}_{self.locality}"
@@ -396,21 +457,6 @@ class CombineTileInfo(ResolutionTileInfo):
 
     def hash_id(self):
         return super().hash_id(), hash_id(self.datatype, self.for_nav)
-
-    @classmethod
-    def from_combine_spec_view(cls, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), pk_id, database=None, table=None):
-        if database is None:
-            database = cls.SOURCE_DATABASE
-        if table is None:
-            table = cls.SOURCE_TABLE
-        if isinstance(connection_info, ConnectionInfo):
-            conn_info = ConnectionInfo(database, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [table])
-            conn, cursor = connection_with_retries(conn_info)
-        else:
-            cursor = connection_info
-        cursor.execute(f"""SELECT * from {table} WHERE {cls.COMBINE_ID}={pk_id}""",)
-        record = cursor.fetchone()
-        return cls(**record)
 
     def update_table(self, where, **kwargs):
         """ Update a table based on a a dictionary (from kwargs) of values
@@ -638,20 +684,6 @@ def needs_processing_condition(cls, max_retries=3):
                    OR ({cls.EXIT_CODE} > 0 AND ({cls.TRIES} IS NULL OR {cls.TRIES} < {max_retries})))) -- failed with a positive exit code"""
     # Seems that the time check is slow in SQL but fast in python, so grab the columns and do the check in python
 
-def needs_processing(record, operation_type, max_retries=3):
-    t = record[operation_type.REQUEST_TIME]
-    process = False
-    if t is not None:
-        s = record[operation_type.START_TIME]
-        e = record[operation_type.END_TIME]
-        if s is None or e is None:
-            process = True
-        elif t>s or s>e:
-            process = True
-        elif record[operation_type.EXIT_CODE] > 0 and record[operation_type.TRIES] < max_retries:
-            process = True
-    return process
-
 def lock_column_query(table_name, alias, do_lookup=True, col_name=TileInfo.IS_LOCKED):
     if do_lookup:
         # the R comes from the table alias in the execute statement below
@@ -760,16 +792,14 @@ def get_combine_records(config, needs_to_process=False, get_lock_status=True, ma
 def iterate_export_table(config, needs_to_process=False, get_lock_status=True, max_retries=3):
     records = get_export_records(config, get_lock_status=get_lock_status, max_retries=max_retries)
     for review_tile in records:
-        if needs_to_process and not needs_processing(review_tile, ExportOperation, max_retries=max_retries):
-            continue
         info = ResolutionTileInfo(**review_tile)
-        yield info
+        if not needs_to_process or (info.needs_processing() and info.export.tries < max_retries):
+            yield info
 
 def iterate_combine_table(config, needs_to_process=False, get_lock_status=True, max_retries=3):
     records = get_combine_records(config, get_lock_status=get_lock_status, max_retries=max_retries)
     for review_tile in records:
-        if needs_to_process and not needs_processing(review_tile, CombineOperation, max_retries=max_retries):
-            continue
         info = CombineTileInfo(**review_tile)
-        yield info
+        if not needs_to_process or (info.needs_processing() and info.combine.tries < max_retries):
+            yield info
 

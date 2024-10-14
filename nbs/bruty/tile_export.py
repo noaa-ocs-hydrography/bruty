@@ -319,29 +319,23 @@ def make_read_only(fname):
         pass
 
 
-def combine_and_export(config, tile_info, all_simple_records, comp, export_time="", decimals=None):
+def combine_and_export(config, tile_info, decimals=None, use_caches=False):
+    all_simple_records, sort_dict = get_metadata(tile_info, conn_info, use_bruty_cached=cache_dir, use_caches=cache_flags)
+    comp = partial(nbs_survey_sort, sort_dict)
     conn_info = connect_params_from_config(config)
     conn_info_exports = connect_params_from_config(config)
     conn_info_exports.database = config.get('export_database', None)
     conn_info_exports.tablenames = [config.get('export_table', "")]
     bruty_dir = config['data_dir']
     export_dir = config['export_dir']
+    time_format = "%Y%m%d_%H%M%S"
+    export_time = datetime.datetime.now().strftime(time_format)
 
     # Find the spec_combine records
     # lock them (which will also tell if any are in use)
-    # @TODO acquire a shared lock for all the databases that may be used, if they are locked for exclusive then either block or return a code
-    locks = []
-    for datatype in all_datatypes:
-        for nav in (True, False):
-            name = tile_info.bruty_db_name(datatype, nav)
-            lck = AdvisoryLock(all_paths, conn_info, flags=SHARED | NON_BLOCKING)
-            try:
-                locks.append(lck.acquire())
-            except BaseLockException:
-                locks.append(False)
-    if all(locks):
-    else:
-        ret_code = TILE_LOCKED
+
+    # lck = AdvisoryLock(all_paths, conn_info, flags=SHARED | NON_BLOCKING)
+    tile_info.acquire_lock_and_combine_locks()
     # lock the resolution record so we can update the export times
 
 
@@ -1403,19 +1397,14 @@ def make_parser():
     parser.add_argument("-?", "--show_help", action="store_true",
                         help="show this help message and exit")
 
-    parser.add_argument("-b", "--config", type=str, metavar='bruty_dir', default="",
+    parser.add_argument("-c", "--config", type=str, metavar='bruty_dir', default="",
                         help="path to root folder of bruty data")
-    # parser.add_argument("-e", "--export_dir", type=str, metavar='export_dir', default="",
-    #                     help="path to root folder of exports")
-    parser.add_argument("-c", "--cache", type=str, metavar='cache', default='',  # nargs="+"
-                        help="path to pickle file holding all_simple_records and sort_dict")
+    parser.add_argument("-u", "--use_caches", action='store_true', dest='use_caches', default=False,
+                        help="Used cached metadata stored in the bruty database directories")
     parser.add_argument("-k", "--res_tile_pk_id", type=int, metavar='res_tile_pk_id',
                         help=f"primary key of the tile to export from the {ResolutionTileInfo.SOURCE_TABLE} table")
-    parser.add_argument("-t", "--export_time", type=str, metavar='export_time', default='',  # nargs="+"
-                        help="export time to append to filenames")
     parser.add_argument("-d", "--decimals", type=int, metavar='decimals', default=None,  # nargs="+"
                         help="number of decimals to keep in elevation and uncertainty bands")
-    parser.add_argument("-r", "--remove_cache", action="store_true", help="remove the records cache file after reading it")
     parser.add_argument("-f", "--fingerprint", type=str, metavar='fingerprint', default="",
                         help="fingerprint to store success/fail code with in sqlite db within the REVIEWED (qualified), for_navigation database")
     return parser
@@ -1433,34 +1422,20 @@ if __name__ == "__main__":
     if args.show_help or not args.config or not args.cache:
         parser.print_help()
         ret = 1
-    if False:
-        # do this in the complete_export function first thing to cache the data
-        """
-        import pickle
-        outfile = open("e:\\debug\\exports\\tile22_test.pickle", "wb")
-        pickle.dump((export, all_simple_records, closing_dist, epsg, decimals), outfile)
-        outfile.close()
-        """
-
-        import pickle
-        outfile = open("c:\\temp\\PBB18\\tile22_test.pickle", "rb")
-        export, all_simple_records, closing_dist, epsg, decimals = pickle.load(outfile)
-        outfile.close()
-        export.output_base_path = pathlib.Path("c:\\temp")
-        complete_export_tiled(export, all_simple_records, closing_dist, epsg, decimals, debug_plots=True)
-        raise Exception("testing")
 
     if args.config and args.cache:
         config_file = read_config(args.config)
         config = config_file['EXPORT']
         # use_locks(args.lock_server)
-        tile_info = pickle.load(open(args.tile_info, 'rb'))
+        tile_info = ResolutionTileInfo.from_table(args.res_tile_pk_id, 'rb')
         if args.remove_cache:
             remove_file(args.cache, allow_permission_fail=True)
-        comp = partial(nbs_survey_sort, sort_dict)
         try:
             LOGGER.debug(f"Processing {tile_info.full_name}")
-            ret = combine_and_export(config, tile_info, all_simple_records, comp, args.export_time, args.decimals)
+            ret = combine_and_export(config, tile_info, args.decimals, args.use_caches)
+        except BaseLockException:
+            LOGGER.warning(f"Could not get locks for {tile_info}")
+            ret = TILE_LOCKED
         except Exception as e:
             traceback.print_exc()
             msg = f"{tile_info.full_name} had an unhandled exception - see message above"

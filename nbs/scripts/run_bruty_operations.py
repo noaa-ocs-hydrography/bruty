@@ -195,16 +195,23 @@ def export_tile(tile_info, config, conn_info):
     use_cached_enc_meta = config.getboolean('USE_CACHED_ENC_METADATA', False)
     env_path = config.get('environment_path')
     env_name = config.get('environment_name')
+    minimized = config.getboolean('MINIMIZED', False)
     log_level = get_log_level(config)
 
     locks = []
     return_process = None
     tile_info.refresh_lock_status(conn_info)
     if not tile_info.is_locked:
-        combine_ids = tile_info.get_related_combine_ids
-        lock_vals = CombineTileInfo.check_locks(conn_info, combine_ids)
-        if len(lock_vals) == len(combine_ids) and all([val[tile_info.IS_LOCKED] for val in lock_vals]):
-
+        combine_ids = tile_info.get_related_combine_ids()
+        combine_tiles = CombineTileInfo.get_full_records(conn_info, combine_ids)
+        is_ready = True
+        if len(combine_tiles) < len(combine_ids):
+            is_ready = False
+        for tile in combine_tiles:
+            if tile.combine.needs_processing() or tile.is_locked:
+                is_ready = False
+                break
+        if is_ready:
             # read the metadata, either from postgres server or disk cache based on the caches flags
             # all_simple_records, sort_dict = get_metadata(tile_info, conn_info, use_bruty_cached=cache_dir, use_caches=cache_flags)
 
@@ -214,14 +221,14 @@ def export_tile(tile_info, config, conn_info):
             # full_db = create_world_db(config['data_dir'], tile_info, dtype, nav_flag_value)
             if interactive_debug and debug_config and max_processes < 2:
                 comp = partial(nbs_survey_sort, sort_dict)
-                combine_and_export(config, tile_info, all_simple_records, comp, export_time, decimals)
+                combine_and_export(config, tile_info, all_simple_records, comp, decimals)
                 del remaining_tiles[current_tile]
                 return_process = None
             else:
                 LOGGER.info(f"exporting {tile_info.full_name}")
                 fingerprint = str(tile_info.hash_id) + "_" + datetime.datetime.now().isoformat()
 
-                pid, script_path = launch_export(config._source_filename, export_time, env_path=env_path,
+                pid, script_path = launch_export(config._source_filename, env_path=env_path,
                                           env_name=env_name, tile_id=(tile_info.tile, tile_info.resolution), decimals=decimals, minimized=minimized,
                                           fingerprint=fingerprint)
                 running_process = ConsoleProcessTracker(["python", fingerprint, script_path])
