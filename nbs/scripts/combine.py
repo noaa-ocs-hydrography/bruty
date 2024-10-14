@@ -284,8 +284,9 @@ def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=Tr
                 LOGGER.info(f"  and for_navigation value must equal: {tile_info.for_nav}")
         ret = process_nbs_records(world_db_path, names_list, sort_dict, comp, transform_metadata, extra_debug, override, crop=crop, log_level=log_level)
         # if not extra_debug:
-        print('turn this off for debug\n'*80)
-        tile_info.update_table_record(**{tile_info.combine.END_TIME: "NOW()", tile_info.combine.EXIT_CODE: ret})
+        if world_raster_database.NO_LOCK:
+            tile_info.update_table_record(**{tile_info.combine.END_TIME: "NOW()", tile_info.combine.EXIT_CODE: ret})
+            tile_info.release_lock()
     return ret
 
 
@@ -309,7 +310,7 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
     files_not_found = []
     failed_to_insert = []
     has_modified = False
-    db = WorldDatabase.open(world_db, log_level=log_level) if isinstance(world_db, str) else world_db
+    db = WorldDatabase.open(world_db, log_level=log_level) if isinstance(world_db, (str, pathlib.Path)) else world_db
     try:
         if extra_debug:
             print("Logs for the opened Bruty DB")

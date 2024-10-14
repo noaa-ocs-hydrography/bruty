@@ -171,9 +171,10 @@ class TileInfo:
         return self.conn, self.cursor
 
     def release_lock(self):
-        self.conn.commit()
-        self.conn.close()
-        self.conn = None
+        if self.conn is not None:
+            self.conn.commit()
+            self.conn.close()
+            self.conn = None
         self.cursor = None
 
 
@@ -208,6 +209,20 @@ class ResolutionTileInfo(TileInfo):
 
     def hash_id(self):
         return super().hash_id(), self.resolution  # hash_id(self.resolution)
+
+    def acquire_lock_and_combine_locks(self, conn_info):
+        # lock the current record in the spec_resolutions table and set up a connection+cursor
+        self.acquire_lock(conn_info)
+        # lock all the spec_combines that this resolution would affect
+        self.cursor.execute(f"""SELECT * FROM {CombineTileInfo.SOURCE_TABLE} WHERE {CombineTileInfo.RESOLUTION_ID}=%s FOR UPDATE SKIP LOCKED""", (self.pk,))
+        record = self.cursor.fetchone()
+        if record is None:
+            self.release_lock()
+            full_info = None
+            raise BaseLockException(f"Failed to acquire lock for {self} where PK={self.pk}")
+        return self.conn, self.cursor
+
+
 
     @property
     def geometry(self):

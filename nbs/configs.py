@@ -176,7 +176,7 @@ def load_config(config_filename: Union[str, os.PathLike], base_config_path: Unio
     use_interp = configparser.ExtendedInterpolation() if interp else None
     config_file = configparser.ConfigParser(interpolation=use_interp)
     if initial_config:
-        if isinstance(initial_config, str):
+        if isinstance(initial_config, (str, pathlib.Path)):
             config_file.read(initial_config)
         else:  # this will accept a dictionary or a configparser instance which acts like a dictionary {section: {key: value}}
             config_file.read_dict(initial_config)

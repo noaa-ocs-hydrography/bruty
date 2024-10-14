@@ -221,6 +221,7 @@ def export_tile(tile_info, config, conn_info):
     locks = []
     try:
         raise Exception("change this to WHERE combine_spec_bruty.res_id = tile_info.r_id rather than iterating the types+for_nav")
+        raise Exception("Lock the rows, See if all the combines are finished and if so then export - otherwise delay for now.")
         for dtype in (REVIEWED, PREREVIEW, ENC, GMRT, SENSITIVE):
             for for_nav in (True, False):
                 combine_path = pathlib.Path(config['data_dir']).joinpath(tile_info.bruty_db_name(dtype, for_nav))
