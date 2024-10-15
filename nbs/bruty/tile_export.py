@@ -319,8 +319,56 @@ def make_read_only(fname):
         pass
 
 
+def get_metadata(tile_info, conn_info, use_bruty_cached=False):
+    metadata_fields = []
+    metadata_records = []
+    # conn_info.database = "metadata"
+    combine_tiles = tile_info.get_related_combine_info()
+    raise "Fix the dtypes to use the combine_tiles"
+    for dtype in (PREREVIEW, REVIEWED, ENC, GMRT, SENSITIVE):
+        query_database = False
+        tablename = tile_info.metadata_table_name(dtype)
+        if use_bruty_cached and use_caches[dtype]:
+            root_dir = pathlib.Path(use_bruty_cached)
+            db_name = root_dir.joinpath(tile_info.bruty_db_name(dtype, True))
+            cache_fname = pathlib.Path(db_name).joinpath(f"last_used_{conn_info.database}_{tablename}.pickle")
+            try:
+                cache_file = open(cache_fname, "rb")
+                mfields = pickle.load(cache_file)
+                mrecords = pickle.load(cache_file)
+            except:
+                query_database = True
+        else:
+            query_database = True
+        if query_database:
+            try:
+                mfields, mrecords = get_nbs_records(tablename, conn_info)
+            except psycopg2.errors.UndefinedTable:
+                print(f"{tablename} doesn't exist.")
+                continue
+        metadata_records.append(mrecords)
+        metadata_fields.append(mfields)
+    # @todo move this record stuff into a function in nbs_postgres.py
+    all_meta_records = {}
+    all_simple_records = {}
+    for n, meta_table_recs in enumerate(metadata_records):
+        # id_col = metadata_fields[n].index('nbs_id')
+        for record_dict in meta_table_recs:
+            # record_dict = dict(zip(metadata_fields[n], record))
+            simple_record = meta_review.MetadataDatabase._simplify_record(record_dict)
+            # re-casts the db values into other/desired types but then we just want a plain dictionary for pickle
+            simple_fuse_record = dict(meta_review.records_to_fusemetadata(simple_record))
+            all_simple_records[record_dict['nbs_id']] = simple_fuse_record
+        all_meta_records.update({rec['nbs_id']: rec for rec in meta_table_recs})
+
+    sorted_recs, names_list, sort_dict = id_to_scoring(metadata_records, for_navigation_flag=(False, False),
+                                                       never_post_flag=(False, False))
+    return all_simple_records, sort_dict
+
+
 def combine_and_export(config, tile_info, decimals=None, use_caches=False):
-    all_simple_records, sort_dict = get_metadata(tile_info, conn_info, use_bruty_cached=cache_dir, use_caches=cache_flags)
+    conn_info = connect_params_from_config(config)
+    all_simple_records, sort_dict = get_metadata(tile_info, conn_info, use_bruty_cached=use_caches)
     comp = partial(nbs_survey_sort, sort_dict)
     conn_info = connect_params_from_config(config)
     conn_info_exports = connect_params_from_config(config)

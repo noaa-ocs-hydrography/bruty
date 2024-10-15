@@ -29,12 +29,12 @@ from nbs.bruty.world_raster_database import LockNotAcquired, AreaLock, FileLock,
 # from nbs.bruty.nbs_locks import LockNotAcquired, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock
 from nbs.bruty.nbs_locks import Lock, AlreadyLocked, LockFlags
 from nbs.bruty.utils import onerr, user_action, popen_kwargs, ConsoleProcessTracker, QUIT, HELP
-from nbs.scripts.tile_specs import TileInfo
 from nbs.configs import get_logger, run_command_line_configs, parse_multiple_values, show_logger_handlers, get_log_level
 # , iter_configs, set_stream_logging, log_config, parse_multiple_values, make_family_of_logs
 from nbs.bruty.nbs_postgres import ENC, connect_params_from_config
-from nbs.scripts.tile_specs import create_world_db, TileToProcess, TileProcess, TileManager, ResolutionTileInfo, CombineTileInfo
+from nbs.scripts.tile_specs import create_world_db, TileToProcess, TileProcess, TileManager, ResolutionTileInfo, CombineTileInfo, TileInfo
 from nbs.scripts.combine import process_nbs_database, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, perform_qc_checks
+from nbs.bruty.tile_export import combine_and_export
 from nbs.debugging import get_call_logger, setup_call_logger, log_calls
 
 interactive_debug = True
@@ -54,9 +54,9 @@ print("\nremove the hack setting the bruty and nbs directories into the python p
 print("\nremove the hack setting the bruty and nbs directories into the python path\n")
 
 
-def launch_export(config_path, cache_file, tile_cache, export_time,
-           env_path=r'D:\languages\miniconda3\Scripts\activate', env_name='NBS', tile_id=(0, 0),
-           decimals=None, minimized=False, remove_cache=False, fingerprint=""):
+def launch_export(config_path, tile_info, use_caches=False,
+           env_path=r'D:\languages\miniconda3\Scripts\activate', env_name='NBS', profile_tile_id=(0, 0),
+           decimals=None, minimized=False, fingerprint=""):
 
     """ for_navigation_flag = (use_nav_flag, nav_flag_value)
     """
@@ -72,16 +72,17 @@ def launch_export(config_path, cache_file, tile_cache, export_time,
     args = ['cmd.exe', '/K', 'set', f'pythonpath=&', 'set', 'TCL_LIBRARY=&', 'set',
             'TIX_LIBRARY=&', 'set', 'TK_LIBRARY=&', env_path, env_name, '&',
             'set', f'pythonpath={nbs_code};{bruty_root}&', 'python']
-    if profiling:
-        args.extend(["-m", "cProfile", "-o", str(pathlib.Path(config_path).parent) + f"\\timing{tile_id[0]}_{tile_id[1]}.profile"])
+    # if profiling:
+    #     args.extend(["-m", "cProfile", "-o", str(pathlib.Path(config_path).parent) + f"\\timing{tile_info.tile}_{tile_info.resolution}.profile"])
     script_path = os.path.join(bruty_code, "tile_export.py")
-    args.extend([script_path, "-b", config_path, "-t", export_time, "-c", cache_file, "-i", tile_cache])
-    if remove_cache:
-        args.extend(["--remove_cache"])
+    args.extend([script_path, "-c", config_path, "-k", str(tile_info.pk)])
     if decimals is not None:
         args.extend(["-d", str(decimals)])
     if fingerprint:
         args.extend(['-f', fingerprint])
+    if use_caches:
+        args.append("-u")
+
     # exiter closes the console if there was no error code, keeps it open if there was an error
     args.extend(["&", r"..\scripts\exiter.bat", f"{SUCCEEDED}", f"{TILE_LOCKED}"])  # note && only joins commands if they succeed, so just use one ampersand
     # because we are launching separate windows we can't use the subprocess.poll and returncode.
@@ -192,21 +193,17 @@ class TileRuns:
 def export_tile(tile_info, config, conn_info):
     decimals = config.getint('decimals', None)
     use_cached_meta = config.getboolean('USE_CACHED_METADATA', False)
-    use_cached_enc_meta = config.getboolean('USE_CACHED_ENC_METADATA', False)
     env_path = config.get('environment_path')
     env_name = config.get('environment_name')
     minimized = config.getboolean('MINIMIZED', False)
-    log_level = get_log_level(config)
+    # log_level = get_log_level(config)
 
     locks = []
     return_process = None
     tile_info.refresh_lock_status(conn_info)
     if not tile_info.is_locked:
-        combine_ids = tile_info.get_related_combine_ids()
-        combine_tiles = CombineTileInfo.get_full_records(conn_info, combine_ids)
+        combine_tiles = tile_info.get_related_combine_info()
         is_ready = True
-        if len(combine_tiles) < len(combine_ids):
-            is_ready = False
         for tile in combine_tiles:
             if tile.combine.needs_processing() or tile.is_locked:
                 is_ready = False
@@ -219,18 +216,16 @@ def export_tile(tile_info, config, conn_info):
             # need to make a copy first
             # tile_info.geometry, tile_info.tile = None, None
             # full_db = create_world_db(config['data_dir'], tile_info, dtype, nav_flag_value)
-            if interactive_debug and debug_config and max_processes < 2:
-                comp = partial(nbs_survey_sort, sort_dict)
-                combine_and_export(config, tile_info, all_simple_records, comp, decimals)
-                del remaining_tiles[current_tile]
+            if interactive_debug and debug_launch:
+                combine_and_export(config, tile_info, decimals, use_cached_meta)
                 return_process = None
             else:
                 LOGGER.info(f"exporting {tile_info.full_name}")
                 fingerprint = str(tile_info.hash_id) + "_" + datetime.datetime.now().isoformat()
 
-                pid, script_path = launch_export(config._source_filename, env_path=env_path,
-                                          env_name=env_name, tile_id=(tile_info.tile, tile_info.resolution), decimals=decimals, minimized=minimized,
-                                          fingerprint=fingerprint)
+                pid, script_path = launch_export(config._source_filename, env_path=env_path, use_caches=use_cached_meta,
+                                                 env_name=env_name, decimals=decimals, minimized=minimized,
+                                                 fingerprint=fingerprint)
                 running_process = ConsoleProcessTracker(["python", fingerprint, script_path])
                 if running_process.console.last_pid != pid:
                     LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
@@ -287,6 +282,17 @@ def combine_tile(tile_info, config, conn_info, debug_config=False, log_path=""):
             # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
             return_process = TileProcess(running_process, tile_info, fingerprint)
     return return_process
+
+def reached_max_load(tile_processes, max_processes):
+    # #TODO This could also look at free memory and processors to determine if we should start a new process
+    #   but currently we are just looking at the number of processes
+    cnt = 0
+    for process in tile_processes.values():
+        if isinstance(process.tile_info, CombineTileInfo):
+            cnt+=1
+        elif isinstance(process.tile_info, ResolutionTileInfo):
+            cnt+=2
+    return cnt >= max_processes
 
 def main(config):
     """
@@ -346,7 +352,7 @@ def main(config):
 
                 remove_finished_processes(tile_processes, tile_manager)
                 get_refresh = False
-                while len(tile_processes) >= max_processes:  # wait for at least one process to finish
+                while reached_max_load(tile_processes, max_processes):  # wait for at least one process to finish
                     for n in range(5):  # make the keyboard respond more often
                         time.sleep(2)
                         do_keyboard_actions(tile_manager.remaining_tiles, tile_processes)

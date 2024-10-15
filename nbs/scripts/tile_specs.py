@@ -316,6 +316,11 @@ class ResolutionTileInfo(TileInfo):
     def hash_id(self):
         return super().hash_id(), self.resolution  # hash_id(self.resolution)
 
+    def get_related_combine_info(self, conn_info:ConnectionInfo):
+        combine_ids = self.get_related_combine_ids()
+        combine_tiles = CombineTileInfo.get_full_records(conn_info, combine_ids)
+        return combine_tiles
+
     def get_related_combine_ids(self, conn_info:ConnectionInfo):
         conn_copy = ConnectionInfo(CombineTileInfo.SOURCE_DATABASE, conn_info.username, conn_info.password, conn_info.hostname, conn_info.port,
                                     [CombineTileInfo.SOURCE_TABLE])
