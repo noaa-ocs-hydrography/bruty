@@ -10,6 +10,7 @@ import subprocess
 import pathlib
 import shutil
 import traceback
+import logging
 import glob
 from functools import total_ordering
 
@@ -380,6 +381,19 @@ def combine_and_export(config, tile_info, decimals=None, use_caches=False):
     time_format = "%Y%m%d_%H%M%S"
     export_time = datetime.datetime.now().strftime(time_format)
 
+    warnings_log = "''"  # single quotes for postgres
+    info_log = "''"
+    for h in logging.getLogger("nbs").handlers:
+        if isinstance(h, logging.FileHandler):
+            if f"{os.getpid()}.log" in h.baseFilename:
+                info_log = f"'{h.baseFilename}'"  # single quotes for postgres
+            elif f"{os.getpid()}.warn" in h.baseFilename:
+                warnings_log = f"'{h.baseFilename}'"
+
+    tile_info.update_table_record(**{tile_info.export.START_TIME: "NOW()", tile_info.export.TRIES: f"COALESCE({tile_info.combine.TRIES}, 0) + 1",
+                                     tile_info.combine.DATA_LOCATION: f"'{export_dir}'", tile_info.combine.INFO_LOG: info_log,
+                                     tile_info.combine.WARNINGS_LOG: warnings_log})
+
     # Find the spec_combine records
     # lock them (which will also tell if any are in use)
 
@@ -557,6 +571,8 @@ def combine_and_export(config, tile_info, decimals=None, use_caches=False):
                 make_read_only(fname)
         remove_file(cache_file, allow_permission_fail=True, limit=4, tdelay=15)
         remove_file(cache_file.replace(".tif", ".score.tif"), allow_permission_fail=True, limit=4, tdelay=15)
+    tile_info.update_table_record(**{tile_info.combine.END_TIME: "NOW()", tile_info.combine.EXIT_CODE: ret})
+    tile_info.release_lock()
     return ret_code
 
 

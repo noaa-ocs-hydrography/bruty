@@ -32,6 +32,42 @@ _debug = False
 ogr.UseExceptions()
 LOGGER = get_logger('nbs.bruty.create_tiles')
 
+
+class SQLConnectionAndCursor:
+    """ This is to speed up some operations by supplying a cursor rather than making a connection which cost about 3 seconds per new connection. """
+    def __init__(self, conn_info_or_cursor: (ConnectionInfo, (psycopg2.extensions.connection, psycopg2.extras.DictCursor), dict)):
+        """ Accepts a ConnectionInfo object or a tuple of connection and cursor or a dictionary that can be used to create a ConnectionInfo object.
+
+        Creates attributes of conn and cursor based on the input.
+
+        Parameters
+        ----------
+        conn_info_or_cursor
+        """
+        try:  # a dict or configparse object that acts like a dict
+            conn_info = connect_params_from_config(conn_info_or_cursor)
+        except KeyError:  # either a ConnectionInfo object or a tuple of connection and cursor
+            conn_info = conn_info_or_cursor
+        try:
+            # @TODO allow for variable SOURCE_DATABASE locations
+            conn_copy = ConnectionInfo(CombineTileInfo.SOURCE_DATABASE, conn_info.username, conn_info.password, conn_info.hostname,
+                                       conn_info.port, [])
+            self.conn, self.cursor = connection_with_retries(conn_copy)
+        except AttributeError:  # must be a tuple
+            if isinstance(conn_info_or_cursor[1], psycopg2.extras.DictCursor):
+                self.conn, self.cursor = conn_info_or_cursor
+            else:
+                raise ValueError("The arguement was not recognized as a way to connect to a sql database\nAccepts a configparse, dictionary, (connection, cursor) or ConnectionInfo object.")
+
+    @classmethod
+    def from_info(cls, info):
+        """ passes through if already a SQLConnectionAndCursor object, otherwise creates a new one from cls.__init__"""
+        if isinstance(info, cls):
+            return info
+        else:
+            return cls(info)
+
+
 class BrutyOperation:
     OPERATION = ''
     START_TIME = 'start_time'
@@ -57,7 +93,7 @@ class BrutyOperation:
         self.info_log = record.get(self.INFO_LOG, None)
         self.data_location = record.get(self.DATA_LOCATION, None)
 
-    def needs_processing(self, operation_type, max_retries=3):
+    def needs_processing(self):
         process = False
         if self.request_time is not None:
             if self.start_time is None or self.end_time is None:
@@ -104,6 +140,8 @@ class TileInfo:
     SOURCE_DATABASE = "tile_specifications"
     SOURCE_TABLE = "spec_tiles"
     JOINED_TABLE = "spec_tiles"
+    IS_LOCKED = 'is_locked'
+    LOCK_QUERY = f"""(SELECT (ctid NOT IN (SELECT ctid FROM {SOURCE_TABLE} FOR UPDATE SKIP LOCKED))) as {IS_LOCKED}"""
 
     PB = 'production_branch'
     UTM = 'utm'
@@ -117,14 +155,12 @@ class TileInfo:
     EXPORT_NAVIGATION = 'combine_navigation'
     BUILD = 'build'
     TILE_ID = 't_id'
-    IS_LOCKED = 'is_locked'
     PRIMARY_KEY = TILE_ID
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
         #   and make a different init not based on the combine_spec table layout
-        self.conn = None
-        self.cursor = None
+        self.sql_obj = None
         self.read_record(**review_tile)
 
     def read_record(self, **review_tile):
@@ -147,7 +183,7 @@ class TileInfo:
         self.is_locked = review_tile.get(self.IS_LOCKED, None)
         self.pk = review_tile[self.PRIMARY_KEY]
 
-    def refresh_lock_status(self, conn_info_or_cursor:(ConnectionInfo, psycopg2.extras.DictCursor)):
+    def refresh_lock_status(self, sql_info):
         """ Update the self.is_locked value based on the database - if the record is not found then is_locked will be set to None
 
         Parameters
@@ -158,7 +194,7 @@ class TileInfo:
         -------
 
         """
-        locks = self.check_locks(conn_info_or_cursor, self.pk)
+        locks = self.check_locks(sql_info, self.pk)
         try:
             self.is_locked = locks[0][self.IS_LOCKED]
         except IndexError:
@@ -166,7 +202,7 @@ class TileInfo:
         return self.is_locked
 
     @classmethod
-    def from_table(cls, connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), pk_id, database=None, table=None):
+    def from_table(cls, sql_info, pk_id, table=None):
         """ Reads a records from the JOINED_TABLE based on the primary key and returns a TileInfo object
         Parameters
         ----------
@@ -179,21 +215,15 @@ class TileInfo:
         -------
 
         """
-        if database is None:
-            database = cls.SOURCE_DATABASE
         if table is None:
             table = cls.JOINED_TABLE
-        if isinstance(connection_info, ConnectionInfo):
-            conn_info = ConnectionInfo(database, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [table])
-            conn, cursor = connection_with_retries(conn_info)
-        else:
-            cursor = connection_info
-        cursor.execute(f"""SELECT * from {table} WHERE {cls.PRIMARY_KEY}={pk_id}""",)
-        record = cursor.fetchone()
+        sql_obj = SQLConnectionAndCursor.from_info(sql_info)
+        sql_obj.cursor.execute(f"""SELECT * from {table} WHERE {cls.PRIMARY_KEY}={pk_id}""",)
+        record = sql_obj.cursor.fetchone()
         return cls(**record)
 
     @classmethod
-    def check_locks(cls, conn_info_or_cursor:(ConnectionInfo, psycopg2.extras.DictCursor), pk_vals):
+    def check_locks(cls, sql_info, pk_vals):
         """ Check the lock status of multiple records
         Parameters
         ----------
@@ -206,32 +236,25 @@ class TileInfo:
         -------
 
         """
-        records = cls._get_records(conn_info_or_cursor, pk_vals, f"{cls.PRIMARY_KEY}", cls.SOURCE_TABLE)
+        records = cls._get_records(sql_info, pk_vals, f"{cls.PRIMARY_KEY}", cls.SOURCE_TABLE)
         return records
 
     @classmethod
-    def _get_records(cls, conn_info_or_cursor:(ConnectionInfo, psycopg2.extras.DictCursor), pk_vals, select, table):
-        if isinstance(conn_info_or_cursor, ConnectionInfo):
-            conn_info = conn_info_or_cursor
-            conn_copy = ConnectionInfo(cls.SOURCE_DATABASE, conn_info.username, conn_info.password, conn_info.hostname, conn_info.port,
-                                        [cls.SOURCE_TABLE])
-            conn, cursor = connection_with_retries(conn_copy)
-        else:
-            cursor = conn_info_or_cursor
-        lock_query = lock_column_query(cls.SOURCE_TABLE, "MYTABLE", True)
+    def _get_records(cls, sql_info, pk_vals, select, table):
+        sql_obj = SQLConnectionAndCursor.from_info(sql_info)
         # This is very similar to the combine_spec_view except we are getting the geometry_buffered and its SRID which are not in the view because of QGIS performance
         # Actually it seems that when querying the whole table it's significantly faster to get less columns, so just get the critical ones then query the rest when needed.
         # The killer is the geometry, a query without geometry is taking 0.5 seconds, with geometry it's taking 25 seconds
         # Using the time comparison as SQL would take a 0.6 second query to 13 seconds
         # SELECT B.*, R.*, ST_SRID(geometry_buffered), TI.*, {lock_query}
-        cursor.execute(f"""SELECT *, {lock_query} 
-                           FROM {cls.JOINED_TABLE} MYTABLE
+        sql_obj.cursor.execute(f"""SELECT *, {cls.LOCK_QUERY} 
+                           FROM {cls.JOINED_TABLE} 
                            WHERE {cls.PRIMARY_KEY} IN (%s)
                            """, (pk_vals,))
-        records = cursor.fetchall()
+        records = sql_obj.cursor.fetchall()
 
     @classmethod
-    def get_full_records(cls, conn_info_or_cursor:(ConnectionInfo, psycopg2.extras.DictCursor), pk_vals):
+    def get_full_records(cls, sql_info, pk_vals):
         """ Check the lock status of multiple records
         Parameters
         ----------
@@ -244,7 +267,7 @@ class TileInfo:
         -------
 
         """
-        records = cls._get_records(conn_info_or_cursor, pk_vals, "*", cls.JOINED_TABLE)
+        records = cls._get_records(sql_info, pk_vals, "*", cls.JOINED_TABLE)
         return [cls(**record) for record in records]
 
 
@@ -260,32 +283,33 @@ class TileInfo:
         return "_".join([self.pb, self.locality, f"utm{self.utm}{self.hemi}", self.datum])
 
     def acquire_lock(self, conn_info):
-        """ Acquire a lock on the record in the database.
+        """ Acquire a lock on the record in the database using a NEW connection (can't pass an existing connection).
+        This is because if close() or commit()) is called on the connection then the lock is released.
         If successful, it will return the connection and cursor and update the record with the full record.
         If not, it will raise a BaseLockException.
         """
-        conn_copy = ConnectionInfo(CombineTileInfo.SOURCE_DATABASE, conn_info.username, conn_info.password, conn_info.hostname, conn_info.port,
-                                    [CombineTileInfo.SOURCE_TABLE])
-        self.conn, self.cursor = connection_with_retries(conn_copy, autocommit=False)
-        self.cursor.execute(f"""SELECT * FROM {self.SOURCE_TABLE} WHERE {self.PRIMARY_KEY}=%s FOR UPDATE SKIP LOCKED""", (self.pk,))
-        record = self.cursor.fetchone()
+        if isinstance(conn_info, ConnectionInfo):
+            self.sql_obj = SQLConnectionAndCursor(conn_info)
+        else:
+            raise ValueError("The connection info must be a ConnectionInfo object")
+        self.sql_obj.cursor.execute(f"""SELECT * FROM {self.SOURCE_TABLE} WHERE {self.PRIMARY_KEY}=%s FOR UPDATE SKIP LOCKED""", (self.pk,))
+        record = self.sql_obj.cursor.fetchone()
         if record is None:
             self.release_lock()
             full_info = None
             raise BaseLockException(f"Failed to acquire lock for {self} where PK={self.pk}")
         else:
-            self.cursor.execute(f"""SELECT * FROM {self.JOINED_TABLE} WHERE {self.PRIMARY_KEY}=%s""", (self.pk,))
-            record = self.cursor.fetchone()
+            self.sql_obj.cursor.execute(f"""SELECT * FROM {self.JOINED_TABLE} WHERE {self.PRIMARY_KEY}=%s""", (self.pk,))
+            record = self.sql_obj.cursor.fetchone()
             # udpate to the full record in case it was a partial record
             self.read_record(**record)
-        return self.conn, self.cursor
+        return self.sql_obj.conn, self.sql_obj.cursor
 
     def release_lock(self):
-        if self.conn is not None:
-            self.conn.commit()
-            self.conn.close()
-            self.conn = None
-        self.cursor = None
+        if self.sql_obj is not None:
+            self.sql_obj.conn.commit()
+            self.sql_obj.close()
+            self.sql_obj = None
 
 
 class ResolutionTileInfo(TileInfo):
@@ -296,6 +320,7 @@ class ResolutionTileInfo(TileInfo):
     TILE_ID = 'tile_id'
     PRIMARY_KEY = RESOLUTION_ID
     JOINED_TABLE = f"{SOURCE_TABLE} R JOIN {TileInfo.SOURCE_TABLE} TI ON (R.{TILE_ID}=TI.{TileInfo.PRIMARY_KEY})"
+    LOCK_QUERY = f"""(SELECT (R.ctid NOT IN (SELECT ctid FROM {SOURCE_TABLE} FOR UPDATE SKIP LOCKED))) as {TileInfo.IS_LOCKED}"""
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
@@ -341,14 +366,14 @@ class ResolutionTileInfo(TileInfo):
         # lock the current record in the spec_resolutions table and set up a connection+cursor
         self.acquire_lock(conn_info)
         # lock all the spec_combines that this resolution would affect
-        all_ids = self.get_related_combine_ids(self.cursor)
-        self.cursor.execute(f"""SELECT * FROM {CombineTileInfo.SOURCE_TABLE} WHERE {CombineTileInfo.RESOLUTION_ID}=%s FOR UPDATE SKIP LOCKED""", (self.pk,))
-        records = self.cursor.fetchall()
+        all_ids = self.get_related_combine_ids(self.sql_obj.cursor)
+        self.sql_obj.cursor.execute(f"""SELECT * FROM {CombineTileInfo.SOURCE_TABLE} WHERE {CombineTileInfo.RESOLUTION_ID}=%s FOR UPDATE SKIP LOCKED""", (self.pk,))
+        records = self.sql_obj.cursor.fetchall()
         if len(records) != len(all_ids):
             self.release_lock()
             full_info = None
             raise BaseLockException(f"Failed to acquire all locks for {self} (PK={self.pk}) related combine records {all_ids}")
-        return self.conn, self.cursor
+        return self.sql_obj.conn, self.sql_obj.cursor
 
 
 
@@ -450,6 +475,7 @@ class CombineTileInfo(ResolutionTileInfo):
     PRIMARY_KEY = COMBINE_ID
     JOINED_TABLE = f"""{SOURCE_TABLE} C JOIN {ResolutionTileInfo.SOURCE_TABLE} R ON (C.{RESOLUTION_ID}=R.{ResolutionTileInfo.PRIMARY_KEY}) 
                         JOIN {TileInfo.SOURCE_TABLE} TI ON (R.{ResolutionTileInfo.TILE_ID}=TI.{TileInfo.PRIMARY_KEY})"""
+    LOCK_QUERY = f"""(SELECT (C.ctid NOT IN (SELECT ctid FROM {SOURCE_TABLE} FOR UPDATE SKIP LOCKED))) as {TileInfo.IS_LOCKED}"""
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
@@ -500,9 +526,9 @@ class CombineTileInfo(ResolutionTileInfo):
         #     conn, cursor = connection_with_retries(conn_info)
         # else:
         #     cursor = connection_info
-        if not self.cursor:
+        if not self.sql_obj:
             raise BaseLockException("No cursor to update the table")
-        pg_update(self.cursor, self.SOURCE_TABLE, where, **kwargs)
+        pg_update(self.sql_obj.cursor, self.SOURCE_TABLE, where, **kwargs)
 
     def update_table_record(self, **kwargs):
         where = {self.COMBINE_ID: self.combine_id}
@@ -710,7 +736,7 @@ def lock_column_query(table_name, alias, do_lookup=True, col_name=TileInfo.IS_LO
         lock_column = f"False as {col_name}"
     return lock_column
 
-def get_export_records(config, needs_to_process=False, get_lock_status=True, max_retries=3):
+def get_export_records(config, needs_to_process=False, max_retries=3, sql_info=None):
     """
     Parameters
     ----------
@@ -724,35 +750,37 @@ def get_export_records(config, needs_to_process=False, get_lock_status=True, max
     -------
 
     """
-    conn_info = connect_params_from_config(config)
-    conn_info.database = TileInfo.SOURCE_DATABASE
-    connection, cursor = connection_with_retries(conn_info)
+    if sql_info is None:
+        sql_obj = SQLConnectionAndCursor(config)
+    else:
+        sql_obj = SQLConnectionAndCursor.from_info(sql_info)
     conditions = basic_conditions(config)
     if needs_to_process:
         conditions.append(needs_processing_condition(ExportOperation, max_retries=max_retries))
     where_clause = "\nAND ".join(conditions)  # a comment at the end was making this fail, so put a leading newline
     if where_clause:
         where_clause = " WHERE " + where_clause
-    lock_query = lock_column_query(ResolutionTileInfo.SOURCE_TABLE, "R", get_lock_status)
     # This is the tiles with their resolutions and the SRID is based on geometry_buffered
     # SELECT R.*, ST_SRID(geometry_buffered), TI.*, {lock_query}
     # Querying the geometry is very slow - do a query when we need that specific record
     # and doing the time check in python is faster than doing it in SQL
-    cursor.execute(f"""SELECT {TileInfo.TILE}, {TileInfo.UTM}, {TileInfo.PB},{TileInfo.DATUM}, {TileInfo.LOCALITY}, {TileInfo.HEMISPHERE},
+    # @NOTE we must use the same alias for the spec_resolutions table as the JOINED_TABLE string since that is what the LOCK_QUERY is looking for
+    # Making a connection to the database is taking about 3 seconds while the query is taking 0.2 seconds -- so adding an option to supply and open cursor
+    sql_obj.cursor.execute(f"""SELECT {TileInfo.TILE}, {TileInfo.UTM}, {TileInfo.PB},{TileInfo.DATUM}, {TileInfo.LOCALITY}, {TileInfo.HEMISPHERE},
                             {TileInfo.EXPORT_PUBLIC}, {TileInfo.EXPORT_INTERNAL}, {TileInfo.EXPORT_NAVIGATION}, {TileInfo.PRIORITY}, {TileInfo.BUILD},
                             {ExportOperation.START_TIME}, {ExportOperation.END_TIME}, {ExportOperation.EXIT_CODE}, {ExportOperation.TRIES}, {ExportOperation.REQUEST_TIME},
                             {ResolutionTileInfo.RESOLUTION}, {ResolutionTileInfo.CLOSING_DISTANCE}, {ResolutionTileInfo.PRIMARY_KEY}, 
-                            {lock_query} 
+                            {ResolutionTileInfo.LOCK_QUERY} 
                        FROM spec_resolutions R 
                        JOIN spec_tiles TI ON (R.tile_id = TI.t_id)
                        {where_clause}
                        ORDER BY priority DESC, tile ASC
                        """)
-    records = cursor.fetchall()
-    connection.close()
+    records = sql_obj.cursor.fetchall()
     return records
 
-def get_combine_records(config, needs_to_process=False, get_lock_status=True, max_retries=3):
+
+def get_combine_records(config, needs_to_process=False, get_lock_status=True, max_retries=3, sql_info=None):
     """ Read the NBS postgres tile_specifications database for the bruty_tile table and, if not existing,
     create Bruty databases for the area of interest for the polygon listed in the postgres table.
 
@@ -763,16 +791,20 @@ def get_combine_records(config, needs_to_process=False, get_lock_status=True, ma
         This is very slow in SQL, so it's better to do this in python
     get_lock_status
     max_retries
+    conn_info_or_cursor
+        If None, then the connection will be made based on the config settings.
+        If a dict cursor is supplied then it will be used.
+        If a ConnectionInfo object, then a connection will be made based on that object.
 
     Returns
     -------
 
     """
     dtypes = parse_multiple_values(config.get('dtypes', ""))
-
-    conn_info = connect_params_from_config(config)
-    conn_info.database = TileInfo.SOURCE_DATABASE
-    connection, cursor = connection_with_retries(conn_info)
+    if sql_info is None:
+        sql_obj = SQLConnectionAndCursor(config)
+    else:
+        sql_obj = SQLConnectionAndCursor.from_info(sql_info)
     # tile specs are now being held in views, so we have to read the combine_specs table
     # then read the geometry from the view of the equivalent area/records
     # grab them all at run time so that if records are changed during the run we at least know all the geometries should have been from the run time
@@ -784,39 +816,38 @@ def get_combine_records(config, needs_to_process=False, get_lock_status=True, ma
     where_clause = "\nAND ".join(conditions)  # a comment at the end was making this fail, so put a leading newline
     if where_clause:
         where_clause = " WHERE " + where_clause
-    lock_query = lock_column_query(CombineTileInfo.SOURCE_TABLE, "B", get_lock_status)
     # This is very similar to the combine_spec_view except we are getting the geometry_buffered and its SRID which are not in the view because of QGIS performance
     # Actually it seems that when querying the whole table it's significantly faster to get less columns, so just get the critical ones then query the rest when needed.
     # The killer is the geometry, a query without geometry is taking 0.5 seconds, with geometry it's taking 25 seconds
     # Using the time comparison as SQL would take a 0.6 second query to 13 seconds
-    # SELECT B.*, R.*, ST_SRID(geometry_buffered), TI.*, {lock_query}
-    cursor.execute(f"""SELECT {TileInfo.TILE}, {TileInfo.UTM}, {TileInfo.PB},{TileInfo.DATUM}, {TileInfo.LOCALITY}, {TileInfo.HEMISPHERE}, 
+    # Making a connection to the database is taking about 3 seconds while the query is taking 0.2 seconds -- so adding an option to supply and open cursor
+    # @NOTE we must use the same alias for the spec_resolutions table as the JOINED_TABLE string since that is what the LOCK_QUERY is looking for
+    sql_obj.cursor.execute(f"""SELECT {TileInfo.TILE}, {TileInfo.UTM}, {TileInfo.PB},{TileInfo.DATUM}, {TileInfo.LOCALITY}, {TileInfo.HEMISPHERE}, 
                             {TileInfo.PRIORITY}, {TileInfo.BUILD},
                             {CombineOperation.START_TIME}, {CombineOperation.END_TIME}, {CombineOperation.EXIT_CODE}, {CombineOperation.TRIES}, {CombineOperation.REQUEST_TIME},
                             {ResolutionTileInfo.RESOLUTION}, 
                             {CombineTileInfo.DATATYPE}, {CombineTileInfo.FOR_NAV}, {CombineTileInfo.PRIMARY_KEY},  
-                            {lock_query} 
-                       FROM {CombineTileInfo.SOURCE_TABLE} B 
-                       JOIN {ResolutionTileInfo.SOURCE_TABLE} R ON (B.res_id = R.r_id) 
+                            {CombineTileInfo.LOCK_QUERY} 
+                       FROM {CombineTileInfo.SOURCE_TABLE} C 
+                       JOIN {ResolutionTileInfo.SOURCE_TABLE} R ON (C.res_id = R.r_id) 
                        JOIN {TileInfo.SOURCE_TABLE} TI ON (R.tile_id = TI.t_id)
                        {where_clause}
                        ORDER BY priority DESC, tile ASC
                        """)
-    records = cursor.fetchall()
-    connection.close()
+    records = sql_obj.cursor.fetchall()
     return records
 
-def iterate_export_table(config, needs_to_process=False, get_lock_status=True, max_retries=3):
-    records = get_export_records(config, get_lock_status=get_lock_status, max_retries=max_retries)
+def iterate_export_table(config, needs_to_process=False, max_retries=3, sql_info=None):
+    records = get_export_records(config, max_retries=max_retries, sql_info=sql_info)
     for review_tile in records:
         info = ResolutionTileInfo(**review_tile)
-        if not needs_to_process or (info.needs_processing() and info.export.tries < max_retries):
+        if not needs_to_process or (info.export.needs_processing() and (info.export.tries is None or info.export.tries < max_retries)):
             yield info
 
-def iterate_combine_table(config, needs_to_process=False, get_lock_status=True, max_retries=3):
-    records = get_combine_records(config, get_lock_status=get_lock_status, max_retries=max_retries)
+def iterate_combine_table(config, needs_to_process=False, max_retries=3, sql_info=None):
+    records = get_combine_records(config, max_retries=max_retries, sql_info=sql_info)
     for review_tile in records:
         info = CombineTileInfo(**review_tile)
-        if not needs_to_process or (info.needs_processing() and info.combine.tries < max_retries):
+        if not needs_to_process or (info.combine.needs_processing() and (info.combine.tries is None or info.combine.tries < max_retries)):
             yield info
 
