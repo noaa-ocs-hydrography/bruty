@@ -147,7 +147,7 @@ class TileInfo:
         self.is_locked = review_tile.get(self.IS_LOCKED, None)
         self.pk = review_tile[self.PRIMARY_KEY]
 
-    def refresh_lock_status(self, conn_info:ConnectionInfo):
+    def refresh_lock_status(self, conn_info_or_cursor:(ConnectionInfo, psycopg2.extras.DictCursor)):
         """ Update the self.is_locked value based on the database - if the record is not found then is_locked will be set to None
 
         Parameters
@@ -158,7 +158,7 @@ class TileInfo:
         -------
 
         """
-        locks = self.check_locks(conn_info, self.pk)
+        locks = self.check_locks(conn_info_or_cursor, self.pk)
         try:
             self.is_locked = locks[0][self.IS_LOCKED]
         except IndexError:
@@ -193,7 +193,7 @@ class TileInfo:
         return cls(**record)
 
     @classmethod
-    def check_locks(cls, conn_info:ConnectionInfo, pk_vals):
+    def check_locks(cls, conn_info_or_cursor:(ConnectionInfo, psycopg2.extras.DictCursor), pk_vals):
         """ Check the lock status of multiple records
         Parameters
         ----------
@@ -206,14 +206,18 @@ class TileInfo:
         -------
 
         """
-        records = cls._get_records(conn_info, pk_vals, f"{cls.PRIMARY_KEY}", cls.SOURCE_TABLE)
+        records = cls._get_records(conn_info_or_cursor, pk_vals, f"{cls.PRIMARY_KEY}", cls.SOURCE_TABLE)
         return records
 
     @classmethod
-    def _get_records(cls, conn_info:ConnectionInfo, pk_vals, select, table):
-        conn_copy = ConnectionInfo(cls.SOURCE_DATABASE, conn_info.username, conn_info.password, conn_info.hostname, conn_info.port,
-                                    [cls.SOURCE_TABLE])
-        conn, cursor = connection_with_retries(conn_copy)
+    def _get_records(cls, conn_info_or_cursor:(ConnectionInfo, psycopg2.extras.DictCursor), pk_vals, select, table):
+        if isinstance(conn_info_or_cursor, ConnectionInfo):
+            conn_info = conn_info_or_cursor
+            conn_copy = ConnectionInfo(cls.SOURCE_DATABASE, conn_info.username, conn_info.password, conn_info.hostname, conn_info.port,
+                                        [cls.SOURCE_TABLE])
+            conn, cursor = connection_with_retries(conn_copy)
+        else:
+            cursor = conn_info_or_cursor
         lock_query = lock_column_query(cls.SOURCE_TABLE, "MYTABLE", True)
         # This is very similar to the combine_spec_view except we are getting the geometry_buffered and its SRID which are not in the view because of QGIS performance
         # Actually it seems that when querying the whole table it's significantly faster to get less columns, so just get the critical ones then query the rest when needed.
@@ -227,7 +231,7 @@ class TileInfo:
         records = cursor.fetchall()
 
     @classmethod
-    def get_full_records(cls, conn_info:ConnectionInfo, pk_vals):
+    def get_full_records(cls, conn_info_or_cursor:(ConnectionInfo, psycopg2.extras.DictCursor), pk_vals):
         """ Check the lock status of multiple records
         Parameters
         ----------
@@ -240,7 +244,7 @@ class TileInfo:
         -------
 
         """
-        records = cls._get_records(conn_info, pk_vals, "*", cls.JOINED_TABLE)
+        records = cls._get_records(conn_info_or_cursor, pk_vals, "*", cls.JOINED_TABLE)
         return [cls(**record) for record in records]
 
 
@@ -316,29 +320,34 @@ class ResolutionTileInfo(TileInfo):
     def hash_id(self):
         return super().hash_id(), self.resolution  # hash_id(self.resolution)
 
-    def get_related_combine_info(self, conn_info:ConnectionInfo):
-        combine_ids = self.get_related_combine_ids()
-        combine_tiles = CombineTileInfo.get_full_records(conn_info, combine_ids)
+    def get_related_combine_info(self, conn_info_or_cursor:(ConnectionInfo, psycopg2.extras.DictCursor)):
+        combine_ids = self.get_related_combine_ids(conn_info_or_cursor)
+        combine_tiles = CombineTileInfo.get_full_records(conn_info_or_cursor, combine_ids)
         return combine_tiles
 
-    def get_related_combine_ids(self, conn_info:ConnectionInfo):
-        conn_copy = ConnectionInfo(CombineTileInfo.SOURCE_DATABASE, conn_info.username, conn_info.password, conn_info.hostname, conn_info.port,
-                                    [CombineTileInfo.SOURCE_TABLE])
-        conn, cursor = connection_with_retries(conn_copy)
+    def get_related_combine_ids(self, conn_info_or_cursor:(ConnectionInfo, psycopg2.extras.DictCursor)):
+        if isinstance(conn_info_or_cursor, ConnectionInfo):
+            conn_info = conn_info_or_cursor
+            conn_copy = ConnectionInfo(CombineTileInfo.SOURCE_DATABASE, conn_info.username, conn_info.password, conn_info.hostname, conn_info.port,
+                                        [CombineTileInfo.SOURCE_TABLE])
+            conn, cursor = connection_with_retries(conn_copy)
+        else:
+            cursor = conn_info_or_cursor
         cursor.execute(f"""SELECT {CombineTileInfo.COMBINE_ID} FROM {CombineTileInfo.SOURCE_TABLE} WHERE {CombineTileInfo.RESOLUTION_ID}=%s""", (self.pk,))
         records = cursor.fetchall()
         return [r[CombineTileInfo.COMBINE_ID] for r in records]
 
-    def acquire_lock_and_combine_locks(self, conn_info):
+    def acquire_lock_and_combine_locks(self, conn_info: ConnectionInfo):
         # lock the current record in the spec_resolutions table and set up a connection+cursor
         self.acquire_lock(conn_info)
         # lock all the spec_combines that this resolution would affect
+        all_ids = self.get_related_combine_ids(self.cursor)
         self.cursor.execute(f"""SELECT * FROM {CombineTileInfo.SOURCE_TABLE} WHERE {CombineTileInfo.RESOLUTION_ID}=%s FOR UPDATE SKIP LOCKED""", (self.pk,))
-        record = self.cursor.fetchone()
-        if record is None:
+        records = self.cursor.fetchall()
+        if len(records) != len(all_ids):
             self.release_lock()
             full_info = None
-            raise BaseLockException(f"Failed to acquire lock for {self} where PK={self.pk}")
+            raise BaseLockException(f"Failed to acquire all locks for {self} (PK={self.pk}) related combine records {all_ids}")
         return self.conn, self.cursor
 
 
@@ -456,6 +465,9 @@ class CombineTileInfo(ResolutionTileInfo):
         self.combine = CombineOperation(review_tile)
         self.out_of_date = review_tile.get(self.OUT_OF_DATE, None)
         self.summary = review_tile.get(self.SUMMARY, None)
+        self.data_location = review_tile.get(self.DATA_LOCATION, None)
+        # self.res_foreign_key = review_tile.get(self.RESOLUTION_ID, None)  # this will be in the ResolutionTileInfo as res_tile_id
+
 
     def __repr__(self):
         return super().__repr__()+f"_{self.datatype}_{'nav' if self.for_nav else 'NOT_NAV'}"

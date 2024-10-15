@@ -33,6 +33,12 @@ INTERNAL = 'Internal'
 
 NBS_ID_STR = "nbs_id"
 
+SCORING_METADATA_COLUMNS = [NBS_ID_STR, 'from_filename', 'script_to_filename', 'manual_to_filename', 'for_navigation', 'never_post', 'decay_score',
+                            'script_resolution', 'manual_resolution', 'script_point_spacing', 'manual_point_spacing']
+TRANSFORM_METADATA_COLUMNS = [NBS_ID_STR, 'manual_to_horiz_frame', 'script_to_horiz_frame', 'manual_to_horiz_type', 'script_to_horiz_type', 'manual_to_horiz_key', 'script_to_horiz_key',
+                              'manual_vert_uncert_fixed', 'script_vert_uncert_fixed', 'manual_vert_uncert_vari', 'script_vert_uncert_vari']
+
+
 # @TODO replace hardcoded strings with these variables
 TILES_TABLE = "combine_spec_tiles"
 RESOLUTIONS_TABLE = "combine_spec_resolutions"
@@ -454,54 +460,45 @@ def show_last_ids(cursor, tablenames):
 #     cursor.execute(f"UPDATE {tablename} SET {col_name} = DEFAULT")
 #     connection.commit()
 
-def get_nbs_records(table_name, conn_info, geom_name=None, order="", query_fields=None, exclude_fields=None, where_clause=""):
+
+
+def get_nbs_records(table_name, conn_info_or_cursor:(ConnectionInfo, psycopg2.extras.DictCursor), geom_name=None, order="", query_fields=None, exclude_fields=None, where_clause=""):
     """ Supply a geom_name to get a value for ST_SRID({geom_name}) at the end of each sql record,
      which can be used to determine the spatial reference system used.
 
      where_clause will have the keyword WHERE to the beginning so just supply the condition, e.g. "nbs_id IN (1,2,3) AND utm=19"
     """
-    if _debug and conn_info.hostname is None:
-        import pickle
-        f = open(fr"C:\data\nbs\{table_name}.pickle", 'rb')
-        records = pickle.load(f)
-        fields = pickle.load(f)
-        ## trim back the records to a few for testing
-        # print("Thinning survey records for debugging!!!!")
-        # filename_col = fields.index('from_filename')
-        # id_col = fields.index('nbs_id')
-        # thinned_records = []
-        # for rec in records:
-        #     if rec[id_col] in (12657, 12203, 12772, 10470, 10390):
-        #         thinned_records.append(rec)
-        # records = thinned_records
+    if isinstance(conn_info_or_cursor, ConnectionInfo):
+        conn, cursor = connection_with_retries(conn_info_or_cursor)
     else:
-        connection, cursor = connection_with_retries(conn_info)
-        if not query_fields:
-            cursor.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name}'")
+        cursor = conn_info_or_cursor
+
+    if not query_fields:
+        cursor.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name}'")
+        cols = cursor.fetchall()
+        if not cols:  # even though the table name is mixed case the information_schema may have lower case in the table_name column
+            cursor.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name.lower()}'")
             cols = cursor.fetchall()
-            if not cols:  # even though the table name is mixed case the information_schema may have lower case in the table_name column
-                cursor.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name.lower()}'")
-                cols = cursor.fetchall()
-            cols_names = [name for lcol in cols for name in lcol]
-        else:
-            cols_names = list(query_fields)
-        if exclude_fields is not None:
-            for exclude in exclude_fields:  # there is a "BigQuery" sql that allows for SELECT * EXCEPT X but we can't use that here yet
-                for n in range(cols_names.count(exclude)):
-                    cols_names.remove(exclude)
-        field_str = ",".join(cols_names)
-        srs = f",ST_SRID({geom_name})" if geom_name else ""
-        if where_clause:
-            where_clause = " WHERE " + where_clause
-        cursor.execute(f'SELECT {field_str}{srs} FROM {table_name} {where_clause} {order}')
-        records = cursor.fetchall()
-        # the DictCursor makes an _index object that is shared by all rows which describes the mapping of name to index.
-        # We will add a tablename entry at the end of the row and add the table_name to every record so it can be accessed later.
-        if records:  # Fixme -- this should have a unittest to make sure this behavior doesn't break in the future
-            records[0]._index['tablename'] = max(list(records[0]._index.values())) + 1
-            for r in records:
-                r.append(table_name)
-        fields = [desc[0] for desc in cursor.description]
+        cols_names = [name for lcol in cols for name in lcol]
+    else:
+        cols_names = list(query_fields)
+    if exclude_fields is not None:
+        for exclude in exclude_fields:  # there is a "BigQuery" sql that allows for SELECT * EXCEPT X but we can't use that here yet
+            for n in range(cols_names.count(exclude)):
+                cols_names.remove(exclude)
+    field_str = ",".join(cols_names)
+    srs = f",ST_SRID({geom_name})" if geom_name else ""
+    if where_clause:
+        where_clause = " WHERE " + where_clause
+    cursor.execute(f'SELECT {field_str}{srs} FROM {table_name} {where_clause} {order}')
+    records = cursor.fetchall()
+    # the DictCursor makes an _index object that is shared by all rows which describes the mapping of name to index.
+    # We will add a tablename entry at the end of the row and add the table_name to every record so it can be accessed later.
+    if records:  # Fixme -- this should have a unittest to make sure this behavior doesn't break in the future
+        records[0]._index['tablename'] = max(list(records[0]._index.values())) + 1
+        for r in records:
+            r.append(table_name)
+    fields = [desc[0] for desc in cursor.description]
     return fields, records
 
 
@@ -515,7 +512,6 @@ class SurveyInfo:
 
     def __repr__(self):
         return f"{self.from_filename}, {self.sid}, {self.data_path}, {self.decay}, {self.resolution}"
-
 
 def id_to_scoring(records_lists, for_navigation_flag=(True, True), never_post_flag=(True, False), exclude=None):
     # @todo finish docs and change fields/records into class instances

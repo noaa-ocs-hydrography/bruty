@@ -31,8 +31,8 @@ from data_management.db_connection import connect_with_retries
 from fuse_dev.fuse.meta_review import meta_review
 from nbs.configs import iter_configs, read_config
 from nbs.bruty.utils import affine, get_crs_transformer, make_mllw_height_wkt, user_action, tqdm, remove_file, iterate_gdal_image, BufferedImageOps, QUIT, HELP
-from nbs.bruty.nbs_postgres import id_to_scoring, get_nbs_records, nbs_survey_sort, ConnectionInfo, connect_params_from_config, make_contributor_csv
-from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, NOT_NAV, INTERNAL, NAVIGATION, PUBLIC, connect_params_from_config, connection_with_retries
+from nbs.bruty.nbs_postgres import id_to_scoring, get_nbs_records, nbs_survey_sort, ConnectionInfo, connection_with_retries, connect_params_from_config
+from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, INTERNAL, NAVIGATION, PUBLIC, SCORING_METADATA_COLUMNS
 from nbs.bruty.world_raster_database import WorldDatabase, use_locks, AdvisoryLock, BaseLockException
 from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
 from nbs.configs import get_logger
@@ -319,18 +319,16 @@ def make_read_only(fname):
         pass
 
 
-def get_metadata(tile_info, conn_info, use_bruty_cached=False):
+def get_metadata(combine_tiles, conn_info, use_bruty_cached=False):
     metadata_fields = []
     metadata_records = []
-    # conn_info.database = "metadata"
-    combine_tiles = tile_info.get_related_combine_info()
-    raise "Fix the dtypes to use the combine_tiles"
-    for dtype in (PREREVIEW, REVIEWED, ENC, GMRT, SENSITIVE):
+    conn, cursor = connection_with_retries(conn_info)
+    for combine_tile in combine_tiles:
         query_database = False
-        tablename = tile_info.metadata_table_name(dtype)
-        if use_bruty_cached and use_caches[dtype]:
-            root_dir = pathlib.Path(use_bruty_cached)
-            db_name = root_dir.joinpath(tile_info.bruty_db_name(dtype, True))
+        tablename = combine_tile.metadata_table_name()
+        if use_bruty_cached:
+            root_dir = pathlib.Path(combine_tile.data_location)
+            db_name = root_dir.joinpath(combine_tile.bruty_db_name())
             cache_fname = pathlib.Path(db_name).joinpath(f"last_used_{conn_info.database}_{tablename}.pickle")
             try:
                 cache_file = open(cache_fname, "rb")
@@ -342,7 +340,7 @@ def get_metadata(tile_info, conn_info, use_bruty_cached=False):
             query_database = True
         if query_database:
             try:
-                mfields, mrecords = get_nbs_records(tablename, conn_info)
+                mfields, mrecords = get_nbs_records(tablename, cursor, query_fields=SCORING_METADATA_COLUMNS)
             except psycopg2.errors.UndefinedTable:
                 print(f"{tablename} doesn't exist.")
                 continue
@@ -367,10 +365,13 @@ def get_metadata(tile_info, conn_info, use_bruty_cached=False):
 
 
 def combine_and_export(config, tile_info, decimals=None, use_caches=False):
+    # conn_info.database = "metadata"
     conn_info = connect_params_from_config(config)
-    all_simple_records, sort_dict = get_metadata(tile_info, conn_info, use_bruty_cached=use_caches)
+    tile_info.acquire_lock_and_combine_locks(conn_info)  # will raise a BaseLockException if the locks can't be acquired
+
+    combine_tiles = tile_info.get_related_combine_info(tile_info.cursor)
+    all_simple_records, sort_dict = get_metadata(combine_tiles, conn_info, use_bruty_cached=use_caches)
     comp = partial(nbs_survey_sort, sort_dict)
-    conn_info = connect_params_from_config(config)
     conn_info_exports = connect_params_from_config(config)
     conn_info_exports.database = config.get('export_database', None)
     conn_info_exports.tablenames = [config.get('export_table', "")]
@@ -383,7 +384,6 @@ def combine_and_export(config, tile_info, decimals=None, use_caches=False):
     # lock them (which will also tell if any are in use)
 
     # lck = AdvisoryLock(all_paths, conn_info, flags=SHARED | NON_BLOCKING)
-    tile_info.acquire_lock_and_combine_locks()
     # lock the resolution record so we can update the export times
 
 
@@ -407,19 +407,16 @@ def combine_and_export(config, tile_info, decimals=None, use_caches=False):
         dataset, dataset_score = None, None
         all_times = []
         root_dir = pathlib.Path(bruty_dir)
-        all_datatypes = [REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT]
-        for datatype in all_datatypes:
-            for nav in (True, False):
-                db_name = root_dir.joinpath(tile_info.bruty_db_name(datatype, nav))
-                try:
-                    db = WorldDatabase.open(db_name)
-                except FileNotFoundError as e:
-                    LOGGER.warning(f"Bruty data not found:\n  {db_name}")
-                else:
-                    if dataset is None:
-                        dataset, dataset_score = setup_export_raster(cache_file, tile_info, db)
-                    all_times.extend([rec.ttime for rec in db.transaction_groups.values() if rec.modified_data])
-                    del db
+        for combine_tile in combine_tiles:
+            try:
+                db = WorldDatabase.open(combine_tile.data_location)
+            except FileNotFoundError as e:
+                LOGGER.warning(f"Bruty data not found:\n  {combine_tile} at {combine_tile.data_location}")
+            else:
+                if dataset is None:
+                    dataset, dataset_score = setup_export_raster(cache_file, tile_info, db)
+                all_times.extend([rec.ttime for rec in db.transaction_groups.values() if rec.modified_data])
+                del db
         if not dataset:
             raise FileNotFoundError(f"No bruty data was found under{root_dir}")
 

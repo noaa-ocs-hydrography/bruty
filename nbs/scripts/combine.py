@@ -23,7 +23,7 @@ from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, Bruty
 from nbs.bruty.world_raster_database import LockNotAcquired, AreaLock, FileLock, BaseLockException, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, Lock, AdvisoryLock
 from nbs.bruty.utils import onerr, user_action, remove_file, QUIT, HELP
 from nbs.configs import get_logger, read_config, log_config, make_family_of_logs, show_logger_handlers, convert_to_logging_level
-from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_metadata, ConnectionInfo, connect_params_from_config
+from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_metadata, ConnectionInfo, connect_params_from_config, SCORING_METADATA_COLUMNS, TRANSFORM_METADATA_COLUMNS
 from nbs.scripts.convert_csar import convert_csar_python
 from nbs.scripts.tile_specs import TileInfo, CombineTileInfo, ResolutionTileInfo, create_world_db, \
     SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION, SQLITE_READ_FAILURE
@@ -141,7 +141,9 @@ def cached_conversion_name(path):
 
 
 def get_postgres_processing_info(world_db_path, conn_info, for_navigation_flag=(True, True), exclude=None):
-    all_fields, all_records = get_records(conn_info, cache_dir=world_db_path)
+    query_fields = set(SCORING_METADATA_COLUMNS)
+    query_fields.update(TRANSFORM_METADATA_COLUMNS)
+    all_fields, all_records = get_records(conn_info, cache_dir=world_db_path, query_fields=query_fields)
     sorted_recs, names_list, sort_dict, comp = get_sorting_info(all_fields, all_records, for_navigation_flag, exclude=exclude)
     transform_metadata = get_transform_metadata(all_fields, all_records)
     if get_call_logger().level != logging.NOTSET:
