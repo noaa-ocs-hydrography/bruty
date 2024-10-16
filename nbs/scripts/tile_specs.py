@@ -46,7 +46,7 @@ class SQLConnectionAndCursor:
         """
         try:  # a dict or configparse object that acts like a dict
             conn_info = connect_params_from_config(conn_info_or_cursor)
-        except KeyError:  # either a ConnectionInfo object or a tuple of connection and cursor
+        except (TypeError, KeyError):  # either a ConnectionInfo object or a tuple of connection and cursor
             conn_info = conn_info_or_cursor
         try:
             # @TODO allow for variable SOURCE_DATABASE locations
@@ -156,6 +156,7 @@ class TileInfo:
     BUILD = 'build'
     TILE_ID = 't_id'
     PRIMARY_KEY = TILE_ID
+    EPSG_QUERY = 'ST_SRID(geometry)'
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
@@ -218,7 +219,7 @@ class TileInfo:
         if table is None:
             table = cls.JOINED_TABLE
         sql_obj = SQLConnectionAndCursor.from_info(sql_info)
-        sql_obj.cursor.execute(f"""SELECT * from {table} WHERE {cls.PRIMARY_KEY}={pk_id}""",)
+        sql_obj.cursor.execute(f"""SELECT *, {cls.EPSG_QUERY} from {table} WHERE {cls.PRIMARY_KEY}={pk_id}""",)
         record = sql_obj.cursor.fetchone()
         return cls(**record)
 
@@ -236,7 +237,7 @@ class TileInfo:
         -------
 
         """
-        records = cls._get_records(sql_info, pk_vals, f"{cls.PRIMARY_KEY}", cls.SOURCE_TABLE)
+        records = cls._get_records(sql_info, pk_vals, f"{cls.PRIMARY_KEY}, {cls.LOCK_QUERY}", cls.JOINED_TABLE)
         return records
 
     @classmethod
@@ -247,11 +248,12 @@ class TileInfo:
         # The killer is the geometry, a query without geometry is taking 0.5 seconds, with geometry it's taking 25 seconds
         # Using the time comparison as SQL would take a 0.6 second query to 13 seconds
         # SELECT B.*, R.*, ST_SRID(geometry_buffered), TI.*, {lock_query}
-        sql_obj.cursor.execute(f"""SELECT *, {cls.LOCK_QUERY} 
-                           FROM {cls.JOINED_TABLE} 
+        sql_obj.cursor.execute(f"""SELECT {select}
+                           FROM {table} 
                            WHERE {cls.PRIMARY_KEY} IN (%s)
                            """, (pk_vals,))
         records = sql_obj.cursor.fetchall()
+        return records
 
     @classmethod
     def get_full_records(cls, sql_info, pk_vals):
@@ -267,7 +269,7 @@ class TileInfo:
         -------
 
         """
-        records = cls._get_records(sql_info, pk_vals, "*", cls.JOINED_TABLE)
+        records = cls._get_records(sql_info, pk_vals, f"*, {cls.EPSG_QUERY}, {cls.LOCK_QUERY}", cls.JOINED_TABLE)
         return [cls(**record) for record in records]
 
 
@@ -299,7 +301,7 @@ class TileInfo:
             full_info = None
             raise BaseLockException(f"Failed to acquire lock for {self} where PK={self.pk}")
         else:
-            self.sql_obj.cursor.execute(f"""SELECT * FROM {self.JOINED_TABLE} WHERE {self.PRIMARY_KEY}=%s""", (self.pk,))
+            self.sql_obj.cursor.execute(f"""SELECT *, {self.EPSG_QUERY} FROM {self.JOINED_TABLE} WHERE {self.PRIMARY_KEY}=%s""", (self.pk,))
             record = self.sql_obj.cursor.fetchone()
             # udpate to the full record in case it was a partial record
             self.read_record(**record)
@@ -308,7 +310,7 @@ class TileInfo:
     def release_lock(self):
         if self.sql_obj is not None:
             self.sql_obj.conn.commit()
-            self.sql_obj.close()
+            self.sql_obj.conn.close()
             self.sql_obj = None
 
 
@@ -321,6 +323,7 @@ class ResolutionTileInfo(TileInfo):
     PRIMARY_KEY = RESOLUTION_ID
     JOINED_TABLE = f"{SOURCE_TABLE} R JOIN {TileInfo.SOURCE_TABLE} TI ON (R.{TILE_ID}=TI.{TileInfo.PRIMARY_KEY})"
     LOCK_QUERY = f"""(SELECT (R.ctid NOT IN (SELECT ctid FROM {SOURCE_TABLE} FOR UPDATE SKIP LOCKED))) as {TileInfo.IS_LOCKED}"""
+    EPSG_QUERY = 'ST_SRID(geometry_buffered)'
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
@@ -371,7 +374,6 @@ class ResolutionTileInfo(TileInfo):
         records = self.sql_obj.cursor.fetchall()
         if len(records) != len(all_ids):
             self.release_lock()
-            full_info = None
             raise BaseLockException(f"Failed to acquire all locks for {self} (PK={self.pk}) related combine records {all_ids}")
         return self.sql_obj.conn, self.sql_obj.cursor
 
@@ -476,6 +478,7 @@ class CombineTileInfo(ResolutionTileInfo):
     JOINED_TABLE = f"""{SOURCE_TABLE} C JOIN {ResolutionTileInfo.SOURCE_TABLE} R ON (C.{RESOLUTION_ID}=R.{ResolutionTileInfo.PRIMARY_KEY}) 
                         JOIN {TileInfo.SOURCE_TABLE} TI ON (R.{ResolutionTileInfo.TILE_ID}=TI.{TileInfo.PRIMARY_KEY})"""
     LOCK_QUERY = f"""(SELECT (C.ctid NOT IN (SELECT ctid FROM {SOURCE_TABLE} FOR UPDATE SKIP LOCKED))) as {TileInfo.IS_LOCKED}"""
+    EPSG_QUERY = 'ST_SRID(geometry_buffered)'
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
@@ -574,11 +577,21 @@ class TileManager:
 
     def __init__(self, config, max_tries, allow_res=False):
         self.config = config
+        self.sql_obj = None
         self.max_tries = max_tries
         self.allow_res = allow_res
         self.user_dtypes, self.user_res = None, None
         self.read_user_settings(self.allow_res)
         self.remaining_tiles = {}
+        self.reconnect()
+
+    def reconnect(self):
+        # drop and reconnect to postgres as part of our refresh
+        try:
+            self.sql_obj.conn.close()
+        except Exception:
+            pass
+        self.sql_obj = SQLConnectionAndCursor.from_info(self.config)
 
     def read_user_settings(self, allow_res=False):
         try:
@@ -598,13 +611,13 @@ class TileManager:
     def refresh_tiles_list(self, needs_combining=False, needs_exporting=False):
         self.remaining_tiles = {}
         if self.process_combines:
-            for tile_info in iterate_combine_table(self.config, needs_to_process=needs_combining, max_retries=self.max_tries):
+            for tile_info in iterate_combine_table(self.config, needs_to_process=needs_combining, max_retries=self.max_tries, sql_info=self.sql_obj):
                 res = tile_info.resolution
                 if self.user_res and res not in self.user_res:
                     continue
                 self.remaining_tiles[tile_info.hash_id()] = tile_info
         if self.process_exports:
-            for tile_info in iterate_export_table(self.config, needs_to_process=needs_exporting, max_retries=self.max_tries):
+            for tile_info in iterate_export_table(self.config, needs_to_process=needs_exporting, max_retries=self.max_tries, sql_info=self.sql_obj):
                 res = tile_info.resolution
                 if self.user_res and res not in self.user_res:
                     continue

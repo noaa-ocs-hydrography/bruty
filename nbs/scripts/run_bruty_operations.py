@@ -259,28 +259,26 @@ def combine_tile(tile_info, config, conn_info, debug_config=False, log_path=""):
     conn_info.tablenames = [tile_info.metadata_table_name()]
     fingerprint = str(tile_info.hash_id()) + "_" + datetime.now().isoformat()
     return_process = None
-    tile_info.refresh_lock_status(conn_info)
-    if not tile_info.is_locked:
-        if debug_launch:
-            setup_call_logger(db_path)
-            # NOTICE -- this function will not write to the combine_spec_view table with the status codes etc.
-            ret = process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=use_nav_flag,
-                                       extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(tile_info.datatype == ENC),
-                                       delete_existing=delete_existing, log_level=log_level)
-            errors = perform_qc_checks(db_path, conn_info, (use_nav_flag, tile_info.for_nav), repair=True, check_last_insert=False)
+    if debug_launch:
+        setup_call_logger(db_path)
+        # NOTICE -- this function will not write to the combine_spec_view table with the status codes etc.
+        ret = process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=use_nav_flag,
+                                   extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(tile_info.datatype == ENC),
+                                   delete_existing=delete_existing, log_level=log_level)
+        errors = perform_qc_checks(db_path, conn_info, (use_nav_flag, tile_info.for_nav), repair=True, check_last_insert=False)
+    else:
+        pid = launch_combine(root_path, tile_info.pk, config._source_filename, conn_info.tablenames, use_navigation_flag=use_nav_flag,
+                             override_epsg=override, extra_debug=debug_config, exclude=exclude, crop=(tile_info.datatype == ENC),
+                             log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
+                             fingerprint=fingerprint, delete_existing=delete_existing, log_level=log_level)
+        running_process = ConsoleProcessTracker(["python", fingerprint, "combine.py"])
+        if running_process.console.last_pid != pid:
+            LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
         else:
-            pid = launch_combine(root_path, tile_info.pk, config._source_filename, conn_info.tablenames, use_navigation_flag=use_nav_flag,
-                                 override_epsg=override, extra_debug=debug_config, exclude=exclude, crop=(tile_info.datatype == ENC),
-                                 log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
-                                 fingerprint=fingerprint, delete_existing=delete_existing, log_level=log_level)
-            running_process = ConsoleProcessTracker(["python", fingerprint, "combine.py"])
-            if running_process.console.last_pid != pid:
-                LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
-            else:
-                LOGGER.debug(f"Started PID {pid} for {tile_info}")
+            LOGGER.debug(f"Started PID {pid} for {tile_info}")
 
-            # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
-            return_process = TileProcess(running_process, tile_info, fingerprint)
+        # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
+        return_process = TileProcess(running_process, tile_info, fingerprint)
     return return_process
 
 def reached_max_load(tile_processes, max_processes):
@@ -364,13 +362,15 @@ def main(config):
 
                 LOGGER.info(f"starting operation for {tile_info}" +
                             f"\n  {len(tile_manager.remaining_tiles)} remain including the {len(tile_processes)} currently running")
-                # CombineTileInfo is a subclass of ResolutionTileInfo so we have to check for the subclass first
-                if isinstance(tile_info, CombineTileInfo):
-                    returned_process = combine_tile(tile_info, config, conn_info, debug_config=debug_config, log_path=log_path)
-                elif isinstance(tile_info, ResolutionTileInfo):
-                    returned_process = export_tile(tile_info, config, conn_info)
-                if returned_process is not None:
-                    tile_processes[tile_info.hash_id()] = returned_process
+                tile_info.refresh_lock_status(tile_manager.sql_obj)
+                if not tile_info.is_locked:
+                    # CombineTileInfo is a subclass of ResolutionTileInfo so we have to check for the subclass first
+                    if isinstance(tile_info, CombineTileInfo):
+                        returned_process = combine_tile(tile_info, config, conn_info, debug_config=debug_config, log_path=log_path)
+                    elif isinstance(tile_info, ResolutionTileInfo):
+                        returned_process = export_tile(tile_info, config, conn_info)
+                    if returned_process is not None:
+                        tile_processes[tile_info.hash_id()] = returned_process
                 # If the tile was locked then we will still remove it and let the next refresh get the tile again
                 tile_manager.remove(tile_info)
             remove_finished_processes(tile_processes, tile_manager)

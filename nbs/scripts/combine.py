@@ -293,7 +293,7 @@ def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=Tr
     except Exception as e:
         if world_raster_database.NO_LOCK:
             try:
-                tile_info.update_table_record(**{tile_info.combine.END_TIME: "NOW()", tile_info.combine.exit_code: UNHANDLED_EXCEPTION})  # using the raw
+                tile_info.update_table_record(**{tile_info.combine.END_TIME: "NOW()", tile_info.combine.EXIT_CODE: UNHANDLED_EXCEPTION})  # using the raw
                 tile_info.release_lock()
             except BaseLockException as lck:
                 pass  # error happened before the lock was acquired
