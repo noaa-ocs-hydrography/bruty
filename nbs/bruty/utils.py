@@ -104,13 +104,15 @@ def get_epsg_or_wkt(srs):
 
 QUIT = "quit"
 HELP = "help"
-
+DETAILS = "details"
 
 def key_to_action(key):
     if key in (b"q", 'q', b'Q', 'Q'):
         user_action = QUIT
     elif key in (b"?", '?'):
         user_action = HELP
+    elif key in (b"!", '!'):
+        user_action = DETAILS
     else:
         user_action = None
     return user_action

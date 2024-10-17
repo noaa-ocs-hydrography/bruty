@@ -28,7 +28,7 @@ from nbs.bruty.exceptions import UserCancelled, BrutyFormatError, BrutyMissingSc
 from nbs.bruty.world_raster_database import LockNotAcquired, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock
 # from nbs.bruty.nbs_locks import LockNotAcquired, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock
 from nbs.bruty.nbs_locks import Lock, AlreadyLocked, LockFlags
-from nbs.bruty.utils import onerr, user_action, popen_kwargs, ConsoleProcessTracker, QUIT, HELP
+from nbs.bruty.utils import onerr, user_action, popen_kwargs, ConsoleProcessTracker, QUIT, HELP, DETAILS
 from nbs.configs import get_logger, run_command_line_configs, parse_multiple_values, show_logger_handlers, get_log_level
 # , iter_configs, set_stream_logging, log_config, parse_multiple_values, make_family_of_logs
 from nbs.bruty.nbs_postgres import ENC, connect_params_from_config
@@ -163,12 +163,13 @@ def launch_combine(root_path, view_pk_id, config_pth, use_navigation_flag=True, 
     ret = proc.pid
     return ret
 
+
 # attribute(@feature, 'combine_start_time') is not NULL and ((attribute(@feature, 'combine_start_time') > attribute(@feature, 'combine_end_time')) or ((attribute(@feature, 'combine_start_time') is not NULL and attribute(@feature, 'combine_end_time') is NULL)))
 def remove_finished_processes(tile_processes, tile_manager):
     for key in list(tile_processes.keys()):
         if not tile_processes[key].console_process.is_running():
             old_tile = tile_processes[key].tile_info
-            operation = "Combine" if isinstance(tile_info, CombineTileInfo) else "Export"
+            operation = "Combine" if isinstance(old_tile, CombineTileInfo) else "Export"
             LOGGER.info(f"{operation} for {old_tile} exited")
             try:
                 tile_manager.remove(old_tile)  # remove the tile from the list of tiles to process in the future
@@ -177,18 +178,22 @@ def remove_finished_processes(tile_processes, tile_manager):
             del tile_processes[key]  # remove the instance from our list of active processes
 
 
-def do_keyboard_actions(remaining_tiles, tile_processes):
+def do_keyboard_actions(tile_manager, tile_processes):
     action = user_action()
     if action == QUIT:
         raise UserCancelled("User pressed keyboard quit")
-    elif action == HELP:
+    elif action in (HELP, DETAILS):
         descr_of_running_processes = '\n'.join([f'{prc.tile_info}' for k, prc in tile_processes.items()])
-        print(f"Remaining tiles: {len(remaining_tiles)}\nCurrently running:{len(tile_processes)}\n{descr_of_running_processes}")
+        print(f"Remaining tiles: {len(tile_manager.remaining_tiles)}\nCurrently running:{len(tile_processes)}\n{descr_of_running_processes}")
+        if action == DETAILS:
+            print(tile_manager.details_str())
+
 
 @dataclass
 class TileRuns:
     info: TileInfo
     count: int
+
 
 def export_tile(tile_info, config, sql_info):
     decimals = config.getint('decimals', None)
@@ -205,7 +210,7 @@ def export_tile(tile_info, config, sql_info):
         return_process = None
     else:
         LOGGER.info(f"exporting {tile_info.full_name}")
-        fingerprint = str(tile_info.hash_id) + "_" + datetime.datetime.now().isoformat()
+        fingerprint = str(tile_info.hash_id) + "_" + datetime.now().isoformat()
 
         pid, script_path = launch_export(config._source_filename, tile_info, use_caches=use_cached_meta,
                                          env_path=env_path, env_name=env_name,
@@ -327,14 +332,13 @@ def main(config):
             while tile_manager.remaining_tiles:
                 tile_info = tile_manager.pick_next_tile(tile_processes)
 
-                do_keyboard_actions(tile_manager.remaining_tiles, tile_processes)
-
+                do_keyboard_actions(tile_manager, tile_processes)
                 remove_finished_processes(tile_processes, tile_manager)
                 get_refresh = False
                 while reached_max_load(tile_processes, max_processes):  # wait for at least one process to finish
                     for n in range(5):  # make the keyboard respond more often
                         time.sleep(2)
-                        do_keyboard_actions(tile_manager.remaining_tiles, tile_processes)
+                        do_keyboard_actions(tile_manager, tile_processes)
                     remove_finished_processes(tile_processes, tile_manager)
                     if is_service:
                         get_refresh = True
@@ -367,6 +371,7 @@ def main(config):
             remove_finished_processes(tile_processes, tile_manager)
             time.sleep(5)  # avoid a fast loop of waiting on combines to finish while the export is still in the queue
             tile_manager.refresh_tiles_list(needs_combining=True, needs_exporting=True)
+            print('.', end='', flush=True)
 
     except UserCancelled:
         pass

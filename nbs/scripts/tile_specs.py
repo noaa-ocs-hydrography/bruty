@@ -683,6 +683,19 @@ class TileManager:
                         if hash not in currently_running:
                             return tile
         return None
+
+    def details_str(self):
+        details = []
+        details.append("Remaining tiles:")
+        for priority in sorted(self.priorities.keys(), reverse=True):
+            details.append(f"\tPriority {priority}:")
+            for pb, pb_vals in self.priorities[priority].items():
+                details.append(f"\t\tProduction Branch {pb}:")
+                for key, tile in pb_vals.items():
+                    operation = "Combine" if isinstance(tile, CombineTileInfo) else "Export"
+                    details.append(f"\t\t\t{operation} {tile}")
+        return "\n".join(details)
+
     def remove(self, tile):
         # The processing loop removes the tile from the remaining_tiles list as part of its processing loop.
         # but if the loop finishes then it refreshes the list and the tile may reappear in the list.
