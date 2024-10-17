@@ -256,7 +256,7 @@ class TileInfo:
 
         # to use the IN operator we need a tuple (not a list) of values
         # if pk_vals isn't iterable then make it a tuple
-        if not hasattr(pk_vals, '__iter__') and not isinstance(pk_vals, str):
+        if not hasattr(pk_vals, '__iter__') or isinstance(pk_vals, str):
             tuple_vals = (pk_vals,)
         else:
             tuple_vals = tuple(pk_vals)
@@ -296,8 +296,15 @@ class TileInfo:
     def base_name(self):
         return "_".join([self.pb, self.locality, f"utm{self.utm}{self.hemi}", self.datum])
 
-    def _set_running(self, bool_val):
-        self.sql_obj.cursor.execute(f"""UPDATE {self.SOURCE_TABLE} SET {self.RUNNING}={bool_val} WHERE {self.PRIMARY_KEY}={self.pk}""", (self.pk,))
+    def _set_running(self, bool_val, set_all=False):
+        """ When called with
+        """
+        if set_all:
+            where = f"WHERE {self.PRIMARY_KEY} IN (SELECT {self.PRIMARY_KEY} FROM {self.SOURCE_TABLE} FOR UPDATE SKIP LOCKED)"
+        else:  # this sets everyone to false except the ones that are locked -- which cleans up any errors
+            where = f"WHERE {self.PRIMARY_KEY}={self.pk}"
+        self.sql_obj.cursor.execute(f"""UPDATE {self.SOURCE_TABLE} SET {self.RUNNING}={bool_val} {where}""")
+        # self.sql_obj.cursor.execute(f"""UPDATE {self.SOURCE_TABLE} SET {self.RUNNING}={bool_val} WHERE {self.PRIMARY_KEY}={self.pk}""")
 
     def acquire_lock(self, conn_info):
         """ Acquire a lock on the record in the database using a NEW connection (can't pass an existing connection).
@@ -326,8 +333,9 @@ class TileInfo:
 
     def release_lock(self):
         if self.sql_obj is not None:
-            self._set_running(False)
             self.sql_obj.conn.commit()
+            self._set_running(False, set_all=True)  # this cleans up any combines that crashed and left the running flag on
+            self.sql_obj.conn.commit()  # autocommit is turned off due to locking needs
             self.sql_obj.conn.close()
             self.sql_obj = None
 
@@ -396,8 +404,12 @@ class ResolutionTileInfo(TileInfo):
     def __repr__(self):
         return super().__repr__()+f"_{self.resolution}m"
 
+    @property
+    def RUNNING(self):
+        return self.export.RUNNING
+
     def hash_id(self):
-        return super().hash_id(), self.resolution  # hash_id(self.resolution)
+        return hash_id(super().hash_id(),  self.resolution)
 
     def get_related_combine_info(self, sql_info):
         sql_obj = SQLConnectionAndCursor.from_info(sql_info)
@@ -537,7 +549,11 @@ class CombineTileInfo(ResolutionTileInfo):
         return super().__repr__()+f"_{self.datatype}_{'nav' if self.for_nav else 'NOT_NAV'}"
 
     def hash_id(self):
-        return super().hash_id(), hash_id(self.datatype, self.for_nav)
+        return hash_id(super().hash_id(),  self.datatype, self.for_nav)
+
+    @property
+    def RUNNING(self):
+        return self.combine.RUNNING
 
     def metadata_table_name(self, dtype: str=None):
         if dtype is None:

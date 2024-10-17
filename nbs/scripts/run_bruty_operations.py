@@ -60,6 +60,7 @@ def launch_export(config_path, tile_info, use_caches=False,
 
     """ for_navigation_flag = (use_nav_flag, nav_flag_value)
     """
+    # FIXME this function is not cross platform but launch_combine is
     # spawn a new console, activate a python environment and run the combine.py script with appropriate arguments
     bruty_code = nbs.bruty.__path__._path[0]
     bruty_root = str(pathlib.Path(bruty_code).parent.parent)
@@ -94,7 +95,7 @@ def launch_export(config_path, tile_info, use_caches=False,
     return ret
 
 
-def launch_combine(world_db, view_pk_id, config_pth, tablenames, use_navigation_flag=True, override_epsg=False, extra_debug=False,
+def launch_combine(root_path, view_pk_id, config_pth, use_navigation_flag=True, override_epsg=False, extra_debug=False,
            exclude=None, crop=False, log_path=None, env_path=r'', env_name='', minimized=False,
            fingerprint="", delete_existing=False, log_level=logging.INFO):
     """
@@ -104,7 +105,6 @@ def launch_combine(world_db, view_pk_id, config_pth, tablenames, use_navigation_
     Supplying fingerprint will make both the cmd console and the python process easier to find using psutil.
     """
     # either launch in a new console with subprocess.popen or use multiprocessing.Process.  Could also consider dask.
-    world_db_path = world_db if isinstance(world_db, str) else world_db.db.data_path
     # spawn a new console, activate a python environment and run the combine.py script with appropriate arguments
     restore_dir = os.getcwd()
     os.chdir(pathlib.Path(__file__).parent)
@@ -120,17 +120,16 @@ def launch_combine(world_db, view_pk_id, config_pth, tablenames, use_navigation_
         separator = ":"
         env_var_cmd = "export"
     # looks like activate is overwriting the pythonpath, so specify it after the activate command
-    cmds = [f'{env_var_cmd} TCL_LIBRARY=what', f'{env_var_cmd} TIX_LIBRARY=', f'{env_var_cmd} TK_LIBRARY=']
+    # FIXME why was TCL_LIBRARY being set to "what"?  Was that from Massoud or the linux conversion?
+    cmds = [f'{env_var_cmd} TCL_LIBRARY=', f'{env_var_cmd} TIX_LIBRARY=', f'{env_var_cmd} TK_LIBRARY=']
     if env_path:
         cmds.append(env_path + " " + env_name)  # activate the environment
     cmds.append(f'{env_var_cmd} PYTHONPATH={nbs_code}{separator}{bruty_code}')  # add the NBS and Bruty code to the python path
     combine_args = ['python combine.py']
-    for table in tablenames:
-        combine_args.extend(["-t", table])
     for exclusion in exclude:
         combine_args.extend(['-x', exclusion])
     combine_args.extend(["-k", str(view_pk_id)])
-    combine_args.extend(["-b", str(world_db_path)])
+    combine_args.extend(["-b", str(root_path)])
     combine_args.extend(["-c", str(config_pth)])
     if not use_navigation_flag:  # not using the navigation flag
         combine_args.append("-i")
@@ -169,7 +168,8 @@ def remove_finished_processes(tile_processes, tile_manager):
     for key in list(tile_processes.keys()):
         if not tile_processes[key].console_process.is_running():
             old_tile = tile_processes[key].tile_info
-            LOGGER.info(f"Combine for {old_tile} exited")
+            operation = "Combine" if isinstance(tile_info, CombineTileInfo) else "Export"
+            LOGGER.info(f"{operation} for {old_tile} exited")
             try:
                 tile_manager.remove(old_tile)  # remove the tile from the list of tiles to process in the future
             except KeyError:
@@ -246,9 +246,9 @@ def combine_tile(tile_info, config, conn_info, debug_config=False, log_path=""):
         ret = process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=use_nav_flag,
                                    extra_debug=debug_config, override_epsg=override, exclude=exclude, crop=(tile_info.datatype == ENC),
                                    delete_existing=delete_existing, log_level=log_level)
-        errors = perform_qc_checks(db_path, conn_info, (use_nav_flag, tile_info.for_nav), repair=True, check_last_insert=False)
+        errors = perform_qc_checks(tile_info, conn_info, (use_nav_flag, tile_info.for_nav), repair=True, check_last_insert=False)
     else:
-        pid = launch_combine(root_path, tile_info.pk, config._source_filename, conn_info.tablenames, use_navigation_flag=use_nav_flag,
+        pid = launch_combine(root_path, tile_info.pk, config._source_filename, use_navigation_flag=use_nav_flag,
                              override_epsg=override, extra_debug=debug_config, exclude=exclude, crop=(tile_info.datatype == ENC),
                              log_path=log_path, env_path=env_path, env_name=env_name, minimized=minimized,
                              fingerprint=fingerprint, delete_existing=delete_existing, log_level=log_level)
@@ -347,6 +347,7 @@ def main(config):
                 tile_info.refresh_lock_status(tile_manager.sql_obj)
                 if not tile_info.is_locked:
                     # CombineTileInfo is a subclass of ResolutionTileInfo so we have to check for the subclass first
+                    returned_process = None
                     if isinstance(tile_info, CombineTileInfo):
                         returned_process = combine_tile(tile_info, config, conn_info, debug_config=debug_config, log_path=log_path)
                     elif isinstance(tile_info, ResolutionTileInfo):
@@ -354,6 +355,7 @@ def main(config):
                         is_ready = True
                         for tile in combine_tiles:
                             if tile.combine.needs_processing() or tile.is_locked:
+                                LOGGER.info(f"Delaying export of {tile_info} because {tile} needs to combine first")
                                 is_ready = False
                                 break
                         if is_ready:
@@ -363,6 +365,7 @@ def main(config):
                 # If the tile was locked then we will still remove it and let the next refresh get the tile again
                 tile_manager.remove(tile_info)
             remove_finished_processes(tile_processes, tile_manager)
+            time.sleep(5)  # avoid a fast loop of waiting on combines to finish while the export is still in the queue
             tile_manager.refresh_tiles_list(needs_combining=True, needs_exporting=True)
 
     except UserCancelled:

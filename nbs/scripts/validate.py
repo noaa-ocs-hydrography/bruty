@@ -37,12 +37,11 @@ def main(config):
         for tile_info in iterate_tiles_table(config):
             res = tile_info.resolution
             if not user_res or res in user_res:
-                db_path = pathlib.Path(config['data_dir']).joinpath(tile_info.bruty_db_name())
                 conn_info.tablenames = [tile_info.metadata_table_name()]
-                errors = perform_qc_checks(db_path, conn_info, (True, tile_info.for_nav), repair=repair)
+                errors = perform_qc_checks(tile_info, conn_info, (True, tile_info.for_nav), repair=repair)
                 # a missing database (like ENC_not_for_nav) returns None
                 if errors is not None and any(errors):
-                    LOGGER.warning(f"{db_path}:\n  last insert finished without errors: {not errors[4]}\n"
+                    LOGGER.warning(f"{tile_info.combine.data_location}:\n  last insert finished without errors: {not errors[4]}\n"
                                    f"  reinserts_remain: {errors[0]}\n  tile_missing: {errors[1]}\n"
                                    f"  tile_extra: {errors[2]}\n  contributor_missing:{errors[3]}")
         ret = SUCCEEDED

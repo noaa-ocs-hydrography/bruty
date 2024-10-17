@@ -263,6 +263,7 @@ def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=Tr
                 db = create_world_db(p, tile_info, log_level=log_level)
                 override = db.db.epsg if override_epsg else NO_OVERRIDE
                 world_db_path = db.db.data_path
+                tile_info.combine.data_location = world_db_path
             except (sqlite3.OperationalError, OSError) as e:
                 # this happened as a network issue - we will skip it for now and come back and give the network some time to recover
                 # but we will count it as a retry in case there is a corrupted file or something
@@ -280,7 +281,8 @@ def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=Tr
                         elif ".log" in h.baseFilename:
                             info_log = f"'{h.baseFilename}'"  # single quotes for postgres
             tile_info.update_table_record(**{tile_info.combine.START_TIME: "NOW()", tile_info.combine.TRIES: f"COALESCE({tile_info.combine.TRIES}, 0) + 1",
-                                  tile_info.combine.DATA_LOCATION: f"'{world_db_path}'", tile_info.combine.INFO_LOG: info_log, tile_info.combine.WARNINGS_LOG: warnings_log})
+                                             tile_info.combine.DATA_LOCATION: f"'{tile_info.combine.data_location}'",
+                                             tile_info.combine.INFO_LOG: info_log, tile_info.combine.WARNINGS_LOG: warnings_log})
 
         if ret == SUCCEEDED:
             sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, (use_navigation_flag, tile_info.for_nav), exclude=exclude)
@@ -476,7 +478,7 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
         raise e
 
 
-def perform_qc_checks(db_path, conn_info, nav_flag_value, repair=True, check_last_insert=True):
+def perform_qc_checks(tile_info, conn_info, nav_flag_value, repair=True, check_last_insert=True):
     """
     Parameters
     ----------
@@ -494,9 +496,9 @@ def perform_qc_checks(db_path, conn_info, nav_flag_value, repair=True, check_las
 
     """
     try:
-        db = WorldDatabase.open(db_path)
+        db = WorldDatabase.open(tile_info.combine.data_location)
     except FileNotFoundError:
-        LOGGER.info(f"{db_path} was not found")
+        LOGGER.info(f"{tile_info.combine.data_location} was not found")
     else:
         LOGGER.info("*** Checking for positioning errors...")
         position_errors = db.search_for_bad_positioning()
@@ -552,7 +554,7 @@ def perform_qc_checks(db_path, conn_info, nav_flag_value, repair=True, check_las
         LOGGER.info("*** Checking DB consistency...")
         tile_missing, tile_extra, contributor_missing = db.validate()
         if repair:
-            LOGGER.info(f"Validating {db_path}")
+            LOGGER.info(f"Validating {tile_info.combine.data_location}")
             transaction = db.transaction_groups.data_class()
             transaction.ttype = "VALIDATE"
             transaction.ttime = datetime.now()
@@ -570,7 +572,7 @@ def perform_qc_checks(db_path, conn_info, nav_flag_value, repair=True, check_las
                 from email.message import EmailMessage
 
                 msg = EmailMessage()
-                msg['Subject'] = rf"Validation Error found {db_path}"
+                msg['Subject'] = rf"Validation Error found {tile_info.combine.data_location}"
                 msg['From'] = "barry.gallagher@noaa.gov"
                 msg['To'] = "barry.gallagher@noaa.gov,barry.gallagher@gmail.com"
                 msg.set_content(f"{get_dbg_log_path()}\n\ntile_missing\n{tile_missing}\n\ntile_extra\n{tile_extra}\n\ncontributor_missing\n{contributor_missing}\n\nreinserts_remain\n{reinserts_remain}")
@@ -582,14 +584,12 @@ def perform_qc_checks(db_path, conn_info, nav_flag_value, repair=True, check_las
 
                 ret = SUCCEEDED
                 if world_raster_database.NO_LOCK:  # NO_LOCK means that we are not allowing multiple processes to work on one Tile/database at the same time - so use an advisory lock on the whole thine
-                    p = pathlib.Path(db_path)
-                    lck = AdvisoryLock(p.name, conn_info, EXCLUSIVE | NON_BLOCKING)
                     try:
-                        lck.acquire()
+                        tile_info.acquire_lock()
                     except BaseLockException:
                         ret = TILE_LOCKED
                 if ret == SUCCEEDED:
-                    sorted_recs, names_list, sort_dict, comp, tx_meta = get_postgres_processing_info(db_path,
+                    sorted_recs, names_list, sort_dict, comp, tx_meta = get_postgres_processing_info(tile_info.combine.data_location,
                                                                                                      conn_info,
                                                                                                      for_navigation_flag=nav_flag_value)
                     invalid, unfinished, out_of_sync, mismatch, new_surveys = find_surveys_to_update(
@@ -610,10 +610,11 @@ def perform_qc_checks(db_path, conn_info, nav_flag_value, repair=True, check_las
                     else:
                         LOGGER.info(f"Calling cleanup resolved subtile issues")
                     if world_raster_database.NO_LOCK:
-                        lck.release()
+                        tile_info.release_lock()
                     reinserts_remain = len(db.reinserts.unfinished_records()) > 0
                     if not any([reinserts_remain, tile_missing, tile_extra, contributor_missing, last_insert_unfinished]):
                         db.transaction_groups.set_finished(trans_id)
+
         LOGGER.info("*** Finished checks")
 
         errors = reinserts_remain, tile_missing, tile_extra, contributor_missing, last_insert_unfinished
@@ -641,14 +642,12 @@ def make_parser():
     #                     default=False, help="require the for_navigation flag to be False")
     parser.add_argument("-c", "--config_path", type=str, metavar='config_path', default="",
                         help="location to config file for connection info")
-    parser.add_argument("-t", "--table", action='append', type=str, dest="tables", metavar='table', default=[],
-                        help="table to read from postgres database, can specify more than once")
-    parser.add_argument("-k", "--combine_pk_id", type=str, dest="combine_pk_id", default="",
+    parser.add_argument("-k", "--combine_pk_id", type=int, dest="combine_pk_id",
                         help="view id of the tile to process")
     parser.add_argument("-x", "--exclude", action='append', type=int, dest="exclude", default=[],
                         help="nbs_ids to exclude from the combine process")
     parser.add_argument("-b", "--bruty_path", type=str, metavar='bruty_path', default="",
-                        help="location to store Bruty data")
+                        help="root location to store Bruty data (not the full bruy directory, the tile info will determine that)")
     parser.add_argument('--debug', action='store_true', dest='debug',
                         default=False, help="turn on debugging code")
     parser.add_argument('--delete', action='store_true', dest='delete_existing',
@@ -674,17 +673,15 @@ if __name__ == "__main__":
     print(sys.argv)
     parser = make_parser()
     args = parser.parse_args()
-    if args.show_help or not args.bruty_path or not args.tables:
+    if args.show_help or not args.bruty_path or not args.combine_pk_id or not args.config_path:
         parser.print_help()
         ret = NOT_ENOUGH_ARGS
     proc_start = time.time()
     if args.bruty_path:
-        # conn_info = ConnectionInfo(args.database, args.user, args.password, args.host, args.port, args.tables)
         config_obj = read_config(args.config_path)
         config = config_obj['DEFAULT']
         conn_info = connect_params_from_config(config)
 
-        conn_info.tablenames = args.tables
         use_locks(None)  # @TODO change all locks to use postgres
 
         log_level = convert_to_logging_level(args.log_level)
@@ -701,7 +698,8 @@ if __name__ == "__main__":
             make_family_of_logs("nbs", args.logger_path, remove_other_file_loggers=False, log_level=log_level)
             make_family_of_logs("nbs", args.logger_path + "_" + str(os.getpid()), remove_other_file_loggers=False, log_level=log_level)
         try:
-            tile_info = TileInfo.from_combine_spec_view(conn_info, args.combine_pk_id)
+            tile_info = CombineTileInfo.get_full_records(conn_info, int(args.combine_pk_id))[0]
+            conn_info.tablenames = [tile_info.metadata_table_name()]
             print(f"Processing {args.bruty_path} for_navigation_flag={(not args.ignore_for_nav, tile_info.for_nav)}")
             ret = process_nbs_database(args.bruty_path, conn_info, tile_info, use_navigation_flag=not args.ignore_for_nav,
                                        extra_debug=args.debug, override_epsg=args.override_epsg, exclude=args.exclude, crop=args.crop,
@@ -715,7 +713,7 @@ if __name__ == "__main__":
             # if we didn't succeed then let the ret value pass through and don't show a validation since it had an exception, data error or locked data
             if ret == SUCCEEDED:
                 # since we succeeded on insert we don't need to check the insert code (which isn't even written til down below)
-                errors = perform_qc_checks(args.bruty_path, conn_info, (not args.ignore_for_nav, tile_info.for_nav), repair=True, check_last_insert=False)
+                errors = perform_qc_checks(tile_info, conn_info, (not args.ignore_for_nav, tile_info.for_nav), repair=True, check_last_insert=False)
                 if any(errors):
                     LOGGER.error(f"Validation Failed with errors:{errors}")
                     ret = FAILED_VALIDATION
