@@ -256,6 +256,10 @@ def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=Tr
                 ret = TILE_LOCKED
         if ret == SUCCEEDED:
             try:
+                # to make a full utm zone database, take the tile_info and set geometry and tile to None.
+                # need to make a copy first
+                # tile_info.geometry, tile_info.tile = None, None
+                # full_db = create_world_db(config['data_dir'], tile_info, log_level=log_level)
                 db = create_world_db(p, tile_info, log_level=log_level)
                 override = db.db.epsg if override_epsg else NO_OVERRIDE
                 world_db_path = db.db.data_path
@@ -270,10 +274,11 @@ def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=Tr
             info_log = "''"
             for h in logging.getLogger("nbs").handlers:
                 if isinstance(h, logging.FileHandler):
-                    if f"{os.getpid()}.log" in h.baseFilename:
-                        info_log = f"'{h.baseFilename}'"  # single quotes for postgres
-                    elif f"{os.getpid()}.warn" in h.baseFilename:
-                        warnings_log = f"'{h.baseFilename}'"
+                    if f"{os.getpid()}" in h.baseFilename:
+                        if ".warnings.log" in h.baseFilename:
+                            warnings_log = f"'{h.baseFilename}'"
+                        elif ".log" in h.baseFilename:
+                            info_log = f"'{h.baseFilename}'"  # single quotes for postgres
             tile_info.update_table_record(**{tile_info.combine.START_TIME: "NOW()", tile_info.combine.TRIES: f"COALESCE({tile_info.combine.TRIES}, 0) + 1",
                                   tile_info.combine.DATA_LOCATION: f"'{world_db_path}'", tile_info.combine.INFO_LOG: info_log, tile_info.combine.WARNINGS_LOG: warnings_log})
 

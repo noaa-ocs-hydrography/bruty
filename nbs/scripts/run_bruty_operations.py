@@ -190,7 +190,7 @@ class TileRuns:
     info: TileInfo
     count: int
 
-def export_tile(tile_info, config, conn_info):
+def export_tile(tile_info, config, sql_info):
     decimals = config.getint('decimals', None)
     use_cached_meta = config.getboolean('USE_CACHED_METADATA', False)
     env_path = config.get('environment_path')
@@ -198,47 +198,28 @@ def export_tile(tile_info, config, conn_info):
     minimized = config.getboolean('MINIMIZED', False)
     # log_level = get_log_level(config)
 
-    locks = []
     return_process = None
-    tile_info.refresh_lock_status(conn_info)
-    if not tile_info.is_locked:
-        combine_tiles = tile_info.get_related_combine_info()
-        is_ready = True
-        for tile in combine_tiles:
-            if tile.combine.needs_processing() or tile.is_locked:
-                is_ready = False
-                break
-        if is_ready:
-            # read the metadata, either from postgres server or disk cache based on the caches flags
-            # all_simple_records, sort_dict = get_metadata(tile_info, conn_info, use_bruty_cached=cache_dir, use_caches=cache_flags)
 
-            # to make a full utm zone database, take the tile_info and set geometry and tile to None.
-            # need to make a copy first
-            # tile_info.geometry, tile_info.tile = None, None
-            # full_db = create_world_db(config['data_dir'], tile_info, dtype, nav_flag_value)
-            if interactive_debug and debug_launch:
-                combine_and_export(config, tile_info, decimals, use_cached_meta)
-                return_process = None
-            else:
-                LOGGER.info(f"exporting {tile_info.full_name}")
-                fingerprint = str(tile_info.hash_id) + "_" + datetime.datetime.now().isoformat()
+    if interactive_debug and debug_launch:
+        combine_and_export(config, tile_info, decimals, use_cached_meta)
+        return_process = None
+    else:
+        LOGGER.info(f"exporting {tile_info.full_name}")
+        fingerprint = str(tile_info.hash_id) + "_" + datetime.datetime.now().isoformat()
 
-                pid, script_path = launch_export(config._source_filename, env_path=env_path, use_caches=use_cached_meta,
-                                                 env_name=env_name, decimals=decimals, minimized=minimized,
-                                                 fingerprint=fingerprint)
-                running_process = ConsoleProcessTracker(["python", fingerprint, script_path])
-                if running_process.console.last_pid != pid:
-                    LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
-                # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
-                return_process = TileProcess(running_process, tile_info, fingerprint)
+        pid, script_path = launch_export(config._source_filename, tile_info, use_caches=use_cached_meta,
+                                         env_path=env_path, env_name=env_name,
+                                         decimals=decimals, minimized=minimized, fingerprint=fingerprint)
+        running_process = ConsoleProcessTracker(["python", fingerprint, script_path])
+        if running_process.console.last_pid != pid:
+            LOGGER.warning(f"Process ID mismatch {pid} did not match the found {running_process.console.last_pid}")
+        # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
+        return_process = TileProcess(running_process, tile_info, fingerprint)
 
     return return_process
 
 
 def combine_tile(tile_info, config, conn_info, debug_config=False, log_path=""):
-    if not tile_info.for_nav and tile_info.datatype == ENC:
-        LOGGER.debug(f"  Skipping ENC with for_navigation=False since all ENC data must be for navigation")
-        return
     env_path = config.get('environment_path')
     env_name = config.get('environment_name')
     override = config.getboolean('override', False)
@@ -360,7 +341,8 @@ def main(config):
                 if get_refresh:  # restart the while loop with an updated list of tiles
                     break
 
-                LOGGER.info(f"starting operation for {tile_info}" +
+                operation = "Combine" if isinstance(tile_info, CombineTileInfo) else "Export"
+                LOGGER.info(f"starting {operation} for {tile_info}" +
                             f"\n  {len(tile_manager.remaining_tiles)} remain including the {len(tile_processes)} currently running")
                 tile_info.refresh_lock_status(tile_manager.sql_obj)
                 if not tile_info.is_locked:
@@ -368,7 +350,14 @@ def main(config):
                     if isinstance(tile_info, CombineTileInfo):
                         returned_process = combine_tile(tile_info, config, conn_info, debug_config=debug_config, log_path=log_path)
                     elif isinstance(tile_info, ResolutionTileInfo):
-                        returned_process = export_tile(tile_info, config, conn_info)
+                        combine_tiles = tile_info.get_related_combine_info(tile_manager.sql_obj)
+                        is_ready = True
+                        for tile in combine_tiles:
+                            if tile.combine.needs_processing() or tile.is_locked:
+                                is_ready = False
+                                break
+                        if is_ready:
+                            returned_process = export_tile(tile_info, config, tile_manager.sql_obj)
                     if returned_process is not None:
                         tile_processes[tile_info.hash_id()] = returned_process
                 # If the tile was locked then we will still remove it and let the next refresh get the tile again

@@ -78,6 +78,7 @@ class BrutyOperation:
     REQUEST_TIME = 'request_time'
     TRIES = 'tries'
     DATA_LOCATION = 'data_location'
+    RUNNING = 'running'
 
     def __init__(self, record=None):
         if record:
@@ -92,6 +93,7 @@ class BrutyOperation:
         self.warnings_log = record.get(self.WARNINGS_LOG, None)
         self.info_log = record.get(self.INFO_LOG, None)
         self.data_location = record.get(self.DATA_LOCATION, None)
+        self.running = record.get(self.RUNNING, None)
 
     def needs_processing(self):
         process = False
@@ -117,9 +119,11 @@ class CombineOperation(BrutyOperation):
     REQUEST_TIME = OPERATION + "_" + BrutyOperation.REQUEST_TIME
     TRIES = OPERATION + "_" + BrutyOperation.TRIES
     DATA_LOCATION = OPERATION + "_" + BrutyOperation.DATA_LOCATION
+    RUNNING = OPERATION + "_" + BrutyOperation.RUNNING
 
     def __init__(self, record=None):
         super().__init__(record)
+
 
 class ExportOperation(BrutyOperation):
     OPERATION = 'export'
@@ -131,6 +135,7 @@ class ExportOperation(BrutyOperation):
     REQUEST_TIME = OPERATION + "_" + BrutyOperation.REQUEST_TIME
     TRIES = OPERATION + "_" + BrutyOperation.TRIES
     DATA_LOCATION = OPERATION + "_" + BrutyOperation.DATA_LOCATION
+    RUNNING = OPERATION + "_" + BrutyOperation.RUNNING
 
     def __init__(self, record=None):
         super().__init__(record)
@@ -248,10 +253,17 @@ class TileInfo:
         # The killer is the geometry, a query without geometry is taking 0.5 seconds, with geometry it's taking 25 seconds
         # Using the time comparison as SQL would take a 0.6 second query to 13 seconds
         # SELECT B.*, R.*, ST_SRID(geometry_buffered), TI.*, {lock_query}
+
+        # to use the IN operator we need a tuple (not a list) of values
+        # if pk_vals isn't iterable then make it a tuple
+        if not hasattr(pk_vals, '__iter__') and not isinstance(pk_vals, str):
+            tuple_vals = (pk_vals,)
+        else:
+            tuple_vals = tuple(pk_vals)
         sql_obj.cursor.execute(f"""SELECT {select}
                            FROM {table} 
-                           WHERE {cls.PRIMARY_KEY} IN (%s)
-                           """, (pk_vals,))
+                           WHERE {cls.PRIMARY_KEY} IN %s
+                           """, (tuple_vals,))
         records = sql_obj.cursor.fetchall()
         return records
 
@@ -284,6 +296,9 @@ class TileInfo:
     def base_name(self):
         return "_".join([self.pb, self.locality, f"utm{self.utm}{self.hemi}", self.datum])
 
+    def _set_running(self, bool_val):
+        self.sql_obj.cursor.execute(f"""UPDATE {self.SOURCE_TABLE} SET {self.RUNNING}={bool_val} WHERE {self.PRIMARY_KEY}={self.pk}""", (self.pk,))
+
     def acquire_lock(self, conn_info):
         """ Acquire a lock on the record in the database using a NEW connection (can't pass an existing connection).
         This is because if close() or commit()) is called on the connection then the lock is released.
@@ -292,6 +307,8 @@ class TileInfo:
         """
         if isinstance(conn_info, ConnectionInfo):
             self.sql_obj = SQLConnectionAndCursor(conn_info)
+            self._set_running(True)
+            self.sql_obj.conn.set_session(autocommit=False)
         else:
             raise ValueError("The connection info must be a ConnectionInfo object")
         self.sql_obj.cursor.execute(f"""SELECT * FROM {self.SOURCE_TABLE} WHERE {self.PRIMARY_KEY}=%s FOR UPDATE SKIP LOCKED""", (self.pk,))
@@ -309,9 +326,43 @@ class TileInfo:
 
     def release_lock(self):
         if self.sql_obj is not None:
+            self._set_running(False)
             self.sql_obj.conn.commit()
             self.sql_obj.conn.close()
             self.sql_obj = None
+
+    def update_table(self, where, **kwargs):
+        """ Update a table based on a a dictionary (from kwargs) of values
+        Note, acquire_lock must have been called in order to open a connection, get a cursor and lock the record.
+        The function will raise a BaseLockException if the lock has not been acquired.
+
+        Parameters
+        ----------
+        where
+            dictionary of column name(s) and value(s) to match
+        kwargs
+            dictionary of column name and value to update.  Make sure to wrap strings in single quotes.
+        Returns
+        -------
+        None
+        """
+
+        # if database is None:
+        #     database = cls.SOURCE_DATABASE
+        # if table is None:
+        #     table = cls.SOURCE_TABLE
+        # if isinstance(connection_info, ConnectionInfo):
+        #     conn_info = ConnectionInfo(database, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [table])
+        #     conn, cursor = connection_with_retries(conn_info)
+        # else:
+        #     cursor = connection_info
+        if not self.sql_obj:
+            raise BaseLockException("No cursor to update the table")
+        pg_update(self.sql_obj.cursor, self.SOURCE_TABLE, where, **kwargs)
+
+    def update_table_record(self, **kwargs):
+        where = {self.PRIMARY_KEY: self.pk}
+        self.update_table(where, **kwargs)
 
 
 class ResolutionTileInfo(TileInfo):
@@ -348,28 +399,23 @@ class ResolutionTileInfo(TileInfo):
     def hash_id(self):
         return super().hash_id(), self.resolution  # hash_id(self.resolution)
 
-    def get_related_combine_info(self, conn_info_or_cursor:(ConnectionInfo, psycopg2.extras.DictCursor)):
-        combine_ids = self.get_related_combine_ids(conn_info_or_cursor)
-        combine_tiles = CombineTileInfo.get_full_records(conn_info_or_cursor, combine_ids)
+    def get_related_combine_info(self, sql_info):
+        sql_obj = SQLConnectionAndCursor.from_info(sql_info)
+        combine_ids = self.get_related_combine_ids(sql_obj)
+        combine_tiles = CombineTileInfo.get_full_records(sql_obj, combine_ids)
         return combine_tiles
 
-    def get_related_combine_ids(self, conn_info_or_cursor:(ConnectionInfo, psycopg2.extras.DictCursor)):
-        if isinstance(conn_info_or_cursor, ConnectionInfo):
-            conn_info = conn_info_or_cursor
-            conn_copy = ConnectionInfo(CombineTileInfo.SOURCE_DATABASE, conn_info.username, conn_info.password, conn_info.hostname, conn_info.port,
-                                        [CombineTileInfo.SOURCE_TABLE])
-            conn, cursor = connection_with_retries(conn_copy)
-        else:
-            cursor = conn_info_or_cursor
-        cursor.execute(f"""SELECT {CombineTileInfo.COMBINE_ID} FROM {CombineTileInfo.SOURCE_TABLE} WHERE {CombineTileInfo.RESOLUTION_ID}=%s""", (self.pk,))
-        records = cursor.fetchall()
+    def get_related_combine_ids(self, sql_info):
+        sql_obj = SQLConnectionAndCursor.from_info(sql_info)
+        sql_obj.cursor.execute(f"""SELECT {CombineTileInfo.COMBINE_ID} FROM {CombineTileInfo.SOURCE_TABLE} WHERE {CombineTileInfo.RESOLUTION_ID}=%s""", (self.pk,))
+        records = sql_obj.cursor.fetchall()
         return [r[CombineTileInfo.COMBINE_ID] for r in records]
 
     def acquire_lock_and_combine_locks(self, conn_info: ConnectionInfo):
         # lock the current record in the spec_resolutions table and set up a connection+cursor
         self.acquire_lock(conn_info)
         # lock all the spec_combines that this resolution would affect
-        all_ids = self.get_related_combine_ids(self.sql_obj.cursor)
+        all_ids = self.get_related_combine_ids(self.sql_obj)
         self.sql_obj.cursor.execute(f"""SELECT * FROM {CombineTileInfo.SOURCE_TABLE} WHERE {CombineTileInfo.RESOLUTION_ID}=%s FOR UPDATE SKIP LOCKED""", (self.pk,))
         records = self.sql_obj.cursor.fetchall()
         if len(records) != len(all_ids):
@@ -440,22 +486,13 @@ class ResolutionTileInfo(TileInfo):
         # names.append(str(use_res))
         return "_".join(names)
 
-    def update_export_status(self,  connection_info: (ConnectionInfo, psycopg2.extras.DictCursor), database=None, table=None):
-        if database is None:
-            database = self.SOURCE_DATABASE
-        if table is None:
-            table = self.RESOLUTIONS_TABLE
-        if isinstance(connection_info, ConnectionInfo):
-            conn_info = ConnectionInfo(database, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [table])
-            conn, cursor = connection_with_retries(conn_info)
-        else:
-            cursor = connection_info
+    def update_export_status(self, table=None):
         # trying to just save the c_id from the combine_spec_view and use that to update the combine_spec_bruty table
         # cursor.execute(
         #     f"""update {tablename} set ({self.OUT_OF_DATE},{self.SUMMARY})=(%s, %s)
         #     where ({self.PB},{self.UTM},{self.HEMISPHERE},{self.TILE},{self.DATUM},{self.LOCALITY},{self.RESOLUTION}, {self.DATATYPE},{self.NOT_FOR_NAV})=(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         #     (self.out_of_date, self.summary, self.pb, self.utm, self.hemi.upper(), self.tile, self.datum, self.locality, self.resolution, self.datatype, self.not_for_nav))
-        cursor.execute(
+        self.sql_obj.cursor.execute(
             f"""update {table} set ({self.export.START_TIME},{self.export.END_TIME},{self.export.EXIT_CODE},{self.export.WARNINGS_LOG},
             {self.export.INFO_LOG},{self.export.TRIES})=(%s, %s, %s, %s, %s, %s) 
             where ({self.RESOLUTION_ID})=(%s)""",
@@ -467,7 +504,6 @@ class CombineTileInfo(ResolutionTileInfo):
     SOURCE_TABLE = "spec_combines"
     VIEW_TABLE = "view_individual_combines"
 
-    DATA_LOCATION = 'data_location'
     COMBINE_ID = 'c_id'
     FOR_NAV = 'for_navigation'
     DATATYPE = 'datatype'
@@ -494,7 +530,6 @@ class CombineTileInfo(ResolutionTileInfo):
         self.combine = CombineOperation(review_tile)
         self.out_of_date = review_tile.get(self.OUT_OF_DATE, None)
         self.summary = review_tile.get(self.SUMMARY, None)
-        self.data_location = review_tile.get(self.DATA_LOCATION, None)
         # self.res_foreign_key = review_tile.get(self.RESOLUTION_ID, None)  # this will be in the ResolutionTileInfo as res_tile_id
 
 
@@ -503,39 +538,6 @@ class CombineTileInfo(ResolutionTileInfo):
 
     def hash_id(self):
         return super().hash_id(), hash_id(self.datatype, self.for_nav)
-
-    def update_table(self, where, **kwargs):
-        """ Update a table based on a a dictionary (from kwargs) of values
-        Note, acquire_lock must have been called in order to open a connection, get a cursor and lock the record.
-        The function will raise a BaseLockException if the lock has not been acquired.
-
-        Parameters
-        ----------
-        where
-            dictionary of column name(s) and value(s) to match
-        kwargs
-            dictionary of column name and value to update.  Make sure to wrap strings in single quotes.
-        Returns
-        -------
-        None
-        """
-
-        # if database is None:
-        #     database = cls.SOURCE_DATABASE
-        # if table is None:
-        #     table = cls.SOURCE_TABLE
-        # if isinstance(connection_info, ConnectionInfo):
-        #     conn_info = ConnectionInfo(database, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [table])
-        #     conn, cursor = connection_with_retries(conn_info)
-        # else:
-        #     cursor = connection_info
-        if not self.sql_obj:
-            raise BaseLockException("No cursor to update the table")
-        pg_update(self.sql_obj.cursor, self.SOURCE_TABLE, where, **kwargs)
-
-    def update_table_record(self, **kwargs):
-        where = {self.COMBINE_ID: self.combine_id}
-        self.update_table(where, **kwargs)
 
     def metadata_table_name(self, dtype: str=None):
         if dtype is None:
