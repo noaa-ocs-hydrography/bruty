@@ -33,7 +33,7 @@ from fuse_dev.fuse.meta_review import meta_review
 from nbs.configs import iter_configs, read_config
 from nbs.bruty.utils import affine, get_crs_transformer, make_mllw_height_wkt, user_action, tqdm, remove_file, iterate_gdal_image, BufferedImageOps, QUIT, HELP
 from nbs.bruty.nbs_postgres import id_to_scoring, get_nbs_records, nbs_survey_sort, ConnectionInfo, connection_with_retries, connect_params_from_config
-from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, INTERNAL, NAVIGATION, PUBLIC, SCORING_METADATA_COLUMNS
+from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, INTERNAL, NAVIGATION, PUBLIC, SCORING_METADATA_COLUMNS, EXPORT_METADATA_COLUMNS
 from nbs.bruty.world_raster_database import WorldDatabase, use_locks, AdvisoryLock, BaseLockException
 from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
 from nbs.configs import get_logger
@@ -249,7 +249,7 @@ class RasterExport:
             remove_file(self.rat_filename, allow_permission_fail=allow_permission_fail, silent=silent)
 
 
-def make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav):
+def make_unreviewed_notes(all_simple_records, tile_info, combine_tiles):
     """ Look through all the records and find the ones that are not reviewed and make a note of them.
     This is used to populate the xbox table with the unreviewed data that is being included or excluded from the export.
 
@@ -275,12 +275,12 @@ def make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav):
     IGNORED = 1
     COMBINED = 0
     labels = {IGNORED: "Skipped due to never_post=True", COMBINED: "Included in combined data (never_post=False)"}
-    for datatype, for_nav in dtypes_and_for_nav:
-        database_name = tile_info.metadata_table_name(datatype)
+    for combine_tile in combine_tiles:
+        database_name = combine_tile.metadata_table_name()
         for key, rec in all_simple_records.items():
             if not rec.get('nbs_reviewed', False):  # when simple_records had a null in postgres they end up as a missing key, so treat null as False
                 if rec['tablename'] == database_name:
-                    if rec.get('for_navigation', False) == for_nav:
+                    if rec.get('for_navigation', False) == combine_tile.for_nav:
                         index = IGNORED if rec.get('never_post', False) else COMBINED
                         table = unreviewed.setdefault((rec['tablename']), [[], []])
                         table[index].append(rec)
@@ -341,7 +341,9 @@ def get_metadata(combine_tiles, conn_info, use_bruty_cached=False):
             query_database = True
         if query_database:
             try:
-                mfields, mrecords = get_nbs_records(tablename, cursor, query_fields=SCORING_METADATA_COLUMNS)
+                query_fields = set(SCORING_METADATA_COLUMNS)
+                query_fields.update(EXPORT_METADATA_COLUMNS)
+                mfields, mrecords = get_nbs_records(tablename, cursor, query_fields=query_fields)
             except psycopg2.errors.UndefinedTable:
                 print(f"{tablename} doesn't exist.")
                 continue
@@ -367,16 +369,6 @@ def get_metadata(combine_tiles, conn_info, use_bruty_cached=False):
 
 def combine_and_export(config, tile_info, decimals=None, use_caches=False):
     # conn_info.database = "metadata"
-    conn_info = connect_params_from_config(config)
-    # lock the resolution record so we can update the export times
-    # Find the spec_combine records
-    # lock them (which will also tell if any are in use)
-    tile_info.acquire_lock_and_combine_locks(conn_info)  # will raise a BaseLockException if the locks can't be acquired
-    # lck = AdvisoryLock(all_paths, conn_info, flags=SHARED | NON_BLOCKING)
-
-    combine_tiles = tile_info.get_related_combine_info(tile_info.sql_obj)
-    all_simple_records, sort_dict = get_metadata(combine_tiles, conn_info, use_bruty_cached=use_caches)
-    comp = partial(nbs_survey_sort, sort_dict)
     conn_info_exports = connect_params_from_config(config)
     conn_info_exports.database = config.get('export_database', None)
     conn_info_exports.tablenames = [config.get('export_table', "")]
@@ -385,21 +377,31 @@ def combine_and_export(config, tile_info, decimals=None, use_caches=False):
     time_format = "%Y%m%d_%H%M%S"
     export_time = datetime.datetime.now().strftime(time_format)
 
-    warnings_log = "''"  # single quotes for postgres
-    info_log = "''"
-    for h in logging.getLogger("nbs").handlers:
-        if isinstance(h, logging.FileHandler):
-            if f"{os.getpid()}" in h.baseFilename:
-                if ".warnings" in h.baseFilename:
-                    warnings_log = f"'{h.baseFilename}'"
-                elif ".log" in h.baseFilename:
-                    info_log = f"'{h.baseFilename}'"  # single quotes for postgres
-
-    tile_info.update_table_record(**{tile_info.export.START_TIME: "NOW()", tile_info.export.TRIES: f"COALESCE({tile_info.export.TRIES}, 0) + 1",
-                                     tile_info.export.DATA_LOCATION: f"'{export_dir}'", tile_info.export.INFO_LOG: info_log,
-                                     tile_info.export.WARNINGS_LOG: warnings_log})
     ret_code = 0
     try:
+        # lock the resolution record so we can update the export times
+        # Find the spec_combine records
+        # lock them (which will also tell if any are in use)
+        conn_info = connect_params_from_config(config)
+        tile_info.acquire_lock_and_combine_locks(conn_info)  # will raise a BaseLockException if the locks can't be acquired
+        # lck = AdvisoryLock(all_paths, conn_info, flags=SHARED | NON_BLOCKING)
+
+        combine_tiles = tile_info.get_related_combine_info(tile_info.sql_obj)
+        all_simple_records, sort_dict = get_metadata(combine_tiles, conn_info, use_bruty_cached=use_caches)
+        comp = partial(nbs_survey_sort, sort_dict)
+        warnings_log = "''"  # single quotes for postgres
+        info_log = "''"
+        for h in logging.getLogger("nbs").handlers:
+            if isinstance(h, logging.FileHandler):
+                if f"{os.getpid()}" in h.baseFilename:
+                    if ".warnings" in h.baseFilename:
+                        warnings_log = f"'{h.baseFilename}'"
+                    elif ".log" in h.baseFilename:
+                        info_log = f"'{h.baseFilename}'"  # single quotes for postgres
+
+        tile_info.update_table_record(**{tile_info.export.START_TIME: "NOW()", tile_info.export.TRIES: f"COALESCE({tile_info.export.TRIES}, 0) + 1",
+                                         tile_info.export.DATA_LOCATION: f"'{export_dir}'", tile_info.export.INFO_LOG: info_log,
+                                         tile_info.export.WARNINGS_LOG: warnings_log})
         # 3) Extract data from all necessary Bruty DBs
         if tile_info.public or tile_info.internal or tile_info.navigation:
             fobj, cache_file = tempfile.mkstemp(".cache.tif")
@@ -472,7 +474,8 @@ def combine_and_export(config, tile_info, decimals=None, use_caches=False):
                 del dataset, dataset_score  # release the file handle for the score file
                 for exp, loc, exp_rec_id in done:
                     LOGGER.info(f"  {exp}  --  {loc}")
-                    unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, export_definitions[exp]['datasets'])
+                    needed_tiles = set([tile for tile in combine_tiles if (tile.datatype, tile.for_nav) in export_definitions[exp]['datasets']])
+                    unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, needed_tiles)
                     # update the notes fields in case the nbs_reviewed column has changed which wouldn't change the actual data
                     update_export_record(conn_info_exports, exp_rec_id, notes=unreviewed_notes)
             else:
@@ -485,9 +488,11 @@ def combine_and_export(config, tile_info, decimals=None, use_caches=False):
                     if wanted:
                         exp.cleanup_tempfiles()
                         exp.cleanup_finalfiles()
-                dtypes_and_for_nav = export_definitions[NAVIGATION]['datasets']  # [(REVIEWED, True), (ENC, True), (GMRT, True)]
-                databases = [tile.combine.data_location for tile in combine_tiles if (tile.datatype, tile.for_nav) in dtypes_and_for_nav]
-                base_cnt = add_databases(databases, dataset, dataset_score, comp)
+                combines_used = set()
+                needed_tiles = set([tile for tile in combine_tiles if (tile.datatype, tile.for_nav) in export_definitions[NAVIGATION]['datasets']])
+                add_tiles = needed_tiles - combines_used
+                base_cnt = add_databases(add_tiles, dataset, dataset_score, comp)
+                combines_used.update(add_tiles)
 
                 if tile_info.navigation:
                     os.makedirs(nav_export.extracted_filename.parent, exist_ok=True)
@@ -498,7 +503,7 @@ def combine_and_export(config, tile_info, decimals=None, use_caches=False):
                     # nav_sensitive_cnt = add_databases(databases, nav_dataset, nav_score, comp)
                     del nav_score, nav_dataset  # closes the files so they can be copied
                     complete_export(nav_export, all_simple_records, tile_info.closing_dist, tile_info.epsg, decimals=decimals)
-                    unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav)
+                    unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, combines_used)
                     navigation_id = write_export_record(conn_info_exports, nav_export, navigation=True, notes=unreviewed_notes)
 
                 if tile_info.public or tile_info.internal:
@@ -506,17 +511,17 @@ def combine_and_export(config, tile_info, decimals=None, use_caches=False):
                     #   or possibly the same export would apply to multiple configurations, like public and internal are the same
                     # add the not for navigation versions that were already added
                     # also add the prereview (unqualified data)
-                    add_dtypes_and_for_nav = export_definitions[PUBLIC]['datasets'] - export_definitions[NAVIGATION]['datasets']
+                    needed_tiles = set([tile for tile in combine_tiles if (tile.datatype, tile.for_nav) in export_definitions[PUBLIC]['datasets']])
+                    add_tiles = needed_tiles - combines_used
                     if export_definitions[NAVIGATION]['datasets'] - export_definitions[PUBLIC]['datasets']:
                         raise ValueError("PUBLIC export must include all NAVIGATION datasets")
                     # [(REVIEWED, False), (ENC, False), (GMRT, False), (PREREVIEW, True), (PREREVIEW, False)]
-                    dtypes_and_for_nav = export_definitions[PUBLIC]['datasets']
-                    databases = [tile.combine.data_location for tile in combine_tiles if (tile.datatype, tile.for_nav) in add_dtypes_and_for_nav]
-                    prereview_cnt = add_databases(databases, dataset, dataset_score, comp)
+                    prereview_cnt = add_databases(add_tiles, dataset, dataset_score, comp)
+                    combines_used.update(add_tiles)
 
                     if tile_info.public:
                         os.makedirs(public_export.extracted_filename.parent, exist_ok=True)
-                        unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav)
+                        unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, combines_used)
                         if prereview_cnt == 0 and nav_export.cog_filename.exists():
                             try:
                                 os.symlink(nav_export.cog_filename, public_export.cog_filename)
@@ -533,13 +538,13 @@ def combine_and_export(config, tile_info, decimals=None, use_caches=False):
                     if tile_info.internal:
                         os.makedirs(internal_export.extracted_filename.parent, exist_ok=True)
                         # internal is the same as public with SENSITIVE added.
-                        add_dtypes_and_for_nav = export_definitions[INTERNAL]['datasets'] - export_definitions[PUBLIC]['datasets']
+                        needed_tiles = set([tile for tile in combine_tiles if (tile.datatype, tile.for_nav) in export_definitions[INTERNAL]['datasets']])
+                        add_tiles = needed_tiles - combines_used
                         if export_definitions[PUBLIC]['datasets'] - export_definitions[INTERNAL]['datasets']:
                             raise ValueError("INTERNAL export must include all PUBLIC datasets")
-                        dtypes_and_for_nav = export_definitions[INTERNAL]['datasets']
-                        databases = [tile.combine.data_location for tile in combine_tiles if (tile.datatype, tile.for_nav) in add_dtypes_and_for_nav]
-                        sensitive_cnt = add_databases(databases, dataset, dataset_score, comp)
-                        unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, dtypes_and_for_nav)
+                        sensitive_cnt = add_databases(add_tiles, dataset, dataset_score, comp)
+                        combines_used.update(add_tiles)
+                        unreviewed_notes = make_unreviewed_notes(all_simple_records, tile_info, combines_used)
                         if sensitive_cnt == 0 and prereview_cnt == 0 and nav_export.cog_filename.exists():
                             try:
                                 os.symlink(nav_export.cog_filename, internal_export.cog_filename)
@@ -571,16 +576,16 @@ def combine_and_export(config, tile_info, decimals=None, use_caches=False):
             remove_file(cache_file.replace(".tif", ".score.tif"), allow_permission_fail=True, limit=4, tdelay=15)
     except BaseLockException:
         LOGGER.warning(f"Could not get locks for {tile_info}")
-        ret = TILE_LOCKED
+        ret_code = TILE_LOCKED
     except Exception as e:
         traceback.print_exc()
         msg = f"{tile_info.full_name} had an unhandled exception - see message above"
         print(msg)
         LOGGER.error(traceback.format_exc())
         LOGGER.error(msg)
-        ret = UNHANDLED_EXCEPTION
+        ret_code = UNHANDLED_EXCEPTION
     try:
-        tile_info.update_table_record(**{tile_info.combine.END_TIME: "NOW()", tile_info.combine.EXIT_CODE: ret})
+        tile_info.update_table_record(**{tile_info.export.END_TIME: "NOW()", tile_info.export.EXIT_CODE: ret_code})
         tile_info.release_lock()
     except:
         pass
@@ -596,10 +601,11 @@ def copy_dataset(dataset, filename):
     return new_dataset
 
 
-def add_databases(databases, dataset, dataset_score, comp):
+def add_databases(combine_tiles, dataset, dataset_score, comp):
     cnt = 0
-    with tqdm(desc="merging databases", total=len(databases)) as progress:
-        for db_name in databases:
+    with tqdm(desc="merging databases", total=len(combine_tiles)) as progress:
+        for combine_tile in combine_tiles:
+            db_name = combine_tile.combine.data_location
             progress.set_description("merging "+str(pathlib.Path(db_name).name))
             try:
                 db = WorldDatabase.open(db_name)
@@ -1436,23 +1442,16 @@ def update_export_record(conn_info: ConnectionInfo, row_id: int, **to_update):
 
 
 def write_export_record(conn_info: ConnectionInfo, export: RasterExport, internal: bool = False, navigation: bool = False, public: bool = False, notes=""):
-    spec_table = "combine_spec_tiles"
+    spec_table = "spec_tiles"
     id_of_new_row = None
     if conn_info.database is not None:
         connection, cursor = connection_with_retries(conn_info)
         ti = export.tile_info
-        pri_key = [ti.tile, ti.utm, ti.hemi.upper(), ti.datum, ti.pb, ti.locality]
-        cursor.execute(f"""select geometry FROM {spec_table} 
-        WHERE tile=%s AND utm=%s AND UPPER(hemisphere)=%s AND datum=%s AND production_branch=%s AND locality=%s""", pri_key)
-        try:
-            geometry = cursor.fetchone()[0]
-        except (TypeError, IndexError):
-            raise BrutyError(f"Could not find {spec_table} record for {pri_key}")
         # @TODO this should be a dictionary but there is no clear syntax for writing dicts directly.
         #   make or find a wrapper which is like: con.execute(insert into table (dict.keys()) values (dict.values()))
         record = [ti.tile, ti.utm, ti.hemi.upper(), ti.datum, ti.pb, ti.locality, ti.resolution, ti.closing_dist,
                   str(export.cog_filename), str(export.rat_filename), export.data_time, export.export_time,
-                  geometry, internal, navigation, public, notes]
+                  ti.raw_geometry, internal, navigation, public, notes]
         q_str = ", ".join(["%s"] * len(record))
         cursor.execute(f"""INSERT INTO xbox (tile, utm, hemisphere, datum, production_branch, locality, resolution, closing_dist, 
             data_location, data_aux_location, combine_time, export_time, 
@@ -1491,17 +1490,17 @@ if __name__ == "__main__":
     parser = make_parser()
     args = parser.parse_args()
     proc_start = time.time()
-    if args.show_help or not args.config or not args.cache:
+    if args.show_help or not args.config or not args.res_tile_pk_id:
         parser.print_help()
         ret = 1
 
-    if args.config and args.cache:
+    if args.config and args.res_tile_pk_id:
         config_file = read_config(args.config)
         config = config_file['EXPORT']
         # use_locks(args.lock_server)
-        tile_info = ResolutionTileInfo.from_table(args.res_tile_pk_id, 'rb')
-        if args.remove_cache:
-            remove_file(args.cache, allow_permission_fail=True)
+        conn_info = connect_params_from_config(config)
+
+        tile_info = ResolutionTileInfo.from_table(conn_info, args.res_tile_pk_id)
         try:
             LOGGER.debug(f"Processing {tile_info.full_name}")
             ret = combine_and_export(config, tile_info, args.decimals, args.use_caches)

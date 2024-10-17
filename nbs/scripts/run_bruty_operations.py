@@ -329,9 +329,7 @@ def main(config):
                 else:
                     LOGGER.info("Waiting to before checking for more tiles to process")
                 time.sleep(60)
-            while tile_manager.remaining_tiles:
-                tile_info = tile_manager.pick_next_tile(tile_processes)
-
+            for tile_info in tile_manager.pick_next_tile(tile_processes):
                 do_keyboard_actions(tile_manager, tile_processes)
                 remove_finished_processes(tile_processes, tile_manager)
                 get_refresh = False
@@ -345,11 +343,11 @@ def main(config):
                 if get_refresh:  # restart the while loop with an updated list of tiles
                     break
 
-                operation = "Combine" if isinstance(tile_info, CombineTileInfo) else "Export"
-                LOGGER.info(f"starting {operation} for {tile_info}" +
-                            f"\n  {len(tile_manager.remaining_tiles)} remain including the {len(tile_processes)} currently running")
                 tile_info.refresh_lock_status(tile_manager.sql_obj)
                 if not tile_info.is_locked:
+                    operation = "Combine" if isinstance(tile_info, CombineTileInfo) else "Export"
+                    LOGGER.info(f"starting {operation} for {tile_info}" +
+                                f"\n  {len(tile_manager.remaining_tiles)} remain including the {len(tile_processes)} currently running")
                     # CombineTileInfo is a subclass of ResolutionTileInfo so we have to check for the subclass first
                     returned_process = None
                     if isinstance(tile_info, CombineTileInfo):
@@ -358,14 +356,18 @@ def main(config):
                         combine_tiles = tile_info.get_related_combine_info(tile_manager.sql_obj)
                         is_ready = True
                         for tile in combine_tiles:
-                            if tile.combine.needs_processing() or tile.is_locked:
-                                LOGGER.info(f"Delaying export of {tile_info} because {tile} needs to combine first")
+                            if tile.combine.needs_processing():
+                                LOGGER.debug(f"Delaying export of {tile_info} because {tile} needs to combine first")
                                 is_ready = False
-                                break
+                            if tile.is_locked:
+                                LOGGER.debug(f"Delaying export of {tile_info} because {tile} is locked")
+                                is_ready = False
                         if is_ready:
                             returned_process = export_tile(tile_info, config, tile_manager.sql_obj)
                     if returned_process is not None:
                         tile_processes[tile_info.hash_id()] = returned_process
+                else:
+                    LOGGER.info(f"{tile_info} is locked, delaying")
                 # If the tile was locked then we will still remove it and let the next refresh get the tile again
                 tile_manager.remove(tile_info)
             remove_finished_processes(tile_processes, tile_manager)

@@ -290,10 +290,6 @@ def main(config):
 
                     # closing_dist = tile_record[closing_index]
 
-                    # to make a full utm zone database, take the tile_info and set geometry and tile to None.
-                    # need to make a copy first
-                    # tile_info.geometry, tile_info.tile = None, None
-                    # full_db = create_world_db(config['data_dir'], tile_info, dtype, nav_flag_value)
                     if interactive_debug and debug_config and max_processes < 2:
                         comp = partial(nbs_survey_sort, sort_dict)
                         combine_and_export(config, tile_info, all_simple_records, comp, export_time, decimals)

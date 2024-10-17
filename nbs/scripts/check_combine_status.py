@@ -100,10 +100,6 @@ def main(config):
     for hash, tile_info in remaining_tiles.items():
         if not tile_info.for_nav and tile_info.datatype == ENC:
             continue
-        # to make a full utm zone database, take the tile_info and set geometry and tile to None.
-        # need to make a copy first
-        # tile_info.geometry, tile_info.tile = None, None
-        # full_db = create_world_db(config['data_dir'], tile_info, dtype, current_tile.nav_flag_value)
         db = create_world_db(config['data_dir'], tile_info)
         max_t = datetime(1, 1, 1); last_action=None
         for k, v in db.transaction_groups.items():

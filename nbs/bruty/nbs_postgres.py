@@ -35,6 +35,15 @@ NBS_ID_STR = "nbs_id"
 
 SCORING_METADATA_COLUMNS = [NBS_ID_STR, 'from_filename', 'script_to_filename', 'manual_to_filename', 'for_navigation', 'never_post', 'decay_score',
                             'script_resolution', 'manual_resolution', 'script_point_spacing', 'manual_point_spacing']
+
+_SCRIPT_MANUAL_METADATA = ['start_date', 'start_date', 'end_date', 'end_date', 'vert_uncert_vari', 'vert_uncert_fixed',
+                          'horiz_uncert_fixed', 'horiz_uncert_vari', 'feat_detect', 'feat_size', 'feat_least_depth', 'catzoc',
+                          'supersession_score', 'source_indicator', 'survey_authority', 'interpolated', 'license', 'license_url',
+                          'complete_coverage', 'bathymetry']
+EXPORT_METADATA_COLUMNS = ['script_'+key for key in _SCRIPT_MANUAL_METADATA] +\
+                          ['manual_'+key for key in _SCRIPT_MANUAL_METADATA] +\
+                          ['decay_score']
+
 TRANSFORM_METADATA_COLUMNS = [NBS_ID_STR, 'manual_to_horiz_frame', 'script_to_horiz_frame', 'manual_to_horiz_type', 'script_to_horiz_type', 'manual_to_horiz_key', 'script_to_horiz_key',
                               'manual_vert_uncert_fixed', 'script_vert_uncert_fixed', 'manual_vert_uncert_vari', 'script_vert_uncert_vari']
 

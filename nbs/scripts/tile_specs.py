@@ -162,6 +162,7 @@ class TileInfo:
     TILE_ID = 't_id'
     PRIMARY_KEY = TILE_ID
     EPSG_QUERY = 'ST_SRID(geometry)'
+    GEOMETRY = 'geometry'
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
@@ -188,6 +189,47 @@ class TileInfo:
         self.navigation = review_tile.get(self.EXPORT_NAVIGATION, None)  # only QC'd (qualified) data
         self.is_locked = review_tile.get(self.IS_LOCKED, None)
         self.pk = review_tile[self.PRIMARY_KEY]
+        self.geometry = review_tile.get(self.GEOMETRY, None)
+
+    @property
+    def geometry(self):
+        return self._geom
+
+    @geometry.setter
+    def geometry(self, geom):
+        if geom is None:
+            self._geom = None
+            self.minx, self.miny = None, None
+            self.maxx, self.maxy = None, None
+        else:
+            try:
+                minx, maxx, miny, maxy = geom.GetEnvelope()
+                g = geom
+            except AttributeError:
+                try:
+                    minx, miny, maxx, maxy = geom.bounds
+                    g = geom
+                except:
+                    try:
+                        g = ogr.CreateGeometryFromWkb(bytes.fromhex(geom))
+                        minx, maxx, miny, maxy = g.GetEnvelope()
+                        # Out[44]: (-74.4, -73.725, 40.2, 40.5)
+
+                        # g.GetGeometryRef(0).GetPoints()
+                        # Out[48]:
+                        # [(-73.95, 40.2), (-74.1, 40.2), (-74.1, 40.425),  (-74.4, 40.425), (-74.4, 40.5),
+                        #  (-73.725, 40.5), (-73.725, 40.35), (-73.95, 40.35), (-73.95, 40.2)]
+                    except (RuntimeError, AttributeError):
+                        # *************************************************************************************************
+                        # USING SHAPELY
+                        g = wkb.loads(geom, hex=True)
+                        minx, miny, maxx, maxy = g.bounds
+            self._geom = g
+            self.raw_geometry = geom
+            self.minx = minx
+            self.miny = miny
+            self.maxx = maxx
+            self.maxy = maxy
 
     def refresh_lock_status(self, sql_info):
         """ Update the self.is_locked value based on the database - if the record is not found then is_locked will be set to None
@@ -383,6 +425,7 @@ class ResolutionTileInfo(TileInfo):
     JOINED_TABLE = f"{SOURCE_TABLE} R JOIN {TileInfo.SOURCE_TABLE} TI ON (R.{TILE_ID}=TI.{TileInfo.PRIMARY_KEY})"
     LOCK_QUERY = f"""(SELECT (R.ctid NOT IN (SELECT ctid FROM {SOURCE_TABLE} FOR UPDATE SKIP LOCKED))) as {TileInfo.IS_LOCKED}"""
     EPSG_QUERY = 'ST_SRID(geometry_buffered)'
+    GEOMETRY_BUFFERED = 'geometry_buffered'
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
@@ -396,10 +439,7 @@ class ResolutionTileInfo(TileInfo):
         self.res_tile_id = review_tile.get(self.RESOLUTION_ID, None)
         self.export = ExportOperation(review_tile)
         self.epsg = review_tile.get('st_srid', None)
-        try:
-            self.geometry = review_tile['geometry'] if 'geometry_buffered' not in review_tile else review_tile['geometry_buffered']
-        except KeyError:
-            self.geometry = None
+        self.geometry_buffered = review_tile.get(self.GEOMETRY_BUFFERED, None)
 
     def __repr__(self):
         return super().__repr__()+f"_{self.resolution}m"
@@ -431,20 +471,23 @@ class ResolutionTileInfo(TileInfo):
         self.sql_obj.cursor.execute(f"""SELECT * FROM {CombineTileInfo.SOURCE_TABLE} WHERE {CombineTileInfo.RESOLUTION_ID}=%s FOR UPDATE SKIP LOCKED""", (self.pk,))
         records = self.sql_obj.cursor.fetchall()
         if len(records) != len(all_ids):
+            print(len(records),'vs', len(all_ids))
+            print(all_ids)
+            for n, rec in enumerate(records):
+                print(rec)
             self.release_lock()
             raise BaseLockException(f"Failed to acquire all locks for {self} (PK={self.pk}) related combine records {all_ids}")
         return self.sql_obj.conn, self.sql_obj.cursor
 
-
-
     @property
-    def geometry(self):
-        return self._geom
+    def geometry_buffered(self):
+        return self._geom_buffered
 
-    @geometry.setter
-    def geometry(self, geom):
+    @geometry_buffered.setter
+    def geometry_buffered(self, geom):
+        # FIXME consolidate this with the TileInfo geometry setter function so only one conversion function exists
         if geom is None:
-            self._geom = None
+            self._geom_buffered = None
             self.minx, self.miny = None, None
             self.maxx, self.maxy = None, None
         else:
@@ -470,7 +513,8 @@ class ResolutionTileInfo(TileInfo):
                         # USING SHAPELY
                         g = wkb.loads(geom, hex=True)
                         minx, miny, maxx, maxy = g.bounds
-            self._geom = g
+            self._geom_buffered = g
+            self.raw_geom_buffered = geom
             self.minx = minx
             self.miny = miny
             self.maxx = maxx
@@ -527,6 +571,7 @@ class CombineTileInfo(ResolutionTileInfo):
                         JOIN {TileInfo.SOURCE_TABLE} TI ON (R.{ResolutionTileInfo.TILE_ID}=TI.{TileInfo.PRIMARY_KEY})"""
     LOCK_QUERY = f"""(SELECT (C.ctid NOT IN (SELECT ctid FROM {SOURCE_TABLE} FOR UPDATE SKIP LOCKED))) as {TileInfo.IS_LOCKED}"""
     EPSG_QUERY = 'ST_SRID(geometry_buffered)'
+    GEOMETRY = 'geometry_buffered'
 
     def __init__(self, **review_tile):
         # @TODO if this becomes used more, make this into a static method called "def from_combine_spec"
@@ -543,7 +588,6 @@ class CombineTileInfo(ResolutionTileInfo):
         self.out_of_date = review_tile.get(self.OUT_OF_DATE, None)
         self.summary = review_tile.get(self.SUMMARY, None)
         # self.res_foreign_key = review_tile.get(self.RESOLUTION_ID, None)  # this will be in the ResolutionTileInfo as res_tile_id
-
 
     def __repr__(self):
         return super().__repr__()+f"_{self.datatype}_{'nav' if self.for_nav else 'NOT_NAV'}"
@@ -681,8 +725,7 @@ class TileManager:
                 if pb in self.priorities[priority]:
                     for hash, tile in self.priorities[priority][pb].items():
                         if hash not in currently_running:
-                            return tile
-        return None
+                            yield tile
 
     def details_str(self):
         details = []
@@ -703,10 +746,11 @@ class TileManager:
             hash = tile.hash_id()
             del self.remaining_tiles[hash]
             # if the start/end times got modified then a running tile may now look finished or vice versa, so check both places in our dictionary
-            try:
-                del self.priorities[self._revised_priority(tile)][tile.pb][hash]
-            except KeyError:
-                del self.priorities[self.RUNNING_PRIORITY][tile.pb][hash]
+            # No longer modifying this - we are doing it as an iterator instead
+            # try:
+            #     del self.priorities[self._revised_priority(tile)][tile.pb][hash]
+            # except KeyError:
+            #     del self.priorities[self.RUNNING_PRIORITY][tile.pb][hash]
         except KeyError:
             pass
 
@@ -718,7 +762,7 @@ def create_world_db(root_path, tile_info: TileInfo, log_level=logging.INFO):
         db = WorldDatabase.open(full_path, log_level=log_level)
     except FileNotFoundError:  # create an empty bruty database
         epsg = tile_info.epsg
-        if tile_info.geometry is not None:
+        if tile_info.geometry_buffered is not None:
             aoi = ((tile_info.minx, tile_info.miny), (tile_info.maxx, tile_info.maxy))
         else:
             aoi = None
