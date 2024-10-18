@@ -280,7 +280,7 @@ def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=Tr
                             warnings_log = f"'{h.baseFilename}'"
                         elif ".log" in h.baseFilename:
                             info_log = f"'{h.baseFilename}'"  # single quotes for postgres
-            tile_info.update_table_record(**{tile_info.combine.START_TIME: "NOW()", tile_info.combine.TRIES: f"COALESCE({tile_info.combine.TRIES}, 0) + 1",
+            tile_info.update_table_record(**{tile_info.combine.START_TIME: "clock_timestamp()", tile_info.combine.TRIES: f"COALESCE({tile_info.combine.TRIES}, 0) + 1",
                                              tile_info.combine.DATA_LOCATION: f"'{tile_info.combine.data_location}'",
                                              tile_info.combine.INFO_LOG: info_log, tile_info.combine.WARNINGS_LOG: warnings_log})
 
@@ -295,7 +295,7 @@ def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=Tr
             ret = process_nbs_records(world_db_path, names_list, sort_dict, comp, transform_metadata, extra_debug, override, crop=crop, log_level=log_level)
             # if not extra_debug:
             if world_raster_database.NO_LOCK:
-                tile_info.update_table_record(**{tile_info.combine.END_TIME: "NOW()", tile_info.combine.EXIT_CODE: ret})
+                tile_info.update_table_record(**{tile_info.combine.END_TIME: "clock_timestamp()", tile_info.combine.EXIT_CODE: ret})
                 tile_info.release_lock()
     except Exception as e:
         if world_raster_database.NO_LOCK:
