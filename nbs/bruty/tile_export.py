@@ -31,7 +31,8 @@ except ModuleNotFoundError:
 from data_management.db_connection import connect_with_retries
 from fuse_dev.fuse.meta_review import meta_review
 from nbs.configs import iter_configs, read_config
-from nbs.bruty.utils import affine, get_crs_transformer, make_mllw_height_wkt, user_action, tqdm, remove_file, iterate_gdal_image, BufferedImageOps, QUIT, HELP
+from nbs.bruty.utils import affine, get_crs_transformer, make_mllw_height_wkt, user_action, tqdm, remove_file, \
+    iterate_gdal_image, BufferedImageOps, QUIT, HELP, contributor_int_to_float, contributor_float_to_int
 from nbs.bruty.nbs_postgres import id_to_scoring, get_nbs_records, nbs_survey_sort, ConnectionInfo, connection_with_retries, connect_params_from_config
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, INTERNAL, NAVIGATION, PUBLIC, SCORING_METADATA_COLUMNS, EXPORT_METADATA_COLUMNS
 from nbs.bruty.world_raster_database import WorldDatabase, use_locks, AdvisoryLock, BaseLockException
@@ -1048,10 +1049,10 @@ def complete_export_tiled(export, all_simple_records, closing_dist, epsg, decima
             progress.set_description("Contributor IDs")
             icontrib = contrib_array.copy()  # make a copy of the data in case we ever had a value in the float version equaled something mapped to an int
             contribs = numpy.unique(contrib_array)
-            int_contribs = numpy.sort(numpy.frombuffer(contribs.astype(numpy.float32).tobytes(), numpy.int32)).tolist()
+            int_contribs = numpy.sort(contributor_float_to_int(contribs)).tolist()
             # leave the 1000000 value (Nan replacement) in the contributor space
             try:
-                int_contribs.remove(numpy.frombuffer(numpy.array(1000000).astype(numpy.float32).tobytes(), numpy.int32)[0])
+                int_contribs.remove(contributor_float_to_int(1000000))
             except ValueError:
                 pass
             # if not int_contribs:  # there is no data in this tile - make a fake contributor list so it continues on.
@@ -1063,7 +1064,7 @@ def complete_export_tiled(export, all_simple_records, closing_dist, epsg, decima
             #    Two loops would be faster than looping the data N times
             #    However, since we are now also consolidating the values as 0,1,2,3,4... it needs a loop.
             for iold in int_contribs:
-                iold_as_float = numpy.frombuffer(numpy.array(iold, dtype=numpy.int32).tobytes(), dtype=numpy.float32)[0]
+                iold_as_float = contributor_int_to_float(iold)
                 if iold not in old_to_new_mapping:
                     old_to_new_mapping[iold] = inew
                     if inew != 0:  # the generalization has no change from int to float and would cause a keyerror in all_simple_records
@@ -1266,10 +1267,10 @@ def complete_export_sequential(export, all_simple_records, closing_dist, epsg, d
         float_contrib = data[0]
         icontrib = float_contrib.copy()  # make a copy of the data in case we ever had a value in the float version equaled something mapped to an int
         contribs = numpy.unique(float_contrib)
-        int_contribs = numpy.sort(numpy.frombuffer(contribs.astype(numpy.float32).tobytes(), numpy.int32)).tolist()
+        int_contribs = numpy.sort(contributor_float_to_int(contribs)).tolist()
         # leave the 1000000 value (Nan replacement) in the contributor space
         try:
-            int_contribs.remove(numpy.frombuffer(numpy.array(1000000).astype(numpy.float32).tobytes(), numpy.int32)[0])
+            int_contribs.remove(contributor_float_to_int(1000000))
         except ValueError:
             pass
         # if not int_contribs:  # there is no data in this tile - make a fake contributor list so it continues on.
@@ -1281,7 +1282,7 @@ def complete_export_sequential(export, all_simple_records, closing_dist, epsg, d
         #    Two loops would be faster than looping the data N times
         #    However, since we are now also consolidating the values as 0,1,2,3,4... it needs a loop.
         for iold in int_contribs:
-            iold_as_float = numpy.frombuffer(numpy.array(iold, dtype=numpy.int32).tobytes(), dtype=numpy.float32)[0]
+            iold_as_float = contributor_int_to_float(iold)
             if iold not in old_to_new_mapping:
                 old_to_new_mapping[iold] = inew
                 if inew != 0:  # the generalization has no change from int to float and would cause a keyerror in all_simple_records

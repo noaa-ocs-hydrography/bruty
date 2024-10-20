@@ -348,6 +348,9 @@ class TileInfo:
         self.sql_obj.cursor.execute(f"""UPDATE {self.SOURCE_TABLE} SET {self.RUNNING}={bool_val} {where}""")
         # self.sql_obj.cursor.execute(f"""UPDATE {self.SOURCE_TABLE} SET {self.RUNNING}={bool_val} WHERE {self.PRIMARY_KEY}={self.pk}""")
 
+    def has_lock(self):
+        return self.sql_obj is not None
+
     def acquire_lock(self, conn_info):
         """ Acquire a lock on the record in the database using a NEW connection (can't pass an existing connection).
         This is because if close() or commit()) is called on the connection then the lock is released.
@@ -374,7 +377,7 @@ class TileInfo:
         return self.sql_obj.conn, self.sql_obj.cursor
 
     def release_lock(self):
-        if self.sql_obj is not None:
+        if self.has_lock():
             self.sql_obj.conn.commit()
             self._set_running(False, set_all=True)  # this cleans up any combines that crashed and left the running flag on
             self.sql_obj.conn.commit()  # autocommit is turned off due to locking needs

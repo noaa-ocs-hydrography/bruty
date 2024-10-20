@@ -251,7 +251,11 @@ def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=Tr
             # lck = AdvisoryLock(p.name, conn_info, EXCLUSIVE | NON_BLOCKING)
             try:
                 # lck.acquire()
-                conn, cursor = tile_info.acquire_lock(conn_info)
+                if not tile_info.has_lock():
+                    conn, cursor = tile_info.acquire_lock(conn_info)
+                    unlock = True
+                else:
+                    unlock = False
             except BaseLockException:
                 ret = TILE_LOCKED
         if ret == SUCCEEDED:
@@ -301,7 +305,8 @@ def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=Tr
         if world_raster_database.NO_LOCK:
             try:
                 tile_info.update_table_record(**{tile_info.combine.END_TIME: "NOW()", tile_info.combine.EXIT_CODE: UNHANDLED_EXCEPTION})  # using the raw
-                tile_info.release_lock()
+                if unlock:
+                    tile_info.release_lock()
             except BaseLockException as lck:
                 pass  # error happened before the lock was acquired
         raise e
@@ -496,132 +501,144 @@ def perform_qc_checks(tile_info, conn_info, nav_flag_value, repair=True, check_l
 
     """
     try:
-        tile_info.acquire_lock()
         db = WorldDatabase.open(tile_info.combine.data_location)
     except FileNotFoundError:
         LOGGER.info(f"{tile_info.combine.data_location} was not found")
     except BaseLockException:
         LOGGER.info(f"{tile_info.combine.data_location} was locked")
     else:
-        LOGGER.info("*** Checking for positioning errors...")
-        position_errors = db.search_for_bad_positioning()
-        if not position_errors:
-            LOGGER.info("checks ok")
-        LOGGER.info("*** Checking for unfinished reinserts...")
-        reinserts_remain = len(db.reinserts.unfinished_records()) > 0
-        if not reinserts_remain:
-            LOGGER.info("checks ok")
-        LOGGER.info("*** Checking for orphaned accumulation directories...")
-        vr_orphaned_accum_db = db.search_for_accum_db()
-        if not vr_orphaned_accum_db:
-            LOGGER.info("checks ok")
-        LOGGER.info("*** Checking if combine (insert) completed...")
-        if not check_last_insert:
-            last_insert_unfinished = False
-        else:
-            last_clean = None
-            for rec in db.transaction_groups.values():
-                if rec.ttype == 'CLEAN':
-                    if last_clean is None or rec.ttime > last_clean.ttime:
-                        last_clean = rec
-            last_inserts = []
-            for rec in db.transaction_groups.values():
-                if rec.ttype == 'INSERT':
-                    if last_clean is None or rec.ttime > last_clean.ttime:
-                        last_inserts.append(rec)
-            last_insert = None
-            for op in db.completion_codes.values():
-                if op.ttype == 'INSERT' or op.ttype is None:
-                    if last_insert is None or op.ttime > last_insert.ttime:
-                        last_insert = op
-            # code was not added until Dec 2022 so ignore the warning if the transactions are that old
-            last_insert_unfinished = last_insert is None or (last_inserts[-1].ttime > datetime(2023, 1, 1) and last_insert.code != 0)
-            if not last_inserts:
-                LOGGER.info("No INSERT operations were performed after the last CLEAN")
+        try:
+            LOGGER.info("*** Checking for positioning errors...")
+            position_errors = db.search_for_bad_positioning()
+            if not position_errors:
+                LOGGER.info("checks ok")
+            LOGGER.info("*** Checking for unfinished reinserts...")
+            reinserts_remain = len(db.reinserts.unfinished_records()) > 0
+            if not reinserts_remain:
+                LOGGER.info("checks ok")
+            LOGGER.info("*** Checking for orphaned accumulation directories...")
+            vr_orphaned_accum_db = db.search_for_accum_db()
+            if not vr_orphaned_accum_db:
+                LOGGER.info("checks ok")
+            LOGGER.info("*** Checking if combine (insert) completed...")
+            if not check_last_insert:
+                last_insert_unfinished = False
             else:
-                unfinished = False
-                one_finished = False
-                for rec in last_inserts:
-                    if not rec.finished:
-                        unfinished = True
-                    if rec.finished and not rec.user_quit:  # at least once the program needed to finish without the user quitting
-                        one_finished = True
-                if unfinished or not one_finished:
-                    msg = "At least one combine (INSERT) didn't complete since the last cleanup operation or user quit in ALL cases"
-                    LOGGER.info(msg)
-                    for rec in last_inserts:
-                        LOGGER.info(f'{rec.ttime.strftime("%Y/%m/%d - %H:%M:%S")}   completed:{bool(rec.finished)}    user quit:{bool(rec.user_quit)}')
-                    LOGGER.info(msg)
+                last_clean = None
+                for rec in db.transaction_groups.values():
+                    if rec.ttype == 'CLEAN':
+                        if last_clean is None or rec.ttime > last_clean.ttime:
+                            last_clean = rec
+                last_inserts = []
+                for rec in db.transaction_groups.values():
+                    if rec.ttype == 'INSERT':
+                        if last_clean is None or rec.ttime > last_clean.ttime:
+                            last_inserts.append(rec)
+                last_insert = None
+                for op in db.completion_codes.values():
+                    if op.ttype == 'INSERT' or op.ttype is None:
+                        if last_insert is None or op.ttime > last_insert.ttime:
+                            last_insert = op
+                # code was not added until Dec 2022 so ignore the warning if the transactions are that old
+                last_insert_unfinished = last_insert is None or (last_inserts[-1].ttime > datetime(2023, 1, 1) and last_insert.code != 0)
+                if not last_inserts:
+                    LOGGER.info("No INSERT operations were performed after the last CLEAN")
                 else:
-                    LOGGER.info("checks ok")
-        LOGGER.info("*** Checking DB consistency...")
-        tile_missing, tile_extra, contributor_missing = db.validate()
-        if repair:
-            LOGGER.info(f"Validating {tile_info.combine.data_location}")
-            transaction = db.transaction_groups.data_class()
-            transaction.ttype = "VALIDATE"
-            transaction.ttime = datetime.now()
-            transaction.process_id = os.getpid()
-            transaction.modified_data = 0
-            transaction.finished = 0
-            transaction.user_quit = 0
-            trans_id = db.transaction_groups.add_oid_record(transaction)  # ("CLEAN", datetime.now(), os.getpid(), 0, 0))
-
-            if not (tile_missing or tile_extra or contributor_missing or reinserts_remain):
-                LOGGER.info("consistency checks ok")
-                db.transaction_groups.set_finished(trans_id)
-            else:
-                import smtplib
-                from email.message import EmailMessage
-
-                msg = EmailMessage()
-                msg['Subject'] = rf"Validation Error found {tile_info.combine.data_location}"
-                msg['From'] = "barry.gallagher@noaa.gov"
-                msg['To'] = "barry.gallagher@noaa.gov,barry.gallagher@gmail.com"
-                msg.set_content(f"{get_dbg_log_path()}\n\ntile_missing\n{tile_missing}\n\ntile_extra\n{tile_extra}\n\ncontributor_missing\n{contributor_missing}\n\nreinserts_remain\n{reinserts_remain}")
-
-                server = smtplib.SMTP('smtp.google.com', port=25)
-                server.set_debuglevel(1)
-                server.send_message(msg)
-                server.quit()
-
-                ret = SUCCEEDED
-                if world_raster_database.NO_LOCK:  # NO_LOCK means that we are not allowing multiple processes to work on one Tile/database at the same time - so use an advisory lock on the whole thine
-                    try:
-                        tile_info.acquire_lock()
-                    except BaseLockException:
-                        ret = TILE_LOCKED
-                if ret == SUCCEEDED:
-                    sorted_recs, names_list, sort_dict, comp, tx_meta = get_postgres_processing_info(tile_info.combine.data_location,
-                                                                                                     conn_info,
-                                                                                                     for_navigation_flag=nav_flag_value)
-                    invalid, unfinished, out_of_sync, mismatch, new_surveys = find_surveys_to_update(
-                        db, sort_dict, names_list)
-                    if invalid or unfinished or out_of_sync or mismatch:
-                        LOGGER.info(f"Found surveys needing cleanup before running repair\n{invalid}\n{sort_dict}\n{out_of_sync}\n{mismatch}")
-                        clean_nbs_database(db.db.data_path, names_list, sort_dict, comp, subprocesses=1)
-                        # refresh the checks in case the clean function is causing problems
-                        tile_missing, tile_extra, contributor_missing = db.validate()
-                    tx_ty = set(contributor_missing.keys())
-                    tx_ty.update(tile_missing.keys())
-                    tx_ty.update(tile_extra.keys())
-                    if tx_ty:
-                        db.repair_subtiles(tx_ty, compare_callback=comp)
-                        db.transaction_groups.set_modified(trans_id)
-                        tile_missing, tile_extra, contributor_missing = db.validate()
-                        LOGGER.info(f"Tried to repair existing subtiles issues by removal and reinsert\n{tx_ty}")
+                    unfinished = False
+                    one_finished = False
+                    for rec in last_inserts:
+                        if not rec.finished:
+                            unfinished = True
+                        if rec.finished and not rec.user_quit:  # at least once the program needed to finish without the user quitting
+                            one_finished = True
+                    if unfinished or not one_finished:
+                        msg = "At least one combine (INSERT) didn't complete since the last cleanup operation or user quit in ALL cases"
+                        LOGGER.info(msg)
+                        for rec in last_inserts:
+                            LOGGER.info(f'{rec.ttime.strftime("%Y/%m/%d - %H:%M:%S")}   completed:{bool(rec.finished)}    user quit:{bool(rec.user_quit)}')
+                        LOGGER.info(msg)
                     else:
-                        LOGGER.info(f"Calling cleanup resolved subtile issues")
-                    if world_raster_database.NO_LOCK:
-                        tile_info.release_lock()
-                    reinserts_remain = len(db.reinserts.unfinished_records()) > 0
-                    if not any([reinserts_remain, tile_missing, tile_extra, contributor_missing, last_insert_unfinished]):
-                        db.transaction_groups.set_finished(trans_id)
+                        LOGGER.info("checks ok")
+            LOGGER.info("*** Checking DB consistency...")
+            tile_missing, tile_extra, contributor_missing = db.validate()
+            if repair:
+                LOGGER.info(f"Validating {tile_info.combine.data_location}")
+                transaction = db.transaction_groups.data_class()
+                transaction.ttype = "VALIDATE"
+                transaction.ttime = datetime.now()
+                transaction.process_id = os.getpid()
+                transaction.modified_data = 0
+                transaction.finished = 0
+                transaction.user_quit = 0
+                trans_id = db.transaction_groups.add_oid_record(transaction)  # ("CLEAN", datetime.now(), os.getpid(), 0, 0))
 
-        LOGGER.info("*** Finished checks")
+                if not (tile_missing or tile_extra or contributor_missing or reinserts_remain):
+                    LOGGER.info("consistency checks ok")
+                    db.transaction_groups.set_finished(trans_id)
+                else:
+                    import smtplib
+                    from email.message import EmailMessage
 
-        errors = reinserts_remain, tile_missing, tile_extra, contributor_missing, last_insert_unfinished
-        tile_info.release_lock()
+                    msg = EmailMessage()
+                    msg['Subject'] = rf"Validation Error found {tile_info.combine.data_location}"
+                    msg['From'] = "barry.gallagher@noaa.gov"
+                    msg['To'] = "barry.gallagher@noaa.gov,barry.gallagher@gmail.com"
+                    msg.set_content(f"{get_dbg_log_path()}\n\ntile_missing\n{tile_missing}\n\ntile_extra\n{tile_extra}\n\ncontributor_missing\n{contributor_missing}\n\nreinserts_remain\n{reinserts_remain}")
+
+                    server = smtplib.SMTP('smtp.google.com', port=25)
+                    server.set_debuglevel(1)
+                    server.send_message(msg)
+                    server.quit()
+
+                    ret = SUCCEEDED
+                    if world_raster_database.NO_LOCK:  # NO_LOCK means that we are not allowing multiple processes to work on one Tile/database at the same time - so use an advisory lock on the whole thine
+                        try:
+                            if not tile_info.has_lock():
+                                tile_info.acquire_lock()
+                                unlock = True
+                            else:
+                                unlock = False
+                        except BaseLockException:
+                            ret = TILE_LOCKED
+                    if ret == SUCCEEDED:
+                        sorted_recs, names_list, sort_dict, comp, tx_meta = get_postgres_processing_info(tile_info.combine.data_location,
+                                                                                                         conn_info,
+                                                                                                         for_navigation_flag=nav_flag_value)
+                        invalid, unfinished, out_of_sync, mismatch, new_surveys = find_surveys_to_update(
+                            db, sort_dict, names_list)
+                        if invalid or unfinished or out_of_sync or mismatch:
+                            LOGGER.info(f"Found surveys needing cleanup before running repair\n{invalid}\n{sort_dict}\n{out_of_sync}\n{mismatch}")
+                            clean_nbs_database(db.db.data_path, names_list, sort_dict, comp, subprocesses=1)
+                            # refresh the checks in case the clean function is causing problems
+                            tile_missing, tile_extra, contributor_missing = db.validate()
+                        tx_ty = set(contributor_missing.keys())
+                        tx_ty.update(tile_missing.keys())
+                        tx_ty.update(tile_extra.keys())
+                        if tx_ty:
+                            db.repair_subtiles(tx_ty, compare_callback=comp)
+                            db.transaction_groups.set_modified(trans_id)
+                            tile_missing, tile_extra, contributor_missing = db.validate()
+                            LOGGER.info(f"Tried to repair existing subtiles issues by removal and reinsert\n{tx_ty}")
+                        else:
+                            LOGGER.info(f"Calling cleanup resolved subtile issues")
+                        if world_raster_database.NO_LOCK:
+                            if unlock:
+                                tile_info.release_lock()
+                        reinserts_remain = len(db.reinserts.unfinished_records()) > 0
+                        if not any([reinserts_remain, tile_missing, tile_extra, contributor_missing, last_insert_unfinished]):
+                            db.transaction_groups.set_finished(trans_id)
+
+            LOGGER.info("*** Finished checks")
+            errors = reinserts_remain, tile_missing, tile_extra, contributor_missing, last_insert_unfinished
+            if not any(errors):
+                code = SUCCEEDED
+            else:
+                code = FAILED_VALIDATION
+        except Exception as e:
+            errors = True
+            code = FAILED_VALIDATION
+        finally:
+            tile_info.update_table_record(**{tile_info.combine.EXIT_CODE: code})
         return errors
 
 
@@ -704,6 +721,7 @@ if __name__ == "__main__":
         try:
             tile_info = CombineTileInfo.get_full_records(conn_info, int(args.combine_pk_id))[0]
             conn_info.tablenames = [tile_info.metadata_table_name()]
+            tile_info.acquire_lock(conn_info)
             print(f"Processing {args.bruty_path} for_navigation_flag={(not args.ignore_for_nav, tile_info.for_nav)}")
             ret = process_nbs_database(args.bruty_path, conn_info, tile_info, use_navigation_flag=not args.ignore_for_nav,
                                        extra_debug=args.debug, override_epsg=args.override_epsg, exclude=args.exclude, crop=args.crop,
@@ -734,15 +752,11 @@ if __name__ == "__main__":
                     server.set_debuglevel(1)
                     server.send_message(msg)
                     server.quit()
-                try:
-                    # until we find the combine bug we'll make the VRT after the validation
-                    tile_info.acquire_lock()
-                    db = WorldDatabase.open(tile_info.combine.data_location)
-                    db.create_vrt()
-                    tile_info.release_lock()
-                except BaseLockException:
-                    LOGGER.warning(f"Failed to acquire lock for {tile_info.combine.data_location} to make overview")
-
+                # until we find the combine bug we'll make the VRT after the validation
+                db = WorldDatabase.open(tile_info.combine.data_location)
+                db.create_vrt()
+        except BaseLockException as e:
+            ret = TILE_LOCKED
         except Exception as e:
             traceback.print_exc()
             msg = f"{args.bruty_path} use_navigation_flag={not args.ignore_for_nav} had an unhandled exception - see message above"

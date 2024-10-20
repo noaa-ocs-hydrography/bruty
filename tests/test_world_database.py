@@ -9,6 +9,7 @@ import pytest
 import numpy
 from osgeo import gdal, osr
 
+from nbs.bruty.utils import contributor_float_to_int, contributor_int_to_float
 from nbs.bruty.history import DiskHistory, MemoryHistory, RasterHistory
 from nbs.bruty.raster_data import MemoryStorage, RasterDelta, RasterData, TiffStorage, LayersEnum, arrays_match
 from nbs.bruty.world_raster_database import LatLonBackend, GoogleLatLonTileBackend, UTMTileBackend, GoogleMercatorTileBackend, \
@@ -476,7 +477,7 @@ def custom_scoring(pts1, pts2):
     ret = []
     for pts in (pts1, pts2):
         contrib_raw = pts[LayersEnum.CONTRIBUTOR]
-        contrib = numpy.frombuffer(contrib_raw.astype(numpy.float32).tobytes(), numpy.int32).astype(numpy.float32).reshape(contrib_raw.shape)
+        contrib = contributor_float_to_int(contrib_raw).astype(numpy.float32).reshape(contrib_raw.shape)
         contrib[numpy.isnan(contrib_raw)] = numpy.nan
         elev = pts[LayersEnum.ELEVATION].copy()
         # since contributor is now kept in a float32 (to allow tif storage)
@@ -939,11 +940,11 @@ def test_remove_survey():
     assert numpy.all(arr[LayersEnum.ELEVATION, r0 + 5:r0 + 7, c0 + 5:c0 + 7] == 999)  # the overwrite of the empty space and
     # no +50 anymore as that is the contributor that was removed
     assert numpy.all(arr[LayersEnum.ELEVATION, r0:r0 + 5, c0 + 7:c0 + 10] == SE_5x5[2][:, 2:])  # the original contrib=3 data
-    contrib3 = numpy.frombuffer(numpy.int32(3).tobytes(), numpy.float32)[0]  # contributors are now stored encoded as float32
+    contrib3 = contributor_int_to_float(3)  # contributors are now stored encoded as float32
     assert numpy.all(arr[LayersEnum.CONTRIBUTOR, r0:r0 + 5, c0 + 7:c0 + 10] == contrib3)  # the original contrib=3 data
     assert numpy.all(arr[LayersEnum.ELEVATION, r0 + 5:r0 + 10, c0:c0 + 5] == NW_5x5[2])  # data from tif
     # data from tif replaced the memory array (contrib=6) that was put in
-    contrib5 = numpy.frombuffer(numpy.int32(5).tobytes(), numpy.float32)[0]  # contributors are now stored encoded as float32
+    contrib5 = contributor_int_to_float(5)  # contributors are now stored encoded as float32
     assert numpy.all(arr[LayersEnum.CONTRIBUTOR, r0 + 5:r0 + 10, c0:c0 + 5] == contrib5)
 
 

@@ -327,8 +327,10 @@ def main(config):
                 if all_priorities == [tile_manager.RUNNING_PRIORITY]:
                     LOGGER.info("Waiting to give running tiles time to finish")
                 else:
-                    LOGGER.info("Waiting to before checking for more tiles to process")
-                time.sleep(60)
+                    LOGGER.info("No tiles to process currently, waiting a bit before checking for more tiles to process")
+                for n in range(30):
+                    do_keyboard_actions(tile_manager, tile_processes)
+                    time.sleep(2)
             for tile_info in tile_manager.pick_next_tile(tile_processes):
                 do_keyboard_actions(tile_manager, tile_processes)
                 remove_finished_processes(tile_processes, tile_manager)

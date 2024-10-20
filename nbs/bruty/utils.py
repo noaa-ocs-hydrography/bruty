@@ -1281,3 +1281,33 @@ def popen_kwargs(new_console=True, activate=True, minimize=False):
     kwargs['startupinfo'] = info
     return kwargs
 
+
+def contributor_float_to_int(val):
+    get_first = False
+    if not isinstance(val, numpy.ndarray):
+        if not hasattr(val, "__iter__"):
+            get_first = True
+        val_array = numpy.array(val)
+    else:
+        val_array = val
+
+    ret_val = numpy.frombuffer(val_array.astype(numpy.float32).tobytes(), numpy.int32)
+    if get_first:
+        ret_val = ret_val[0]
+    return ret_val
+
+
+def contributor_int_to_float(val):
+    get_first = False
+    if not isinstance(val, numpy.ndarray):
+        if not hasattr(val, "__iter__"):
+            get_first = True
+        val_array = numpy.array(val)
+    else:
+        val_array = val
+
+    ret_val = numpy.frombuffer(val_array.astype(numpy.int32).tobytes(), numpy.float32)
+    if get_first:
+        ret_val = ret_val[0]
+    return ret_val
+

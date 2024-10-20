@@ -9,7 +9,7 @@ from osgeo import gdal, osr
 
 from nbs.scripts.tile_specs import TileInfo
 from nbs.bruty import tile_export
-
+from nbs.bruty.utils import contributor_int_to_float, contributor_float_to_int
 from xipe_dev.xipe.raster import CONTRIBUTOR_BAND_NAME, ELEVATION_BAND_NAME, UNCERTAINTY_BAND_NAME
 from test_data import master_data, make_clean_dir, data_dir, SW_5x5, NW_5x5, SE_5x5, MID_5x5
 from nbs.configs import get_logger, iter_configs, set_file_logging, log_config, parse_multiple_values
@@ -69,7 +69,7 @@ def test_complete_export_tiled():
             data[r+j, c:c+point_size] = 1 + j
     # make a fake contributor list.  We made integers but now have to pretend they are ints encoded as floats - so convert them
     contribs = numpy.unique(data)
-    int_contribs = numpy.sort(numpy.frombuffer(contribs.astype(numpy.float32).tobytes(), numpy.int32)).tolist()
+    int_contribs = contributor_float_to_int(contribs).tolist()
     fake_contributors = {n: {'from_filename': "test"} for n in int_contribs}
     names = ELEVATION_BAND_NAME, UNCERTAINTY_BAND_NAME, CONTRIBUTOR_BAND_NAME
     for n in range(new_ds.RasterCount):

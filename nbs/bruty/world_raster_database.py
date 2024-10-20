@@ -27,7 +27,7 @@ from osgeo import gdal, ogr  # , osr
 from HSTB.drivers import bag
 from nbs_utils.points_utils import mmap_from_npz, iterate_points_file
 from nbs.bruty.utils import merge_arrays, get_crs_transformer, onerr, tqdm, make_gdal_dataset_area, get_epsg_or_wkt, \
-    calc_area_array_params, iterate_gdal_image, transform_rect  # , add_uncertainty_layer, compute_delta_coord, merge_array, make_gdal_dataset_size
+    calc_area_array_params, iterate_gdal_image, transform_rect, contributor_float_to_int, contributor_int_to_float
 from nbs.bruty.raster_data import TiffStorage, LayersEnum, affine, inv_affine, affine_center, RasterData  # , arrays_dont_match
 # noinspection PyUnresolvedReferences
 from nbs.bruty.history import DiskHistory, AccumulationHistory, RasterHistory
@@ -146,34 +146,6 @@ for x in wdb.removed_ids.values():
     if x.nbs_id == 171004235:
         print(x)
 """
-
-def contributor_float_to_int(val):
-    get_first = False
-    if not isinstance(val, numpy.ndarray):
-        if not hasattr(val, "__iter__"):
-            get_first = True
-        val_array = numpy.array(val)
-    else:
-        val_array = val
-
-    ret_val = numpy.frombuffer(val_array.astype(numpy.float32).tobytes(), numpy.int32)
-    if get_first:
-        ret_val = ret_val[0]
-    return ret_val
-
-def contributor_int_to_float(val):
-    get_first = False
-    if not isinstance(val, numpy.ndarray):
-        if not hasattr(val, "__iter__"):
-            get_first = True
-        val_array = numpy.array(val)
-    else:
-        val_array = val
-
-    ret_val = numpy.frombuffer(val_array.astype(numpy.int32).tobytes(), numpy.float32)
-    if get_first:
-        ret_val = ret_val[0]
-    return ret_val
 
 
 def use_locks(port):
@@ -1908,7 +1880,7 @@ class WorldDatabase(VABC):
         #  Also have to modify the sorting routine to accommodate the difference
         #  (translate the ints to floats there too)
         try:
-            float_contributor = numpy.frombuffer(numpy.int32(contrib_id).tobytes(), numpy.float32)[0]
+            float_contributor = contributor_int_to_float(contrib_id)
         except ValueError:
             float_contributor = numpy.float32(numpy.nan)
 
