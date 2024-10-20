@@ -146,6 +146,36 @@ for x in wdb.removed_ids.values():
     if x.nbs_id == 171004235:
         print(x)
 """
+
+def contributor_float_to_int(val):
+    get_first = False
+    if not isinstance(val, numpy.ndarray):
+        if not hasattr(val, "__iter__"):
+            get_first = True
+        val_array = numpy.array(val)
+    else:
+        val_array = val
+
+    ret_val = numpy.frombuffer(val_array.astype(numpy.float32).tobytes(), numpy.int32)
+    if get_first:
+        ret_val = ret_val[0]
+    return ret_val
+
+def contributor_int_to_float(val):
+    get_first = False
+    if not isinstance(val, numpy.ndarray):
+        if not hasattr(val, "__iter__"):
+            get_first = True
+        val_array = numpy.array(val)
+    else:
+        val_array = val
+
+    ret_val = numpy.frombuffer(val_array.astype(numpy.int32).tobytes(), numpy.float32)
+    if get_first:
+        ret_val = ret_val[0]
+    return ret_val
+
+
 def use_locks(port):
     global LockNotAcquired, BaseLockException, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, NO_LOCK, current_address, Lock, AdvisoryLock
     if port is None or port == "":
@@ -698,7 +728,7 @@ class WorldTilesBackend(VABC):
         self._loaded_from_version = json_dict['version']
         self._version = json_dict['version']
 
-    def iterate_filled_tiles(self):
+    def iterate_filled_tile_indices(self):
         for tx_dir in tqdm(list(os.scandir(self.data_path)), desc='X directories', mininterval=.7, leave=False):
             if tx_dir.is_dir():
                 for ty_dir in tqdm(list(os.scandir(tx_dir)), desc='Y directories', mininterval=.7, leave=False):
@@ -708,12 +738,16 @@ class WorldTilesBackend(VABC):
                         except ValueError:
                             print(f"non-tile directory in the database {tx_dir.name}, {ty_dir.name}")
                         else:
-                            tile_history = self.get_tile_history_by_index(tx, ty)
-                            try:
-                                raster = tile_history[-1]
-                                yield tx, ty, raster, tile_history.get_metadata()
-                            except IndexError:
-                                pass  # print("accumulation db made directory but not filled?", ty_dir.path)
+                            yield tx, ty
+
+    def iterate_filled_tiles(self):
+        for tx, ty in self.iterate_filled_tile_indices():
+            tile_history = self.get_tile_history_by_index(tx, ty)
+            try:
+                raster = tile_history[-1]
+                yield tx, ty, raster, tile_history.get_metadata()
+            except IndexError:
+                pass  # print("accumulation db made directory but not filled?", ty_dir.path)
 
     def append_accumulation_db(self, accumulation_db):
         # iterate the acculation_db and append the last rasters from that into this db
@@ -1067,6 +1101,65 @@ class WorldDatabase(VABC):
         obj.log_level = log_level
         obj.from_dict(data)
         return obj
+
+    def create_vrt(self) -> None:
+        """ Build VRT from bruty subtile tifs. """
+        vrt_path = pathlib.Path(self.db.data_path).joinpath("combine.vrt")
+        files = []
+        for tx, ty in self.db.iterate_filled_tile_indices():
+            tile_history = self.db.get_tile_history_by_index(tx, ty)
+            fname = tile_history.history.filename_from_index(-1)
+            files.append(str(fname))
+
+        try:
+            if os.path.isfile(vrt_path):
+                os.remove(vrt_path)
+            if os.path.isfile(str(vrt_path) + ".ovr"):
+                os.remove(str(vrt_path) + ".ovr")
+        except (OSError, PermissionError) as e:
+            print(f"Failed to remove older vrt files for {vrt_path}\n" "Please close all files and attempt again")
+        else:
+            vrt_options = gdal.BuildVRTOptions(options='-allow_projection_difference', resampleAlg="near", resolution="highest")
+            try:
+                # for idx in range(len(files)):
+                #     files[idx] = os.path.relpath(files[idx], os.path.dirname(vrt_path))
+                # relative_vrt_path = os.path.relpath(vrt_path, os.getcwd())
+                vrt = gdal.BuildVRT(str(vrt_path), files, options=vrt_options)
+                band1 = vrt.GetRasterBand(1)
+                band1.SetDescription("Elevation")
+                band2 = vrt.GetRasterBand(2)
+                band2.SetDescription("Uncertainty")
+                band3 = vrt.GetRasterBand(3)
+                band3.SetDescription("Contributor")
+                vrt = None
+            except:
+                import traceback
+                traceback.print_exc()
+                raise RuntimeError(f"VRT failed to build for {vrt_path}")
+            vrt = gdal.Open(str(vrt_path), gdal.GA_Update)
+            vrt.BuildOverviews("NEAREST", overviewlist=[2,4,8], options=["BIGTIFF=NO", "COMPRESS=DEFLATE"])
+
+            expected_fields = dict(
+                value=[gdal.GFT_Real, gdal.GFU_MinMax],
+                source_survey_id=[gdal.GFT_String, gdal.GFU_Generic],
+                nbs_id=[gdal.GFT_Integer, gdal.GFU_Generic],
+                decay_score = [gdal.GFT_Real, gdal.GFU_Generic]
+            )
+            rat = gdal.RasterAttributeTable()
+            for entry in expected_fields:
+                field_type, usage = expected_fields[entry]
+                rat.CreateColumn(entry, field_type, usage)
+            rat.SetRowCount(len(self.included_surveys))
+            for row_idx, survey_name in enumerate(self.included_surveys):
+                survey = self.included_surveys[survey_name]
+                float_id = float(contributor_int_to_float(survey.nbs_id))
+                rat.SetValueAsDouble(row_idx, 0, float_id)
+                rat.SetValueAsString(row_idx, 1, survey_name)
+                rat.SetValueAsInt(row_idx, 2, survey.nbs_id)
+                rat.SetValueAsDouble(row_idx, 3, survey.sorting_metadata[0])
+            contributor_band = vrt.GetRasterBand(LayersEnum.CONTRIBUTOR)
+            contributor_band.SetDefaultRAT(rat)
+            vrt = None
 
     def search_for_accum_db(self):
         possible_accum = []

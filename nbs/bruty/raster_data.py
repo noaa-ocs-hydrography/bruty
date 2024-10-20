@@ -215,10 +215,13 @@ class TiffStorage(Storage):
         layer_nums = self._layers_as_ints(layers)
         # @todo check the version number and update for additional layers if needed
         dataset = gdal.Open(str(self.path))  # str in case it's a pathlib.Path
+        x1, resx, dxy, y1, dyx, resy = dataset.GetGeoTransform()
+        if resy > 0:
+            raise ValueError("TiffStorage is expecting the y resolution to be negative in order to support VRTs")
         array_list = []
         for lyr in layer_nums:
             band = dataset.GetRasterBand(lyr + 1)
-            array_list.append(band.ReadAsArray())
+            array_list.append(numpy.flipud(band.ReadAsArray()))
             del band
         del dataset
         return numpy.array(array_list)
@@ -283,7 +286,8 @@ class TiffStorage(Storage):
             dx = (max_x - min_x) / shape[2]
             dy = (max_y - min_y) / shape[1]
             epsg = meta['epsg']
-            gt = [min_x, dx, 0, min_y, 0, dy]
+            # set y resolution to negative to support VRTs -- the get_ and set_arrays will flip the data so it looks positive to the caller
+            gt = [min_x, dx, 0, min_y, 0, -dy]
 
             # Set location
             dataset.SetGeoTransform(gt)
@@ -320,7 +324,7 @@ class TiffStorage(Storage):
 
         for index, lyr in enumerate(layer_nums):
             band = dataset.GetRasterBand(lyr + 1)
-            band.WriteArray(arrays[index])
+            band.WriteArray(numpy.flipud(arrays[index]))
             del band
         del dataset
 

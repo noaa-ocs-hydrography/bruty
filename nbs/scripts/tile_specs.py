@@ -7,7 +7,7 @@ import time
 
 import numpy
 import psycopg2
-from osgeo import ogr
+from osgeo import ogr, gdal
 from shapely import wkt, wkb
 
 from nbs.bruty.nbs_postgres import get_tablenames, show_last_ids, connection_with_retries, ConnectionInfo, pg_update

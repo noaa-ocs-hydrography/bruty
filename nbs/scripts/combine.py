@@ -496,9 +496,12 @@ def perform_qc_checks(tile_info, conn_info, nav_flag_value, repair=True, check_l
 
     """
     try:
+        tile_info.acquire_lock()
         db = WorldDatabase.open(tile_info.combine.data_location)
     except FileNotFoundError:
         LOGGER.info(f"{tile_info.combine.data_location} was not found")
+    except BaseLockException:
+        LOGGER.info(f"{tile_info.combine.data_location} was locked")
     else:
         LOGGER.info("*** Checking for positioning errors...")
         position_errors = db.search_for_bad_positioning()
@@ -618,6 +621,7 @@ def perform_qc_checks(tile_info, conn_info, nav_flag_value, repair=True, check_l
         LOGGER.info("*** Finished checks")
 
         errors = reinserts_remain, tile_missing, tile_extra, contributor_missing, last_insert_unfinished
+        tile_info.release_lock()
         return errors
 
 
@@ -730,6 +734,15 @@ if __name__ == "__main__":
                     server.set_debuglevel(1)
                     server.send_message(msg)
                     server.quit()
+                try:
+                    # until we find the combine bug we'll make the VRT after the validation
+                    tile_info.acquire_lock()
+                    db = WorldDatabase.open(tile_info.combine.data_location)
+                    db.create_vrt()
+                    tile_info.release_lock()
+                except BaseLockException:
+                    LOGGER.warning(f"Failed to acquire lock for {tile_info.combine.data_location} to make overview")
+
         except Exception as e:
             traceback.print_exc()
             msg = f"{args.bruty_path} use_navigation_flag={not args.ignore_for_nav} had an unhandled exception - see message above"
