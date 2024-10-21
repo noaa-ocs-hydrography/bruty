@@ -37,7 +37,7 @@ def set_bruty_tiffs_orientation(bruty_path, positive_ns=False):
 
 if __name__ == "__main__":
     root = pathlib.Path(r"C:\Data\NBS\debug\combines")
-    for p in root.glob("*"):
+    for p in root.glob("*"):  # probably run multiple times with different PBX paths
         if p.is_dir():
             print("reversing (as needed)", p)
             try:
