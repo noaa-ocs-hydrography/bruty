@@ -62,8 +62,8 @@ def fill_spec_tables_from_disk():
                         export_time = rec[0]
                         export_code = 0
                     else:
-                        export_time = "NULL"
-                        export_code = "NULL"
+                        export_time = None
+                        export_code = None
                     cursor.execute(f"""UPDATE spec_tiles SET combine_request_time=%s, export_request_time=%s WHERE t_id=%s""",
                                    (datetime.datetime(1970, 1, 1), export_time, t_id))
                     cursor.execute(f"""UPDATE spec_resolutions SET export_start_time=%s, export_end_time=%s, export_code=%s WHERE r_id=%s""",
