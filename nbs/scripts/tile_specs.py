@@ -125,6 +125,14 @@ class CombineOperation(BrutyOperation):
         super().__init__(record)
 
 
+class ENCCombineOperation(CombineOperation):
+    OPERATION = 'enc'
+    REQUEST_TIME = OPERATION + "_" + BrutyOperation.REQUEST_TIME
+
+    def __init__(self, record=None):
+        super().__init__(record)
+
+
 class ExportOperation(BrutyOperation):
     OPERATION = 'export'
     START_TIME = OPERATION + "_" + BrutyOperation.START_TIME
@@ -587,7 +595,10 @@ class CombineTileInfo(ResolutionTileInfo):
         self.datatype = review_tile[self.DATATYPE]
         self.for_nav = review_tile[self.FOR_NAV]
         self.combine_id = review_tile[self.COMBINE_ID]
-        self.combine = CombineOperation(review_tile)
+        if self.datatype == ENC:
+            self.combine = ENCCombineOperation(review_tile)
+        else:
+            self.combine = CombineOperation(review_tile)
         self.out_of_date = review_tile.get(self.OUT_OF_DATE, None)
         self.summary = review_tile.get(self.SUMMARY, None)
         # self.res_foreign_key = review_tile.get(self.RESOLUTION_ID, None)  # this will be in the ResolutionTileInfo as res_tile_id
