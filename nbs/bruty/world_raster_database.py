@@ -1091,47 +1091,48 @@ class WorldDatabase(VABC):
         except (OSError, PermissionError) as e:
             print(f"Failed to remove older vrt files for {vrt_path}\n" "Please close all files and attempt again")
         else:
-            vrt_options = gdal.BuildVRTOptions(options='-allow_projection_difference', resampleAlg="near", resolution="highest")
-            try:
-                # for idx in range(len(files)):
-                #     files[idx] = os.path.relpath(files[idx], os.path.dirname(vrt_path))
-                # relative_vrt_path = os.path.relpath(vrt_path, os.getcwd())
-                vrt = gdal.BuildVRT(str(vrt_path), files, options=vrt_options)
-                band1 = vrt.GetRasterBand(1)
-                band1.SetDescription("Elevation")
-                band2 = vrt.GetRasterBand(2)
-                band2.SetDescription("Uncertainty")
-                band3 = vrt.GetRasterBand(3)
-                band3.SetDescription("Contributor")
-                vrt = None
-            except:
-                import traceback
-                traceback.print_exc()
-                raise RuntimeError(f"VRT failed to build for {vrt_path}")
-            vrt = gdal.Open(str(vrt_path), gdal.GA_Update)
-            vrt.BuildOverviews("NEAREST", overviewlist=[2,4,8], options=["BIGTIFF=NO", "COMPRESS=DEFLATE"])
+            if files:
+                vrt_options = gdal.BuildVRTOptions(options='-allow_projection_difference', resampleAlg="near", resolution="highest")
+                try:
+                    # for idx in range(len(files)):
+                    #     files[idx] = os.path.relpath(files[idx], os.path.dirname(vrt_path))
+                    # relative_vrt_path = os.path.relpath(vrt_path, os.getcwd())
+                    vrt = gdal.BuildVRT(str(vrt_path), files, options=vrt_options)
+                    band1 = vrt.GetRasterBand(1)
+                    band1.SetDescription("Elevation")
+                    band2 = vrt.GetRasterBand(2)
+                    band2.SetDescription("Uncertainty")
+                    band3 = vrt.GetRasterBand(3)
+                    band3.SetDescription("Contributor")
+                    vrt = None
+                except:
+                    import traceback
+                    traceback.print_exc()
+                    raise RuntimeError(f"VRT failed to build for {vrt_path}")
+                vrt = gdal.Open(str(vrt_path), gdal.GA_Update)
+                vrt.BuildOverviews("NEAREST", overviewlist=[2,4,8], options=["BIGTIFF=NO", "COMPRESS=DEFLATE"])
 
-            expected_fields = dict(
-                value=[gdal.GFT_Real, gdal.GFU_MinMax],
-                source_survey_id=[gdal.GFT_String, gdal.GFU_Generic],
-                nbs_id=[gdal.GFT_Integer, gdal.GFU_Generic],
-                decay_score = [gdal.GFT_Real, gdal.GFU_Generic]
-            )
-            rat = gdal.RasterAttributeTable()
-            for entry in expected_fields:
-                field_type, usage = expected_fields[entry]
-                rat.CreateColumn(entry, field_type, usage)
-            rat.SetRowCount(len(self.included_surveys))
-            for row_idx, survey_name in enumerate(self.included_surveys):
-                survey = self.included_surveys[survey_name]
-                float_id = float(contributor_int_to_float(survey.nbs_id))
-                rat.SetValueAsDouble(row_idx, 0, float_id)
-                rat.SetValueAsString(row_idx, 1, survey_name)
-                rat.SetValueAsInt(row_idx, 2, survey.nbs_id)
-                rat.SetValueAsDouble(row_idx, 3, survey.sorting_metadata[0])
-            contributor_band = vrt.GetRasterBand(LayersEnum.CONTRIBUTOR)
-            contributor_band.SetDefaultRAT(rat)
-            vrt = None
+                expected_fields = dict(
+                    value=[gdal.GFT_Real, gdal.GFU_MinMax],
+                    source_survey_id=[gdal.GFT_String, gdal.GFU_Generic],
+                    nbs_id=[gdal.GFT_Integer, gdal.GFU_Generic],
+                    decay_score = [gdal.GFT_Real, gdal.GFU_Generic]
+                )
+                rat = gdal.RasterAttributeTable()
+                for entry in expected_fields:
+                    field_type, usage = expected_fields[entry]
+                    rat.CreateColumn(entry, field_type, usage)
+                rat.SetRowCount(len(self.included_surveys))
+                for row_idx, survey_name in enumerate(self.included_surveys):
+                    survey = self.included_surveys[survey_name]
+                    float_id = float(contributor_int_to_float(survey.nbs_id))
+                    rat.SetValueAsDouble(row_idx, 0, float_id)
+                    rat.SetValueAsString(row_idx, 1, survey_name)
+                    rat.SetValueAsInt(row_idx, 2, survey.nbs_id)
+                    rat.SetValueAsDouble(row_idx, 3, survey.sorting_metadata[0])
+                contributor_band = vrt.GetRasterBand(LayersEnum.CONTRIBUTOR)
+                contributor_band.SetDefaultRAT(rat)
+                vrt = None
 
     def search_for_accum_db(self):
         possible_accum = []
