@@ -10,23 +10,48 @@ gdal.UseExceptions()
 from nbs.bruty.world_raster_database import WorldDatabase
 
 """
-# PBG19     3 hours    size GB: 11.45  file count:  27247
-# PBG20     3 hours    size GB: 14.98  file count:  32831
-PBC18     9          size GB: 27.71  file count:  87686
-PBC19    18          size GB: 87.47  file count: 186597
-PBG14     6          size GB: 20.24  file count:  66713
-PBG15    18          size GB: 47.09  file count: 208974
-PBG16    12          size GB: 40.77  file count: 122119
-PBG18
-PBB16 
-PBB17    30          size GB: 15.13  file count: 441098
-PBB18
-PBB19
-PBD
-PBE
-PBA
+# PBG19     3 hours  size GB : 11.45   file count:  27247
+# PBG20     3 hours  size GB:  14.98   file count:  32831
+PBC18     9          size GB:  27.71   file count:  87686
+PBC19    18          size GB:  87.47   file count: 186597
+PBG14     6          size GB:  20.24   file count:  66713
+PBG15    18          size GB:  47.09   file count: 208974
+PBG16    12          size GB:  40.77   file count: 122119
+PBG18     1          size GB:   0.64   file count:   2918
+PBB16    12          size GB:  48.24   file count: 121057
+PBB17    36          size GB:  15.13   file count: 441098
+PBB18     6          size GB:  20.02   file count:  70469 
+PBB19     3          size GB:  96.61   file count:  33379
+PBA       7          size GB:  26.12   file count:  70123
+PBD       1          size GB:   4.12   file count:   9482
+PBE17     1          size GB:   4.23   file count:  10052
+PBE18    36          size GB: 128.72   file count: 203433
+PBE19     3          size GB:  17.37   file count:  23440
 """
-def set_bruty_tiffs_orientation(bruty_path, positive_ns=False, just_size=True):
+runs = """
+PBC utm18 _
+PBC utm19 _
+PBG utm14 _
+PBG utm15 _
+PBG utm16 _
+PBG utm18 _
+PBB utm16 _
+PBB utm17 tile[0-4]
+PBB utm17 tile[5-9]
+PBB utm18 _
+PBB utm19 _
+PBA _ _
+PBD _ _
+PBE utm17 _
+PBE utm18 tile1
+PBE utm18 tile[2-9]
+PBE utm19 _
+
+PB _ _
+
+"""
+
+def set_bruty_tiffs_orientation(bruty_path, positive_ns=False, just_size=False):
     """
     Flip the tiffs in the bruty database
     """
@@ -75,11 +100,10 @@ if __name__ == "__main__":
     if not sys.argv[1] or not sys.argv[2]:
         print("Please provide a production branch and utm zone")
         sys.exit()
-    log_file = open(f"{sys.argv[1]}_{sys.argv[2]}_conversion.log", "a")
-    for p in root.glob(f"{sys.argv[1]}_*{sys.argv[2]}*"):  # probably run multiple times with different PBX paths
+    log_file = open(f"{sys.argv[1]}_{sys.argv[2]}_{sys.argv[3]}_conversion.log", "a")
+    for p in root.glob(f"{sys.argv[1]}*{sys.argv[2]}*{sys.argv[3]}*"):  # probably run multiple times with different PBX paths
         if p.is_dir():
             print("reversing (as needed)", p)
-            # break
             try:
                 t = time.time()
                 folder_cnt, folder_sz, msg = set_bruty_tiffs_orientation(p)
