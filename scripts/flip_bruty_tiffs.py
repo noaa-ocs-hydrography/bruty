@@ -18,7 +18,7 @@ def set_bruty_tiffs_orientation(bruty_path, positive_ns=False, just_size=True):
     bruty_path = pathlib.Path(bruty_path)
     db = WorldDatabase.open(bruty_path)
     for tx, ty in db.db.iterate_filled_tile_indices():
-        data_dir = bruty_path.joinpath(f"{tx}\\{ty}")
+        data_dir = bruty_path.joinpath(f"{tx}", f"{ty}")
         for fname in os.scandir(data_dir):
             if ".tif" in str(fname.name):
                 sz += pathlib.Path(fname).stat().st_size
