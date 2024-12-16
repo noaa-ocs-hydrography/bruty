@@ -6,6 +6,8 @@ import tempfile
 import pickle
 import logging
 import sqlite3
+import pyarrow.parquet as pq
+import geopandas as gpd
 import time
 import multiprocessing
 import importlib
@@ -1399,6 +1401,55 @@ class WorldDatabase(VABC):
             print("@todo - do transforms correctly with proj/vdatum etc")
         return transformer
 
+    def iterate_pts_geoparquet(self, path_to_survey_data, block_size=30000000):
+        """ Reads a geoparquet having point data with an uncertainty field per point.
+
+        Parameters
+        ----------
+        path_to_survey_data
+        block_size : int
+            maximum number of points to read at once
+
+        Returns
+        -------
+        generator yielding (wkt, x, y, depth, uncertainty)
+
+        """
+        # check schema for missing fields before reading data
+        schema_dict = {field.name: str(field.type) for field in pq.read_schema(path_to_survey_data)}
+        expected_fields = ['x', 'y', 'depth', 'uncertainty', 'wkt'] 
+        missing_fields = [field for field in expected_fields if field not in schema_dict]
+        if missing_fields:
+            self.db.LOGGER.warning(f"GeoParquet {path_to_survey_data} missing field(s): {missing_fields}")
+
+        # set a default crs
+        wkt = gpd.GeoDataFrame(columns=['geometry']).set_crs('EPSG:4326').crs.to_wkt()
+
+        # stage the file for reading
+        parquet_file = pq.ParquetFile(path_to_survey_data)
+
+        # use crs from file if found in the "primary column" metadata
+        metadata = parquet_file.metadata
+        geo_metadata = json.loads(metadata.metadata[b'geo'])
+        primary_column = geo_metadata.get('primary_column', None)
+        if primary_column:
+            srs = geo_metadata.get('columns', {}).get(primary_column, {}).get('crs', {})
+            wkt = gpd.GeoDataFrame(columns=['geometry']).set_crs(srs).crs.to_wkt()
+
+        # read the file into dataframe batches yielding numpy arrays
+        for batch in parquet_file.iter_batches(batch_size=block_size, columns=expected_fields):
+            df = batch.to_pandas()
+            x = df['x'].values
+            y = df['y'].values
+            depth = df['depth'].values
+            uncertainty = df['uncertainty'].values
+            ## ALTERNATIVELY: force the dtypes from the schema
+            # x = df['x'].values.astype(numpy.dtype(schema_dict['x']))
+            # y = df['y'].values.astype(numpy.dtype(schema_dict['y']))
+            # depth = df['depth'].values.astype(numpy.dtype(schema_dict['depth']))
+            # uncertainty = df['uncertainty'].values.astype(numpy.dtype(schema_dict['uncertainty']))
+            yield wkt, x, y, depth, uncertainty
+
     def iterate_pts_gpkg(self, path_to_survey_data, block_size=30000000):
         """ Reads a geopackage for layers that are point data (currently ignores rasters or other geometries) with an uncertainty field per point.
 
@@ -1574,6 +1625,8 @@ class WorldDatabase(VABC):
                     with tqdm(desc="geocode+split", total=0, leave=False) as progress_bar:
                         if str(path_to_survey_data).lower().endswith(".gpkg"):
                             pts_iterator = self.iterate_pts_gpkg(path_to_survey_data, block_size=block_size)
+                        elif str(path_to_survey_data).lower().endswith(".parquet"):
+                            pts_iterator = self.iterate_pts_geoparquet(path_to_survey_data, block_size=block_size)
                         else:
                             pts_iterator = iterate_points_file(path_to_survey_data, dformat=dformat, block_size=block_size)
                         for wkt, x, y, depth, uncertainty in pts_iterator:
@@ -1620,6 +1673,8 @@ class WorldDatabase(VABC):
                             storage_db = self.db.make_accumulation_db(temp_path)
                             if str(path_to_survey_data).lower().endswith(".gpkg"):
                                 pts_iterator = self.iterate_pts_gpkg(path_to_survey_data, block_size=block_size)
+                            elif str(path_to_survey_data).lower().endswith(".parquet"):
+                                pts_iterator = self.iterate_pts_geoparquet(path_to_survey_data, block_size=block_size)
                             else:
                                 pts_iterator = iterate_points_file(path_to_survey_data, dformat=dformat, block_size=block_size)
                             for wkt, x, y, depth, uncertainty in pts_iterator:
