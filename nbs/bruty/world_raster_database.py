@@ -6,8 +6,6 @@ import tempfile
 import pickle
 import logging
 import sqlite3
-import pyarrow.parquet as pq
-import geopandas as gpd
 import time
 import multiprocessing
 import importlib
@@ -18,6 +16,11 @@ from datetime import datetime
 from collections.abc import MutableMapping
 
 import numpy
+try:
+    import pyarrow.parquet as pq
+    import geopandas as gpd
+except:
+    print("Failed to load pyarrow or geopandas, this will cause an exception if parquet data is loaded later")
 
 try:
     import fiona
@@ -1364,7 +1367,7 @@ class WorldDatabase(VABC):
                                         transaction_id=transaction_id, sorting_metadata=sorting_metadata)
                 done = True
         if not done:
-            if extension in ['.txt', '.npy', '.csv', '.npz', '.gpkg']:
+            if extension in ['.txt', '.npy', '.csv', '.npz', '.gpkg', '.parquet']:
                 data_modified = self.insert_points_survey(path_to_survey_data, override_epsg=override_epsg, contrib_id=contrib_id, compare_callback=compare_callback,
                                        reverse_z=reverse_z, limit_to_tiles=limit_to_tiles, force=force, survey_score=survey_score, flag=flag,
                                        dformat=dformat, transaction_id=transaction_id, sorting_metadata=sorting_metadata, crop=crop)
@@ -1417,13 +1420,13 @@ class WorldDatabase(VABC):
         """
         # check schema for missing fields before reading data
         schema_dict = {field.name: str(field.type) for field in pq.read_schema(path_to_survey_data)}
-        expected_fields = ['x', 'y', 'depth', 'uncertainty', 'wkt'] 
+        UNCERTAINTY = 'Uncertainty'
+        GEOMETRY = 'geometry'
+        CLASSIFICATION = 'Classification'
+        expected_fields = [UNCERTAINTY, CLASSIFICATION, GEOMETRY]
         missing_fields = [field for field in expected_fields if field not in schema_dict]
         if missing_fields:
             self.db.LOGGER.warning(f"GeoParquet {path_to_survey_data} missing field(s): {missing_fields}")
-
-        # set a default crs
-        wkt = gpd.GeoDataFrame(columns=['geometry']).set_crs('EPSG:4326').crs.to_wkt()
 
         # stage the file for reading
         parquet_file = pq.ParquetFile(path_to_survey_data)
@@ -1432,17 +1435,17 @@ class WorldDatabase(VABC):
         metadata = parquet_file.metadata
         geo_metadata = json.loads(metadata.metadata[b'geo'])
         primary_column = geo_metadata.get('primary_column', None)
-        if primary_column:
-            srs = geo_metadata.get('columns', {}).get(primary_column, {}).get('crs', {})
-            wkt = gpd.GeoDataFrame(columns=['geometry']).set_crs(srs).crs.to_wkt()
+        srs = geo_metadata.get('columns', {}).get(primary_column, {}).get('crs', {})
+        wkt = gpd.GeoDataFrame(columns=[GEOMETRY]).set_crs(srs).crs.to_wkt()
 
         # read the file into dataframe batches yielding numpy arrays
         for batch in parquet_file.iter_batches(batch_size=block_size, columns=expected_fields):
             df = batch.to_pandas()
-            x = df['x'].values
-            y = df['y'].values
-            depth = df['depth'].values
-            uncertainty = df['uncertainty'].values
+            pts = gpd.GeoSeries.from_wkb(df[GEOMETRY])
+            x = pts.x.values
+            y = pts.y.values
+            depth = pts.z.values
+            uncertainty = df[UNCERTAINTY].values
             ## ALTERNATIVELY: force the dtypes from the schema
             # x = df['x'].values.astype(numpy.dtype(schema_dict['x']))
             # y = df['y'].values.astype(numpy.dtype(schema_dict['y']))
@@ -1520,7 +1523,7 @@ class WorldDatabase(VABC):
     def insert_points_survey(self, path_to_survey_data, survey_score=100, flag=0, dformat=None, override_epsg: int = NO_OVERRIDE,
                           contrib_id=numpy.nan, compare_callback=None, reverse_z: bool = False, limit_to_tiles=None, force=False, transaction_id=-1,
                           sorting_metadata=None, block_size=30000000, crop=False):
-        """ Reads a text file and inserts into the tiled database.
+        """ Reads a points file and inserts into the tiled database.
         The format parameter is passed to numpy.loadtxt and needs to have names of x, y, depth, uncertainty.
 
         Parameters
@@ -1599,6 +1602,21 @@ class WorldDatabase(VABC):
                 # Make sure all points layers were checked and disjoint from the area we want
                 if len(disjoints) == point_lyr_count and all(disjoints):
                     skip_as_disjoint = True
+            elif str(path_to_survey_data).lower().endswith(".parquet"):
+                parquet_file = pq.ParquetFile(path_to_survey_data)
+                metadata = parquet_file.metadata
+                geo_metadata = json.loads(metadata.metadata[b'geo'])
+                lx, ly, ux, uy = geo_metadata['columns']['geometry']['bbox']
+                primary_column = geo_metadata.get('primary_column', None)
+                srs = geo_metadata.get('columns', {}).get(primary_column, {}).get('crs', {})
+                wkt = gpd.GeoDataFrame(columns=['geometry']).set_crs(srs).crs.to_wkt()
+                if wkt is not None and override_epsg == NO_OVERRIDE:
+                    epsg = wkt
+                    transformer = get_crs_transformer(epsg, self.db.epsg)
+                else:
+                    transformer = None
+                bounds = poly_from_pts(numpy.array(((lx, ly), (ux, uy))), transformer)
+                skip_as_disjoint = self.area_of_interest and not self.area_of_interest.Intersects(bounds)
 
             if skip_as_disjoint:
                 self.insert_survey_as_outside_area_of_interest(path_to_survey_data, survey_score, flag, dformat, override_epsg,

@@ -303,6 +303,7 @@ def main(config):
 
     quitter = False
     debug_config = config.getboolean('DEBUG', False)
+    debug_build = config.getboolean('DEBUG_FORCE_BUILD', False)
     is_service = config.getboolean('RUN_AS_SERVICE', False)
     # port = config.get('lock_server_port', None)
     use_locks(None)  # @ TODO change this to only be using Postgres locks - either row locks on a table or advisory locks
@@ -326,11 +327,15 @@ def main(config):
     tile_processes = {}
 
     try:
-        tile_manager.refresh_tiles_list(needs_combining=True, needs_exporting=True)
+        check_need_combine = True
+        check_need_export = True
+        if debug_config and debug_build:  # make everything run by turning
+            check_need_export = check_need_combine = False
+        tile_manager.refresh_tiles_list(iff_needs_combining=check_need_combine, iff_needs_exporting=check_need_export)
         while is_service or tile_manager.remaining_tiles or tile_processes:  # run forever if a service, otherwise run until all tiles are combined
             # @TODO we need to change the log file occasionally to prevent it from getting too large
             # @TODO print("Move to unit test")
-            # tile_manager.refresh_tiles_list(needs_combining=False, needs_exporting=False)
+            # tile_manager.refresh_tiles_list(iff_needs_combining=False, iff_needs_exporting=False)
             # for x in range(15):
             #     next_tile = tile_manager.pick_next_tile(tile_processes)
             #     print(next_tile)
@@ -409,7 +414,7 @@ def main(config):
                     do_keyboard_actions(tile_manager, tile_processes)
             else:
                 time.sleep(2)
-            tile_manager.refresh_tiles_list(needs_combining=True, needs_exporting=True)
+            tile_manager.refresh_tiles_list(iff_needs_combining=True, iff_needs_exporting=True)
             print('.', end='', flush=True)
 
     except UserCancelled:

@@ -694,16 +694,16 @@ class TileManager:
         self.process_combines = self.config.getboolean('process_combines', True)
         self.process_exports = self.config.getboolean('process_exports', True)
 
-    def refresh_tiles_list(self, needs_combining=False, needs_exporting=False):
+    def refresh_tiles_list(self, iff_needs_combining=False, iff_needs_exporting=False):
         self.remaining_tiles = {}
         if self.process_combines:
-            for tile_info in iterate_combine_table(self.config, needs_to_process=needs_combining, max_retries=self.max_tries, sql_info=self.sql_obj):
+            for tile_info in iterate_combine_table(self.config, iff_needs_to_process=iff_needs_combining, max_retries=self.max_tries, sql_info=self.sql_obj):
                 res = tile_info.resolution
                 if self.user_res and res not in self.user_res:
                     continue
                 self.remaining_tiles[tile_info.hash_id()] = tile_info
         if self.process_exports:
-            for tile_info in iterate_export_table(self.config, needs_to_process=needs_exporting, max_retries=self.max_tries, sql_info=self.sql_obj):
+            for tile_info in iterate_export_table(self.config, iff_needs_to_process=iff_needs_exporting, max_retries=self.max_tries, sql_info=self.sql_obj):
                 res = tile_info.resolution
                 if self.user_res and res not in self.user_res:
                     continue
@@ -954,17 +954,33 @@ def get_combine_records(config, needs_to_process=False, get_lock_status=True, ma
     records = sql_obj.cursor.fetchall()
     return records
 
-def iterate_export_table(config, needs_to_process=False, max_retries=3, sql_info=None):
+def iterate_export_table(config, iff_needs_to_process=False, max_retries=3, sql_info=None):
     records = get_export_records(config, max_retries=max_retries, sql_info=sql_info)
     for review_tile in records:
         info = ResolutionTileInfo(**review_tile)
-        if not needs_to_process or (info.export.needs_processing() and (info.export.tries is None or info.export.tries < max_retries)):
+        if not iff_needs_to_process or (info.export.needs_processing() and (info.export.tries is None or info.export.tries < max_retries)):
             yield info
 
-def iterate_combine_table(config, needs_to_process=False, max_retries=3, sql_info=None):
+def iterate_combine_table(config, iff_needs_to_process=False, max_retries=3, sql_info=None):
+    """ Returns records from the metadata tables based on the config object passed in
+
+    Parameters
+    ----------
+    config
+    iff_needs_to_process
+        If and only if needs to process:
+        If False then all records are returned;
+        If True then logic is applied to determine if a tile should be combined (based on combine fna time fields) or has had too many attempts
+    max_retries
+    sql_info
+
+    Returns
+    -------
+
+    """
     records = get_combine_records(config, max_retries=max_retries, sql_info=sql_info)
     for review_tile in records:
         info = CombineTileInfo(**review_tile)
-        if not needs_to_process or (info.combine.needs_processing() and (info.combine.tries is None or info.combine.tries < max_retries)):
+        if not iff_needs_to_process or (info.combine.needs_processing() and (info.combine.tries is None or info.combine.tries < max_retries)):
             yield info
 
