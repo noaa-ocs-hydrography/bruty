@@ -150,7 +150,7 @@ def start_integer(table_name):
         datum = m.group('datum').lower()
         dtype = m.group('type').lower()
         primary_datums = ("mllw", 'ncd', 'igld85lwd')
-        secondary_datums = ('hrd', 'mld', 'lwrp')
+        secondary_datums = ('hrd', 'mld', 'lwrp', 'navd88')
         if datum in primary_datums and dtype == "qualified":
             type_offset = 0
         elif datum in primary_datums and dtype == "sensitive":
