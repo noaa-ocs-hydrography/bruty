@@ -20,8 +20,8 @@ from nbs.configs import get_logger, iter_configs, set_stream_logging, log_config
 import fuse_dev.fuse.interpolator.bag_interpolator as raster_interp
 from fuse_dev.fuse.coverage.coverage import interpolation_coverage
 
-from nbs.bruty.xipe_imports import CONTRIBUTOR_BAND_NAME, ELEVATION_BAND_NAME, UNCERTAINTY_BAND_NAME
-from nbs.nbs_utils.gdal_utils import where_not_nodata
+from nbs.bruty.constants import CONTRIBUTOR_BAND_NAME, ELEVATION_BAND_NAME, UNCERTAINTY_BAND_NAME
+from nbs_utils.gdal_utils import where_not_nodata
 from nbs.bruty.utils import iterate_gdal_image, BufferedImageOps
 
 LOGGER = get_logger('bruty.generalize')

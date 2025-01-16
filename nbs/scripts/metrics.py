@@ -3,7 +3,7 @@ import re
 
 from osgeo import gdal
 
-from xipe_dev.xipe.raster import attribute_tables
+from nbs.bruty import attribute_tables
 
 institutions = {0:{}, 1:{}}
 all_fnames = [fname for fname in glob.glob("v:\\bruty_tile_exports\\**\\*.tif", recursive=True) if "original" not in fname]

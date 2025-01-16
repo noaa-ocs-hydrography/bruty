@@ -41,11 +41,12 @@ from nbs.configs import get_logger, convert_to_logging_level, make_family_of_log
 from nbs.bruty.nbs_locks import LockNotAcquired, AreaLock, FileLock, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, start_server, current_address
 from nbs.bruty.generalize import generalize, generalize_tile
 from nbs.bruty.raster_attribute_table import make_raster_attr_table
-from xipe_dev.xipe.raster import where_not_nodata
+from nbs_utils.gdal_utils import where_not_nodata
 from nbs.bruty.raster_data import LayersEnum
 from fuse_dev.fuse.fuse_processor import git_head_commit_id
 import nbs.scripts.combine
-from xipe_dev.xipe.raster import CONTRIBUTOR_BAND_NAME, ELEVATION_BAND_NAME, UNCERTAINTY_BAND_NAME, raster_band_name_index
+from nbs.bruty.constants import CONTRIBUTOR_BAND_NAME, ELEVATION_BAND_NAME, UNCERTAINTY_BAND_NAME
+from nbs.bruty.raster_funcs import  raster_band_name_index
 from nbs.scripts.tile_specs import create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, \
     TileInfo, ResolutionTileInfo, CombineTileInfo
 
@@ -1105,8 +1106,7 @@ def complete_export_tiled(export, all_simple_records, closing_dist, epsg, decima
 
     LOGGER.debug("Make initial Cloud Optimized Geotiff")
     cogdriver = gdal.GetDriverByName("COG")
-    # from xipe_dev.xipe.deliverables import CLOUD_OPTIMIZED_GEOTIFF_CREATION_OPTIONS
-    #     'PREDICTOR': 3,  # floating point predictor, change this to 2 for horizontal if using an integer tiff
+    # 'PREDICTOR': 3,  # floating point predictor, change this to 2 for horizontal if using an integer tiff
     # use NEAREST to eliminate some artifacts from cubic overview at nodata gaps and
     # also reduces file size by keeping the 2 decimal values from nearest rather than averages full res data
     cog_ds = cogdriver.CreateCopy(str(export.cog_filename), generalized_ds, 0, options=['TILED=YES', 'PREDICTOR=3', 'RESAMPLING=NEAREST', 'OVERVIEW_RESAMPLING=NEAREST', 'COMPRESS=LZW', "BIGTIFF=YES", 'OVERVIEWS=IGNORE_EXISTING'])
@@ -1314,8 +1314,7 @@ def complete_export_sequential(export, all_simple_records, closing_dist, epsg, d
 
     LOGGER.debug("Make initial Cloud Optimized Geotiff")
     cogdriver = gdal.GetDriverByName("COG")
-    # from xipe_dev.xipe.deliverables import CLOUD_OPTIMIZED_GEOTIFF_CREATION_OPTIONS
-    #     'PREDICTOR': 3,  # floating point predictor, change this to 2 for horizontal if using an integer tiff
+    # 'PREDICTOR': 3,  # floating point predictor, change this to 2 for horizontal if using an integer tiff
     # use NEAREST to eliminate some artifacts from cubic overview at nodata gaps and
     # also reduces file size by keeping the 2 decimal values from nearest rather than averages full res data
     cog_ds = cogdriver.CreateCopy(str(export.cog_filename), generalized_ds, 0, options=['TILED=YES', 'PREDICTOR=3', 'RESAMPLING=NEAREST', 'OVERVIEW_RESAMPLING=NEAREST', 'COMPRESS=LZW', "BIGTIFF=YES", 'OVERVIEWS=IGNORE_EXISTING'])
