@@ -1478,14 +1478,16 @@ class WorldDatabase(VABC):
             dfn = lyr.GetLayerDefn()
             field_names = [dfn.GetFieldDefn(ifld).name for ifld in range(dfn.GetFieldCount())]
             elevation_field = None
+            uncertainty_field = None
             for field in field_names:
                 if field.lower() in ["elevation"]:
                     elevation_field = field
-                    break
+                if field.lower() in ["uncertainty"]:
+                    uncertainty_field = field
             # Iterate all the points in the geopackage layer.
             # It is faster to use fiona which does this in C calls but we are avoiding adding that dependency (for now)
             # There is old code in the repository history that optionally got the coordinates using fiona
-            if lyr.GetGeomType() == ogr.wkbPoint:
+            if lyr.GetGeomType() in (ogr.wkbPoint, ogr.wkbPoint25D):
                 srs = lyr.GetSpatialRef()
                 wkt = srs.ExportToWkt()
                 total_points = lyr.GetFeatureCount()
@@ -1503,7 +1505,7 @@ class WorldDatabase(VABC):
                     x[i], y[i], depth[i] = feat.GetGeometryRef().GetPoint()
                     if elevation_field:  # override the Z with the field value
                         depth[i] = feat[elevation_field]
-                    uncertainty[i] = feat['uncertainty']
+                    uncertainty[i] = feat[uncertainty_field]
                     # yield the block of data if it is full or we are at the end of the file
                     if i == block_size - 1 or ifeat == total_points - 1:  # end of block or end of file
                         yield wkt, x, y, depth, uncertainty
@@ -1586,7 +1588,7 @@ class WorldDatabase(VABC):
                 # FIXME should we raise an exception if there are raster layers?
                 for ilyr in range(gpkg.GetLayerCount()):
                     lyr = gpkg.GetLayer(ilyr)
-                    if lyr.GetGeomType() == ogr.wkbPoint:
+                    if lyr.GetGeomType() in (ogr.wkbPoint, ogr.wkbPoint25D):
                         point_lyr_count += 1
                         srs = lyr.GetSpatialRef()
                         wkt = srs.ExportToWkt()
