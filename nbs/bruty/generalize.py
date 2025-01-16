@@ -15,12 +15,13 @@ from scipy.ndimage import distance_transform_edt as edt
 from tqdm import tqdm
 
 from transform_dev.datum_transform.reproject import parse_crs, split_compound_crs
-from xipe_dev.xipe import get_logger, iter_configs, log_config, set_stream_logging
-from xipe_dev.xipe.raster import CONTRIBUTOR_BAND_NAME, ELEVATION_BAND_NAME, UNCERTAINTY_BAND_NAME, \
-    raster_band_name_index, reproject_raster, update_raster
+from nbs.configs import get_logger, iter_configs, set_stream_logging, log_config
+
 import fuse_dev.fuse.interpolator.bag_interpolator as raster_interp
 from fuse_dev.fuse.coverage.coverage import interpolation_coverage
-from nbs_utils.gdal_utils import where_not_nodata
+
+from nbs.bruty.xipe_imports import CONTRIBUTOR_BAND_NAME, ELEVATION_BAND_NAME, UNCERTAINTY_BAND_NAME
+from nbs.nbs_utils.gdal_utils import where_not_nodata
 from nbs.bruty.utils import iterate_gdal_image, BufferedImageOps
 
 LOGGER = get_logger('bruty.generalize')
