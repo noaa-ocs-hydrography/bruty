@@ -1487,7 +1487,7 @@ class WorldDatabase(VABC):
             # Iterate all the points in the geopackage layer.
             # It is faster to use fiona which does this in C calls but we are avoiding adding that dependency (for now)
             # There is old code in the repository history that optionally got the coordinates using fiona
-            if lyr.GetGeomType() in (ogr.wkbPoint, ogr.wkbPoint25D):
+            if lyr.GetGeomType() in (ogr.wkbPoint, ogr.wkbPoint25D, ogr.wkbUnknown):
                 srs = lyr.GetSpatialRef()
                 wkt = srs.ExportToWkt()
                 total_points = lyr.GetFeatureCount()
@@ -1502,13 +1502,15 @@ class WorldDatabase(VABC):
                         depth = numpy.zeros(npts, dtype=numpy.float64)
                         uncertainty = numpy.zeros(npts, dtype=numpy.float64)
                     # read the point data and get the depth from the point Z or override with the elevation attribute
-                    x[i], y[i], depth[i] = feat.GetGeometryRef().GetPoint()
-                    if elevation_field:  # override the Z with the field value
-                        depth[i] = feat[elevation_field]
-                    uncertainty[i] = feat[uncertainty_field]
-                    # yield the block of data if it is full or we are at the end of the file
-                    if i == block_size - 1 or ifeat == total_points - 1:  # end of block or end of file
-                        yield wkt, x, y, depth, uncertainty
+                    geom = feat.GetGeometryRef()
+                    if geom.GetGeometryType() in (ogr.wkbPoint, ogr.wkbPoint25D):
+                        x[i], y[i], depth[i] = geom.GetPoint()
+                        if elevation_field:  # override the Z with the field value
+                            depth[i] = feat[elevation_field]
+                        uncertainty[i] = feat[uncertainty_field]
+                        # yield the block of data if it is full or we are at the end of the file
+                        if i == block_size - 1 or ifeat == total_points - 1:  # end of block or end of file
+                            yield wkt, x, y, depth, uncertainty
 
     @log_calls
     def insert_survey_as_outside_area_of_interest(self, path_to_survey_data, survey_score=100, flag=0, dformat=None, override_epsg: int = NO_OVERRIDE,
@@ -1588,7 +1590,7 @@ class WorldDatabase(VABC):
                 # FIXME should we raise an exception if there are raster layers?
                 for ilyr in range(gpkg.GetLayerCount()):
                     lyr = gpkg.GetLayer(ilyr)
-                    if lyr.GetGeomType() in (ogr.wkbPoint, ogr.wkbPoint25D):
+                    if lyr.GetGeomType() in (ogr.wkbPoint, ogr.wkbPoint25D, ogr.wkbUnknown):
                         point_lyr_count += 1
                         srs = lyr.GetSpatialRef()
                         wkt = srs.ExportToWkt()
