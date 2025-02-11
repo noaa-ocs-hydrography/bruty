@@ -110,6 +110,9 @@ def set_bruty_tiffs_orientation(bruty_path, positive_ns=False, just_size=False):
 
 
 if __name__ == "__main__":
+    db = WorldDatabase.open(tile_info.combine.data_location)
+    db.create_vrt()
+
     """ arguments are production_branch (PBG) and utm zone (18n), if an underscore is put in for utm then all areas of a production branch will be processed.
      If "python flip_bruty_tiffs.py PB _" was run then all bruty databases would be processed"""
     if platform.system() == 'Windows':
