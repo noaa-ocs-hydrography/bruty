@@ -354,8 +354,9 @@ CREATE or REPLACE VIEW view_tiles as
 --CONCAT('Tile ',tile,' ', resolution,'m ', datum, ' ', production_branch, '_', utm, hemisphere, ' ', locality) tile_name,
 SELECT tile_id, production_branch, utm, tile, datum, hemisphere, locality, priority,
 	sum((combine_running)::int) combining,
-	sum((datatype<>'enc' and combine_waiting)::int) combine_waiting,
-	sum((datatype='enc' and combine_waiting)::int) enc_combine_waiting,
+	/* Only show combines waiting if it failed previously otherwise it clutters the display when auto run each week */
+    (sum((datatype <> 'enc' AND combine_waiting)::int) +
+     sum((datatype = 'enc' AND combine_waiting AND combine_code > 0)::int)) AS combine_waiting,
 	bool_or(combine_code IS NULL) never_combined,
 	bool_or(combine_code>0) combine_errors,
 
