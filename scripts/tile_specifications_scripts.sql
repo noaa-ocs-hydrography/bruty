@@ -245,6 +245,7 @@ CREATE OR REPLACE TRIGGER edit_resolutions
 
 
 
+--  NOTE!  Make sure to recreate the triggers after changing the views
 -- Primary view for the bruty combines
 DROP VIEW IF EXISTS view_tiles;
 DROP VIEW IF EXISTS view_individual_combines;
@@ -348,7 +349,7 @@ CREATE OR REPLACE TRIGGER edit_combine_view_trigger
     EXECUTE FUNCTION public.edit_combine_view();
 
 
-
+--  NOTE!  Make sure to recreate the combined_view and the triggers after changing the view
 DROP VIEW IF EXISTS view_tiles;
 CREATE or REPLACE VIEW view_tiles as
 --CONCAT('Tile ',tile,' ', resolution,'m ', datum, ' ', production_branch, '_', utm, hemisphere, ' ', locality) tile_name,
