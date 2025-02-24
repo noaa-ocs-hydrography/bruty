@@ -11,10 +11,13 @@ import re
 import shutil
 import pathlib
 
+from nbs.bruty.world_raster_database import WorldDatabase
+
 data_dir = pathlib.Path(r"X:\bruty_databases")
 # data_dir = pathlib.Path(r"D:\debug\combines")
 remove_empty_subtiles = False
-remove_old_accum_directories = True
+trim_to_aoi = True
+remove_old_accum_directories = False
 
 if remove_empty_subtiles:
     for parent, dirs, files in os.walk(data_dir, topdown=False):
@@ -53,3 +56,27 @@ if remove_old_accum_directories:
                 if possible_accum.is_dir() and re.search("tmp.*_accum", possible_accum.name):
                     print("  ", possible_accum.name)
                     shutil.rmtree(possible_accum, ignore_errors=True)
+
+if trim_to_aoi:
+    for search_root, dirs, files in os.walk(data_dir, topdown=True):
+        break
+    for subdir in dirs:
+        if "Alaska" in subdir:
+            continue
+        db_dir = pathlib.Path(search_root).joinpath(subdir)
+        print(db_dir)
+        try:
+            db = WorldDatabase.open(db_dir)
+        except FileNotFoundError:
+            pass
+        else:
+            aoi = set([(int(tx), int(ty)) for tx,ty in db.tiles_of_interest])
+            for cur_dir_str, dirs, files in os.walk(db_dir, topdown=False):
+                cur_dir = pathlib.Path(cur_dir_str)
+                if cur_dir.name.isdigit() and cur_dir.parent.name.isdigit() and cur_dir.parent.parent == db_dir:
+                    tx = int(cur_dir.name)
+                    ty = int(cur_dir.parent.name)
+                    if (ty, tx) not in aoi:
+                        print("***************            trimming", cur_dir_str)
+                        # shutil.rmtree(parent, ignore_errors=True)
+                    # print(".", end="")
