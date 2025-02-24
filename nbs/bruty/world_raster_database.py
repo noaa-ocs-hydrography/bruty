@@ -106,6 +106,7 @@ res.from_filename
 
 r"""
 to convert blob from sqlite after copying value from sqlite browser in the edite cell area
+(right click on cell and say copy as sql)
 # sample string from sqlite browser gui
 a = '''024dfd0186944d3e024dfd0186944d34
 024dfc0186944d3f024dfc0186944d43
@@ -1522,6 +1523,14 @@ class WorldDatabase(VABC):
         self.finished_survey_insertion(path_to_survey_data, [], contrib_id, override_epsg, reverse_z, survey_score, flag,
                                        dformat, transaction_id, sorting_metadata=sorting_metadata)
 
+    def limit_tiles_based_on_aoi(self, limit_to_tiles):
+        if limit_to_tiles is None and self.area_of_interest:
+            new_limit_to_tiles = self.tiles_of_interest
+        else:
+            new_limit_to_tiles = set([tuple(int(t[0]), int(t[1])) for t in limit_to_tiles]).intersection(
+                [tuple(int(t[0]), int(t[1])) for t in self.tiles_of_interest])
+        return new_limit_to_tiles
+
     # noinspection PyUnboundLocalVariable
     @log_calls
     def insert_points_survey(self, path_to_survey_data, survey_score=100, flag=0, dformat=None, override_epsg: int = NO_OVERRIDE,
@@ -1628,8 +1637,7 @@ class WorldDatabase(VABC):
                 data_modified = False
             else:
                 data_modified = True
-                if limit_to_tiles is None and self.area_of_interest:
-                    limit_to_tiles = self.tiles_of_interest
+                limit_to_tiles = self.limit_tiles_based_on_aoi(limit_to_tiles)
                 # npy and csv don't have coordinate system, so set up a default.  npz will set this later if needed
                 if override_epsg == NO_OVERRIDE:
                     epsg = self.db.epsg
@@ -1718,7 +1726,7 @@ class WorldDatabase(VABC):
                                     depth = depth * -1
                                 score = numpy.full(x.shape, survey_score)
                                 flags = numpy.full(x.shape, flag)
-                                # we already computed all tiles that should be filled, so we can ignore this
+                                # we already computed all tiles that should be filled, so we can ignore the returned tiles
                                 tiles = self.insert_survey_array(numpy.array((x, y, depth, uncertainty, score, flags)), path_to_survey_data,
                                                                  contrib_id=contrib_id, compare_callback=compare_callback, limit_to_tiles=limit_to_tiles,
                                                                  accumulation_db=storage_db)
@@ -1732,23 +1740,6 @@ class WorldDatabase(VABC):
         return data_modified
 
     insert_txt_survey = insert_points_survey  # @TODO remove this alias for old function name for backwards compatibility
-
-    def _insert_xyz(self, x, y, depth, uncertainty, survey_score, flag, contrib_id, path_to_survey_data, compare_callback, override_epsg, reverse,
-                    limit_to_tiles=None, force=False, dformat=None, transaction_id=-1, sorting_metadata=None):
-        """Convenience function to handle locking tiles and making flag/score arrays for readers that make arrays of points"""
-        if force or contrib_id is None or contrib_id not in self.included_ids:
-            score = numpy.full(x.shape, survey_score)
-            flags = numpy.full(x.shape, flag)
-            txs, tys = self.db.tile_scheme.xy_to_tile_index(x, y)
-            tile_list = numpy.unique(numpy.array((txs, tys)).T, axis=0)
-            with AreaLock(tile_list, EXCLUSIVE | NON_BLOCKING, self.db.get_history_path_by_index) as lock:
-                self.start_survey_insertion(path_to_survey_data, tile_list, contrib_id, transaction_id)
-                tiles = self.insert_survey_array(numpy.array((x, y, depth, uncertainty, score, flags)), path_to_survey_data,
-                                                 contrib_id=contrib_id, compare_callback=compare_callback, limit_to_tiles=limit_to_tiles)
-                self.finished_survey_insertion(path_to_survey_data, tiles, contrib_id, override_epsg, reverse, survey_score, flag, dformat,
-                                               transaction_id, sorting_metadata)
-        else:
-            raise Exception(f"Survey Exists already in database {contrib_id}")
 
     # @todo - make the survey_ids and survey_paths into properties that load from disk when called by user so that they stay in sync.
     #    Otherwise use postgres to hold that info so queries are current.
@@ -2020,6 +2011,7 @@ class WorldDatabase(VABC):
             for ty, tile_survey_data in zip(grouped_ty, grouped_tx_ty_survey_data):
                 tiles_data[(int(tx), int(ty))] = tile_survey_data  # force int so we don't accidentally get numpy.int in the keys
 
+        full_tile_list = list(tiles_data.keys())
         # remove any tile that aren't in the allowed list
         get_call_logger().debug(f"affected tiles {self.db.data_path} : {list(tiles_data.keys())}")
         if limit_to_tiles is not None:
@@ -2098,7 +2090,7 @@ class WorldDatabase(VABC):
             rd.set_last_contributor(contrib_id, contrib_name)
             tile_history.append(rd)
 
-        return [tuple((int(tx), int(ty))) for tx, ty in tile_list]  # convert to a vanilla python int for compatibility with json
+        return [tuple((int(tx), int(ty))) for tx, ty in full_tile_list]  # convert to a vanilla python int for compatibility with json
 
     def init_tile(self, tx, ty, tile_history):
         """
@@ -2177,6 +2169,7 @@ class WorldDatabase(VABC):
                                                            contrib_id, reverse_z, transaction_id, sorting_metadata)
             data_modified = False
         else:
+            limit_to_tiles = self.limit_tiles_based_on_aoi(limit_to_tiles)
             data_modified = True
             # @todo adjust tile_list for area_of_interest
             tile_list = self.db.get_tiles_indices(x1, y1, x2, y2)
@@ -2266,7 +2259,7 @@ class WorldDatabase(VABC):
                                                                           uncertainty_accum[:last_index], scores_accum[:last_index],
                                                                           flags_accum[:last_index])),
                                                              vr.filename, accumulation_db=storage_db, contrib_id=contrib_id,
-                                                             compare_callback=compare_callback)
+                                                             compare_callback=compare_callback, limit_to_tiles=limit_to_tiles)
                             all_tiles.update(tiles)
                         self.db.append_accumulation_db(storage_db)
                         self.db.remove_accumulation_db(storage_db)
@@ -2331,6 +2324,7 @@ class WorldDatabase(VABC):
             data_modified = False
         else:
             data_modified = True
+            limit_to_tiles = self.limit_tiles_based_on_aoi(limit_to_tiles)
             tile_list = self.db.get_tiles_indices(x1, y1, x2, y2)
             with AreaLock(tile_list, EXCLUSIVE | NON_BLOCKING, self.db.get_history_path_by_index) as lock:
                 if needs_processing:
@@ -2431,7 +2425,6 @@ class WorldDatabase(VABC):
                     self.db.append_accumulation_db(storage_db)
                     self.db.remove_accumulation_db(storage_db)
                     del storage_db
-                    # @fixme -- turn all_tiles into one consistent, unique list.  Is list of lists with duplicates right now
                     self.finished_survey_insertion(path_to_survey_data, all_tiles, contrib_id, override_epsg, reverse_z, survey_score, flag,
                                                    dformat="gdal", transaction_id=transaction_id, sorting_metadata=sorting_metadata)
                 else:
