@@ -1526,9 +1526,11 @@ class WorldDatabase(VABC):
     def limit_tiles_based_on_aoi(self, limit_to_tiles):
         if limit_to_tiles is None and self.area_of_interest:
             new_limit_to_tiles = self.tiles_of_interest
+        elif self.area_of_interest:
+            new_limit_to_tiles = set([(int(t[0]), int(t[1])) for t in limit_to_tiles]).intersection(
+                [(int(t[0]), int(t[1])) for t in self.tiles_of_interest])
         else:
-            new_limit_to_tiles = set([tuple(int(t[0]), int(t[1])) for t in limit_to_tiles]).intersection(
-                [tuple(int(t[0]), int(t[1])) for t in self.tiles_of_interest])
+            new_limit_to_tiles = limit_to_tiles
         return new_limit_to_tiles
 
     # noinspection PyUnboundLocalVariable
