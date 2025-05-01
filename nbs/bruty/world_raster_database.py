@@ -1,6 +1,7 @@
 import json
 import os
 import pathlib
+import re
 import shutil
 import tempfile
 import pickle
@@ -3128,6 +3129,70 @@ class WorldDatabase(VABC):
         # @TODO add+test multiprocessing capability like remove_and_recompute has
         if len(self.reinserts.unfinished_records()) > 0:
             self.reinsert_from_sqlite(comp_callback=compare_callback)
+
+    def revise_survey_path(self, existing_survey: (int, str), revised_path: str):
+        """ This function will update the metadata and the sqlite database with the new path to the survey data.
+        It will also update the times in the sqlite records.
+
+        Parameters
+        ----------
+        existing_survey
+            Either an nbs_id or a path to the existing survey file
+        revised_path
+            The new path to the survey file
+
+        Returns
+        -------
+        Raises ValueError if the survey is not found in either the included or started surveys
+
+        """
+        # Search the sqlite records for the survey_id and update in the included and started tables
+        #   to update with the new path. We also need to update the times in the sqlite records.
+        # Then search all the metadata.json files for the survey_id and update the path
+        try:
+            included_survey = self.included_surveys[existing_survey]
+            started_survey = self.started_surveys[existing_survey]
+        except KeyError:
+            try:
+                included_survey = self.included_ids[existing_survey]
+                started_survey = self.started_ids[existing_survey]
+            except KeyError:
+                raise ValueError(f"Survey {existing_survey} not found in either included or started surveys")
+        nbs_id = included_survey.nbs_id
+        included_survey.survey_path = revised_path
+        started_survey.survey_path = revised_path
+        try:
+            included_survey.mtime = pathlib.Path(revised_path).stat().st_mtime
+            started_survey.mtime = pathlib.Path(revised_path).stat().st_mtime
+        except FileNotFoundError:
+            self.db.LOGGER.warning(f"File {revised_path} not found, unable to update mtime")
+        # @TODO update the metadata.json files for the survey_id
+        for tx, ty, raster, meta in self.db.iterate_filled_tiles():
+            tile_history = self.db.get_tile_history_by_index(tx, ty)
+            meta = tile_history.get_metadata()
+            try:
+                meta[str(nbs_id)] = revised_path
+                tile_history.set_metadata(meta)
+            except KeyError:
+                pass
+
+    def revise_root_paths(self, old_root_path_re, new_root_path_re, flags=0):
+        for table in (self.included_ids, self.started_ids):
+            for contrib in tqdm(table.keys(), desc='Surveys', mininterval=.7, leave=False):
+                table[contrib].survey_path = re.sub(old_root_path_re, new_root_path_re, table[contrib].survey_path, flags=flags)
+                try:
+                    table[contrib].mtime = pathlib.Path(table[contrib].survey_path).stat().st_mtime
+                except FileNotFoundError:
+                    self.db.LOGGER.warning(f"File {table[contrib].survey_path} not found, unable to update mtime")
+
+        for tx, ty, raster, meta in self.db.iterate_filled_tiles():
+            tile_history = self.db.get_tile_history_by_index(tx, ty)
+            meta = tile_history.get_metadata()
+            for nbs_id, data_path in meta:
+                meta[nbs_id] = re.sub(old_root_path_re, new_root_path_re, data_path, flags=flags)
+            tile_history.set_metadata(meta)
+
+
 
 
     def revise_survey(self, survey_id, path_to_survey_file):
