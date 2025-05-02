@@ -3177,37 +3177,41 @@ class WorldDatabase(VABC):
             except KeyError:
                 pass
 
-    def revise_root_paths(self, old_root_path_re, new_root_path_re, flags=0):
+    def revise_root_paths(self, old_root_path_re, new_root_path_re, flags=0):  #, retain_times=True):
+        def fix_slashes(old_path, new_path):
+            if old_path.count("/") > 0 and old_path.count("\\") > 0:
+                raise ValueError(f"Mixed slash usage in {old_path}")
+            elif old_path.count("/") > 0:
+                new_path = new_path.replace("\\", "/")
+            elif old_path.count("\\") > 0:
+                new_path = new_path.replace("/", "\\")
+            return new_path
+
         for table in (self.included_ids, self.started_ids):
+            table.cur.execute("PRAGMA journal_mode=MEMORY;")
             for contrib in tqdm(table.keys(), desc='Surveys', mininterval=.7, leave=False):
                 old_path = table[contrib].survey_path
                 new_path = re.sub(old_root_path_re, new_root_path_re, old_path, flags=flags)
-                if old_path.count("/") > 0 and old_path.count("\\") > 0:
-                    raise ValueError(f"Mixed slash usage in {old_path}")
-                elif old_path.count("/") > 0:
-                    new_path = new_path.replace("\\", "/")
-                elif old_path.count("\\") > 0:
-                    new_path = new_path.replace( "/", "\\")
+                new_path = fix_slashes(old_path, new_path)
                 if old_path != new_path:
-                    table[contrib].survey_path = new_path
-                    try:
-                        table[contrib].mtime = pathlib.Path(table[contrib].survey_path).stat().st_mtime
-                    except FileNotFoundError:
-                        self.db.LOGGER.warning(f"File {table[contrib].survey_path} not found, unable to update mtime")
+                    old_val = table[contrib]
+                    old_val.survey_path = new_path
+                    # if not retain_times:
+                    #     try:
+                    #         old_val.mtime = pathlib.Path(table[contrib].survey_path).stat().st_mtime
+                    #     except FileNotFoundError:
+                    #         self.db.LOGGER.warning(f"File {table[contrib].survey_path} not found, unable to update mtime")
+                    table[contrib] = old_val
+            table.conn.commit()
 
         for tx, ty, raster, meta in self.db.iterate_filled_tiles():
             tile_history = self.db.get_tile_history_by_index(tx, ty)
             meta = tile_history.get_metadata()
             for nbs_id, old_path in meta['contributors'].items():
                 new_path = re.sub(old_root_path_re, new_root_path_re, old_path, flags=flags)
-                if old_path.count("/") > 0 and old_path.count("\\") > 0:
-                    raise ValueError(f"Mixed slash usage in {old_path}")
-                elif old_path.count("/") > 0:
-                    new_path = new_path.replace("\\", "/")
-                elif old_path.count("\\") > 0:
-                    new_path = new_path.replace("/", "\\")
+                new_path = fix_slashes(old_path, new_path)
                 if old_path != new_path:
-                    meta[nbs_id] = new_path
+                    meta['contributors'][nbs_id] = new_path
             tile_history.set_metadata(meta)
 
 
