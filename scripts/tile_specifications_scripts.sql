@@ -278,24 +278,44 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $function$
 DECLARE
-	_combine_locked bool;
-	_export_locked bool;
+	-- _combine_locked bool;
+	-- _export_locked bool;
+	_combine_unlocked int;
+	_res_unlocked int;
 	_combine_lock_cnt int;
 	_export_lock_cnt int;
+	_unlocked_related_combines_count int;
+	_unlocked_related_res_count int;
+	_related_res_count int;
+	_related_combines_count int;
 BEGIN
 	IF TG_OP = 'UPDATE' THEN
 		-- check if the row is locked for data changes or if another related record is locked in the case of combine/export requests
-		SELECT (SELECT c_id NOT IN (SELECT c_id FROM spec_combines FOR UPDATE SKIP LOCKED)) INTO _combine_locked from spec_combines WHERE c_id=NEW.c_id;
-		SELECT (SELECT r_id NOT IN (SELECT r_id FROM spec_resolutions FOR UPDATE SKIP LOCKED)) INTO _export_locked from spec_resolutions WHERE r_id=NEW.res_id;
-		SELECT count(*) INTO _combine_lock_cnt FROM (SELECT (SELECT c_id NOT IN (SELECT c_id FROM spec_combines FOR UPDATE SKIP LOCKED)) AS running from view_individual_combines WHERE tile_id=NEW.tile_id) as a WHERE a.running=True;
-		SELECT count(*) INTO _export_lock_cnt FROM (SELECT (SELECT res_id NOT IN (SELECT r_id FROM spec_resolutions FOR UPDATE SKIP LOCKED)) AS running from view_individual_combines WHERE tile_id=NEW.tile_id) as a WHERE a.running=True;
+		-- OLD slow queries, added index and trmmed down queries below commented part within if statements
+		--SELECT (SELECT c_id NOT IN (SELECT c_id FROM spec_combines WHERE c_id=NEW.c_id FOR UPDATE SKIP LOCKED)) INTO _combine_locked from spec_combines WHERE c_id=NEW.c_id;
+		--SELECT (SELECT r_id NOT IN (SELECT r_id FROM spec_resolutions WHERE r_id=NEW.res_id FOR UPDATE SKIP LOCKED)) INTO _export_locked from spec_resolutions WHERE r_id=NEW.res_id;
+		--SELECT count(*) INTO _combine_lock_cnt FROM (SELECT (SELECT c_id NOT IN (SELECT c_id FROM spec_combines FOR UPDATE SKIP LOCKED)) AS running from view_individual_combines WHERE tile_id=NEW.tile_id) as a WHERE a.running=True;
+		--SELECT count(*) INTO _export_lock_cnt FROM (SELECT (SELECT res_id NOT IN (SELECT r_id FROM spec_resolutions FOR UPDATE SKIP LOCKED)) AS running from view_individual_combines WHERE tile_id=NEW.tile_id) as a WHERE a.running=True;
+
+        SELECT count(*) INTO _combine_unlocked from (select 1 FROM spec_combines WHERE c_id=NEW.c_id FOR UPDATE SKIP LOCKED) as unlocked_rows;
+        SELECT count(*) INTO _res_unlocked from (select 1 FROM spec_resolutions WHERE r_id=NEW.res_id FOR UPDATE SKIP LOCKED) as unlocked_rows;
 		-- TODO this error message should be a variable rather than copied four times.
 		-- raise 'c:% e:% cc:% % ec:% %', _combine_locked, _export_locked, _combine_lock_cnt, NEW.request_combine, _export_lock_cnt, NEW.request_export;
-		if _combine_lock_cnt>0 AND (NEW.request_combine OR NEW.request_enc) THEN
-			raise '% combines are running for % % % tile:% %m % nav:%', _combine_lock_cnt, NEW.production_branch, NEW.utm, NEW.locality, NEW.tile, NEW.resolution, NEW.datatype, NEW.for_navigation;
+		if NEW.request_combine OR NEW.request_enc THEN
+            SELECT count(*) INTO _related_combines_count from (select 1 from spec_combines WHERE res_id in ( select r_id FROM spec_resolutions WHERE tile_id=NEW.tile_id)) as unlocked_combines;
+            SELECT count(*) INTO _unlocked_related_combines_count from (select 1 from spec_combines WHERE res_id in ( select r_id FROM spec_resolutions WHERE tile_id=NEW.tile_id) FOR UPDATE SKIP LOCKED) as unlocked_combines;
+		    _combine_lock_cnt := _related_combines_count - _unlocked_related_combines_count;
+		    if _combine_lock_cnt>0 THEN
+			    raise '% combines are running for % % % tile:% %m % nav:%', _combine_lock_cnt, NEW.production_branch, NEW.utm, NEW.locality, NEW.tile, NEW.resolution, NEW.datatype, NEW.for_navigation;
+			END IF;
 		END IF;
-		if _export_lock_cnt>0 AND NEW.request_export THEN
-			raise '% exports are running for % % % tile:% %m % nav:%', _export_lock_cnt, NEW.production_branch, NEW.utm, NEW.locality, NEW.tile, NEW.resolution, NEW.datatype, NEW.for_navigation;
+		if NEW.request_export THEN
+            SELECT count(*) INTO _related_res_count from (select 1 FROM spec_resolutions WHERE tile_id=NEW.tile_id FOR UPDATE SKIP LOCKED) as unlocked_rows;
+            SELECT count(*) INTO _unlocked_related_res_count from (select 1 FROM spec_resolutions WHERE tile_id=NEW.tile_id FOR UPDATE SKIP LOCKED) as unlocked_rows;
+            _export_lock_cnt := _related_res_count-_unlocked_related_res_count;
+		    if _export_lock_cnt > 0 THEN
+			    raise '% exports are running for % % % tile:% %m % nav:%', _export_lock_cnt, NEW.production_branch, NEW.utm, NEW.locality, NEW.tile, NEW.resolution, NEW.datatype, NEW.for_navigation;
+			END IF;
 		END IF;
 		-- Avoid writing to the spec_combines or spec_resolutions as they might be locked.  If a user is pressing the request export/combine tool then we wouldn't need to update the other tables
 		IF OLD.combine_start_time<>NEW.combine_start_time OR OLD.combine_end_time<>NEW.combine_end_time OR OLD.combine_code<>NEW.combine_code OR
@@ -303,7 +323,7 @@ BEGIN
 			OLD.combine_tries<>NEW.combine_tries OR OLD.combine_data_location<>NEW.combine_data_location OR
 			OLD.out_of_date<>NEW.out_of_date OR OLD.change_summary<>NEW.change_summary OR OLD.summary_datetime<>NEW.summary_datetime THEN
 
-			if _combine_locked THEN
+			if _combine_unlocked = 0 THEN
 				raise 'combine is running and the record is locked for % % % tile:% %m % nav:%', NEW.production_branch, NEW.utm, NEW.locality, NEW.tile, NEW.resolution, NEW.datatype, NEW.for_navigation;
 			END IF;
 
@@ -312,7 +332,7 @@ BEGIN
 			OLD.export_info_log<>NEW.export_info_log OR OLD.export_warnings_log<>NEW.export_warnings_log OR
 			OLD.export_tries<>NEW.export_tries OR OLD.export_data_location<>NEW.export_data_location THEN
 
-			if _export_locked THEN
+			if _res_unlocked = 0 THEN
 				raise 'export is running and the record is locked for % % % tile:% %m % nav:%', NEW.production_branch, NEW.utm, NEW.locality, NEW.tile, NEW.resolution, NEW.datatype, NEW.for_navigation;
 			END IF;
 
