@@ -100,6 +100,11 @@ TABLESPACE pg_default;
 ALTER TABLE IF EXISTS public.spec_resolutions
     OWNER to postgres;
 
+CREATE INDEX spec_resolutions_tile_index
+    ON public.spec_resolutions USING btree
+    (tile_id ASC NULLS LAST)
+;
+
 -- Trigger: edit_resolutions
 
 -- DROP TRIGGER IF EXISTS edit_resolutions ON public.spec_resolutions;
@@ -137,11 +142,15 @@ CREATE TABLE IF NOT EXISTS public.spec_combines
 )
 
 
-
 TABLESPACE pg_default;
 
 ALTER TABLE IF EXISTS public.spec_combines
     OWNER to nbs_admin;
+
+CREATE INDEX spec_combines_res_index
+    ON public.spec_combines USING btree
+    (res_id ASC NULLS LAST)
+;
 
 
 -- To have a boolean that signals to rebuild all versions of a tile, this script will fill the time field if the boolean is updated to True (and sets the boolean back to False).
