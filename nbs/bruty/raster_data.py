@@ -12,6 +12,9 @@ from osgeo import gdal, osr
 from nbs.bruty.abstract import VABC, abstractmethod
 from nbs.bruty.utils import affine, affine_center, inv_affine, remove_file
 
+gdal.DontUseExceptions()
+osr.DontUseExceptions()
+
 # investigated the two choices:
 #   store full data arrays which should be faster and deltas could be created vs storing deltas which may be smaller but slower
 #   By storing the full data in the last position and deltas for everything leading up performance is good for the normal case of adding data

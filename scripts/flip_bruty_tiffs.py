@@ -7,8 +7,9 @@ import pathlib
 
 import numpy
 from osgeo import gdal
-gdal.UseExceptions()
 from nbs.bruty.world_raster_database import WorldDatabase
+
+gdal.UseExceptions()
 
 """
 ## PBG19     3 180    size GB : 11.45   file count:  27247

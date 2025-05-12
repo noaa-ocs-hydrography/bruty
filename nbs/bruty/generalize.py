@@ -24,6 +24,8 @@ from nbs.bruty.constants import CONTRIBUTOR_BAND_NAME, ELEVATION_BAND_NAME, UNCE
 from nbs_utils.gdal_utils import where_not_nodata
 from nbs.bruty.utils import iterate_gdal_image, BufferedImageOps
 
+gdal.DontUseExceptions()
+
 LOGGER = get_logger('bruty.generalize')
 CONFIG_SECTION = 'combined_raster_processing'
 

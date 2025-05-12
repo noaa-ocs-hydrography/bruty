@@ -15,7 +15,7 @@ import sqlite3
 import io
 
 import numpy
-from osgeo import gdal, osr, ogr
+from osgeo import gdal, ogr
 
 from nbs.bruty import world_raster_database
 from nbs.bruty.world_raster_database import WorldDatabase, use_locks, UTMTileBackendExactRes, NO_OVERRIDE
@@ -30,6 +30,7 @@ from nbs.scripts.tile_specs import TileInfo, CombineTileInfo, ResolutionTileInfo
 from nbs_utils.points_utils import to_npz
 from nbs.debugging import log_calls, get_call_logger, get_dbg_log_path, setup_call_logger
 
+gdal.DontUseExceptions()
 
 interactive_debug = False
 if interactive_debug and sys.gettrace() is None:  # this only is set when a debugger is run (?)

@@ -19,6 +19,9 @@ from nbs.bruty import utils
 
 from test_data import master_data, make_clean_dir, data_dir, SW_5x5, NW_5x5, SE_5x5, MID_5x5
 
+gdal.DontUseExceptions()
+osr.DontUseExceptions()
+
 nan = numpy.nan
 os.makedirs(data_dir, exist_ok=True)
 

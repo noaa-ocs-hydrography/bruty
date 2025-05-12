@@ -19,6 +19,8 @@ from data_management.db_connection import connect_with_retries
 from fuse_dev.fuse.meta_review.meta_review import database_has_table, split_URL_port
 from nbs.debugging import log_calls
 
+gdal.DontUseExceptions()
+
 _debug = False
 
 REVIEWED = "qualified"

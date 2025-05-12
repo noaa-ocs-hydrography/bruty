@@ -24,6 +24,8 @@ from nbs.bruty import morton, world_raster_database
 from nbs.bruty.utils import tqdm, iterate_gdal_image, onerr
 from nbs.bruty.raster_data import affine, inv_affine, affine_center, LayersEnum
 
+gdal.DontUseExceptions()
+
 _debug = False
 
 if _debug or not has_numba:  # turn off jit --

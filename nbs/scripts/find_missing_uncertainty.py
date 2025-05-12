@@ -3,6 +3,8 @@ import sys
 from osgeo import gdal
 import numpy
 
+gdal.DontUseExceptions()
+
 def find_missing_uncert(fname):
     """ Find pixels where uncertainty is missing but depth is present
     Parameters

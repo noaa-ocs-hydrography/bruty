@@ -12,6 +12,8 @@ from nbs.bruty.contributor_metadata import contributor_metadata_from_file, DEFAU
 from nbs.bruty.constants import CONTRIBUTOR_BAND_NAME
 from nbs.bruty.raster_funcs import raster_band_name_index
 
+gdal.DontUseExceptions()
+
 # constants for field names in the raster attribute tables, based on the BAG update spec derived and S101
 VALUE = 'value'
 COUNT = 'count'
