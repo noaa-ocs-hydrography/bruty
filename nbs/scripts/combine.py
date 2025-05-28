@@ -448,8 +448,8 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
                                 failed_to_insert.append((str(e), survey))
                             except IndexError as e:
                                 # Allow really large chart to fail due to geographic extent
-                                if any([chrt in path for chrt in ("Chart 411", "Chart 530")]):
-                                    LOGGER.info(f"{survey} (but we are skipping Chart 411 errors) had error:\n {e}")
+                                if any([chrt in path for chrt in ("Chart 411", "Chart 501", "Chart 530", "Chart 13003", "Chart 16016")]):
+                                    LOGGER.info(f"{survey} (but we are skipping Chart 411, 530, 501, 16016, 13003 errors) had error:\n {e}")
                                     # failed_to_insert.append((str(e), survey))
                                 else:
                                     raise e
