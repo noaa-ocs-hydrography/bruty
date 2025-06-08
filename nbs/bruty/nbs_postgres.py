@@ -673,7 +673,7 @@ def nbs_sort_values(id_to_score, new_contrib, new_elev, accum_contrib, accum_ele
             existing_decay_and_res[accum_contrib == contrib] = id_to_score[int_contrib][0]
             existing_alphabetical[accum_contrib == contrib] = id_to_score[int_contrib][1]
         except KeyError as e:
-            raise KeyError(f"failing to find {int_contrib} in id_to_score, the database is likely corrupt")
+            raise KeyError(f"failing to find {int_contrib} in id_to_score, there may be a problem in a related field (for_navigation, never_post, resolution, point_spacing, to_filename) is missing or the database is corrupt")
     # @FIXME is contributor an int or float -- needs to be int 32 and maybe int 64 (or two int 32s)
     unique_pts_contributors = numpy.unique(new_contrib[~numpy.isnan(new_contrib)])
     decay_and_res_score = new_contrib.copy()
