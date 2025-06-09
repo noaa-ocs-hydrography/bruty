@@ -15,6 +15,8 @@ from nbs.configs import get_logger, iter_configs, log_config, set_stream_logging
 from nbs.bruty.constants import CONTRIBUTOR_BAND_NAME, ELEVATION_BAND_NAME, UNCERTAINTY_BAND_NAME
 from nbs.bruty.raster_funcs import raster_band_name_index
 
+gdal.DontUseExceptions()
+
 LOGGER = get_logger('xipe.scripts.RAT')
 CONFIG_SECTION = 'combined_raster_processing'
 QUALITY_BAND_NAME = "Quality"

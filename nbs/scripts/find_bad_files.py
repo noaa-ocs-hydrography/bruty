@@ -39,6 +39,7 @@ except:
     from nbs_utils.points_utils import from_npz, to_npz
     import numpy
     from osgeo import gdal
+    gdal.DontUseExceptions()
 
     is_caris = False
 

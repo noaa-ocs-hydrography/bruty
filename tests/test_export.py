@@ -14,6 +14,9 @@ from nbs.bruty.constants import CONTRIBUTOR_BAND_NAME, ELEVATION_BAND_NAME, UNCE
 from test_data import master_data, make_clean_dir, data_dir, SW_5x5, NW_5x5, SE_5x5, MID_5x5
 from nbs.configs import get_logger, iter_configs, set_file_logging, log_config, parse_multiple_values
 
+gdal.DontUseExceptions()
+osr.DontUseExceptions()
+
 LOGGER = get_logger("nbs.bruty.tests")
 
 nan = numpy.nan

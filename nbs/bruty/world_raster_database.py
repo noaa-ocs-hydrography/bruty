@@ -45,6 +45,8 @@ from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, Bruty
 from nbs.configs import get_logger, set_file_logging, make_family_of_logs, close_logs  # , iter_configs, log_config, parse_multiple_values
 from nbs.debugging import get_call_logger, log_calls, get_dbg_log_path
 
+gdal.DontUseExceptions()
+
 geo_debug = False
 _debug = False
 NO_OVERRIDE = -1
@@ -2659,8 +2661,8 @@ class WorldDatabase(VABC):
         txs, tys = self.db.tile_scheme.xy_to_tile_index(numpy.array([x1, x2]), numpy.array([y1, y2]))
         txs = list(range(min(txs), max(txs) + 1))
         tys = list(range(min(tys), max(tys) + 1))
-        cols = numpy.zeros(len(txs), numpy.int)
-        rows = numpy.zeros(len(tys), numpy.int)
+        cols = numpy.zeros(len(txs), int)
+        rows = numpy.zeros(len(tys), int)
 
         # # @todo figure out the starting position and what its row/column is and make that the origin
         # nr, nc = self.init_tile(txs[0], tys[0], None)

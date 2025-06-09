@@ -5,6 +5,8 @@ from osgeo import gdal
 
 from nbs.bruty import attribute_tables
 
+gdal.DontUseExceptions()
+
 institutions = {0:{}, 1:{}}
 all_fnames = [fname for fname in glob.glob("v:\\bruty_tile_exports\\**\\*.tif", recursive=True) if "original" not in fname]
 use_files = {14:{}, 15:{}, 16:{}}

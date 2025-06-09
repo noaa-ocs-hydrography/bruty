@@ -20,6 +20,8 @@ from nbs.bruty.nbs_postgres import NOT_NAV, get_nbs_records, get_sorting_info, g
 from nbs.bruty.world_raster_database import WorldDatabase, use_locks, UTMTileBackendExactRes, NO_OVERRIDE, BaseLockException
 from nbs.bruty.utils import ConsoleProcessTracker
 
+gdal.DontUseExceptions()
+
 NO_DATA = -1
 SUCCEEDED = 0
 DATA_ERRORS = 3

@@ -20,6 +20,9 @@ from nbs_utils.points_utils import to_npz
 from test_data import master_data, make_clean_dir, data_dir, SW_5x5, NW_5x5, SE_5x5, MID_5x5
 from nbs.configs import get_logger, iter_configs, set_file_logging, log_config, parse_multiple_values
 
+gdal.DontUseExceptions()
+osr.DontUseExceptions()
+
 LOGGER = get_logger("nbs.bruty.tests")
 
 nan = numpy.nan

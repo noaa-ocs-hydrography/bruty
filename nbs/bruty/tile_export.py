@@ -15,7 +15,7 @@ import glob
 from functools import total_ordering
 
 from shapely import wkt, wkb
-from osgeo import ogr, osr, gdal
+from osgeo import gdal
 import pickle
 from functools import partial
 
@@ -50,6 +50,7 @@ from nbs.bruty.raster_funcs import  raster_band_name_index
 from nbs.scripts.tile_specs import create_world_db, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, \
     TileInfo, ResolutionTileInfo, CombineTileInfo
 
+gdal.DontUseExceptions()
 
 LOGGER = get_logger('nbs.bruty.export')
 VERSION = (1, 0, 0)
