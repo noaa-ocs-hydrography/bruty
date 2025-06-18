@@ -11,6 +11,7 @@ import csv
 import configparser
 
 import numpy
+import scipy
 from scipy.ndimage import distance_transform_edt as edt
 from tqdm import tqdm
 
@@ -40,7 +41,10 @@ def generalize_tile(elev_array, uncert_array, contrib_array, nodata, closing_dis
     progress = ext_progress if ext_progress is not None else tqdm(desc="TileGen", total=5, leave=False)
     # interpolate the combined raster within the new coverage provided by a binary closing
     progress.set_description("Generalize")
-    generalized_array = raster_interp.process.RasterInterpolator().interpolate_tile(elev_array, 'linear', nodata)
+    try:
+        generalized_array = raster_interp.process.RasterInterpolator().interpolate_tile(elev_array, 'linear', nodata)
+    except scipy.spatial.QhullError as e:
+        generalized_array = elev_array  # failure to generalize happens when there are only points in a line
     progress.update(1)
     driver = gdal.GetDriverByName('GTiff')
 
