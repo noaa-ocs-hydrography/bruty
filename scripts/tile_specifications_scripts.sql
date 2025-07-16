@@ -42,18 +42,6 @@ ALTER TABLE IF EXISTS public.spec_tiles
 
 GRANT ALL ON TABLE public.spec_tiles TO postgres;
 
--- Trigger: after_edit_tiles_trg
-
--- DROP TRIGGER IF EXISTS after_edit_tiles_trg ON public.spec_tiles;
-
-CREATE OR REPLACE TRIGGER after_edit_tiles_trg
-    AFTER INSERT OR UPDATE
-    ON public.spec_tiles
-    FOR EACH ROW
-    EXECUTE FUNCTION public.after_edit_tiles();
-
-COMMENT ON TRIGGER after_edit_tiles_trg ON public.spec_tiles
-    IS 'When the geometry, utm zone or hemisphere are changed then force an update of the spec_resolutions.geometry_buffered';
 
 -- Trigger: before_edit_tiles_trg
 
@@ -105,15 +93,6 @@ CREATE INDEX spec_resolutions_tile_index
     (tile_id ASC NULLS LAST)
 ;
 
--- Trigger: edit_resolutions
-
--- DROP TRIGGER IF EXISTS edit_resolutions ON public.spec_resolutions;
-
-CREATE OR REPLACE TRIGGER edit_resolutions
-    BEFORE INSERT OR UPDATE
-    ON public.spec_resolutions
-    FOR EACH ROW
-    EXECUTE FUNCTION public.buffer_geom();
 
 -- Create the bruty combines table with a record for each datatype/for_nav pair of a resolution of a review tile
 CREATE TABLE IF NOT EXISTS public.spec_combines
@@ -210,6 +189,23 @@ COMMENT ON TRIGGER after_edit_tiles_trg ON public.spec_tiles
     IS 'When the geometry, utm zone or hemisphere are changed then force an update of the spec_resolutions.geometry_buffered';
 
 
+CREATE OR REPLACE FUNCTION delete_spec_resolutions_on_tile_delete()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Delete records from spec_combines where res_id matches the r_id of the deleted row
+    DELETE FROM spec_resolutions
+    WHERE tile_id = OLD.t_id;
+
+    RETURN OLD; -- For AFTER DELETE triggers, RETURN OLD is standard.
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER after_delete_spec_tile
+    AFTER DELETE ON public.spec_tiles
+    FOR EACH ROW
+    EXECUTE FUNCTION delete_spec_resolutions_on_tile_delete();
+
+
 -- Create a buffered geometry in the correct projection based on utm and closing_distance parameters
 CREATE OR REPLACE FUNCTION buffer_geom()
 RETURNS trigger AS $BODY$
@@ -245,12 +241,68 @@ RETURNS trigger AS $BODY$
 	END;
 $BODY$ LANGUAGE plpgsql;
 
+-- Create a buffered geometry in the correct projection based on utm and closing_distance parameters
+CREATE OR REPLACE FUNCTION after_insert_resolution_trg()
+RETURNS trigger AS $BODY$
+    DECLARE
+        datatypes TEXT[] := ARRAY[
+            'qualified',
+            'qualified',
+            'unqualified',
+            'unqualified',
+            'GMRT',
+            'GMRT',
+            'sensitive',
+            'sensitive',
+            'enc'
+        ];
+        for_navigations BOOLEAN[] := ARRAY[
+            FALSE, -- for 'not_nav'
+            TRUE,  -- for 'nav'
+            FALSE,
+            TRUE,
+            TRUE,
+            FALSE,
+            FALSE,
+            TRUE,
+            TRUE
+        ];
+        i INTEGER;
+    BEGIN
+        -- Loop through the arrays using a counter
+        IF TG_OP = 'INSERT' THEN
+            FOR i IN 1..array_length(datatypes, 1) LOOP
+                INSERT INTO spec_combines (datatype, for_navigation, res_id)
+                VALUES (datatypes[i], for_navigations[i], NEW.r_id);
+            END LOOP;
+            RETURN NEW;
+        END IF;
+        IF TG_OP = 'DELETE' THEN
+            -- Delete records from spec_combines where res_id matches the r_id of the deleted row
+            DELETE FROM spec_combines
+            WHERE res_id = OLD.r_id;
+
+            RETURN OLD; -- For AFTER DELETE triggers, RETURN OLD is standard.
+        END IF;
+
+	END;
+$BODY$ LANGUAGE plpgsql;
+
+-- Trigger: edit_resolutions
+
+-- DROP TRIGGER IF EXISTS edit_resolutions ON public.spec_resolutions;
 
 CREATE OR REPLACE TRIGGER edit_resolutions
     BEFORE INSERT OR UPDATE
     ON public.spec_resolutions
     FOR EACH ROW
     EXECUTE FUNCTION public.buffer_geom();
+
+CREATE OR REPLACE TRIGGER edit_resolutions
+    AFTER INSERT OR DELETE
+    ON public.spec_resolutions
+    FOR EACH ROW
+    EXECUTE FUNCTION public.after_insert_resolution_trg();
 
 
 
