@@ -200,7 +200,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER after_delete_spec_tile
+CREATE OR REPLACE TRIGGER after_delete_spec_tile
     AFTER DELETE ON public.spec_tiles
     FOR EACH ROW
     EXECUTE FUNCTION delete_spec_resolutions_on_tile_delete();
@@ -241,7 +241,6 @@ RETURNS trigger AS $BODY$
 	END;
 $BODY$ LANGUAGE plpgsql;
 
--- Create a buffered geometry in the correct projection based on utm and closing_distance parameters
 CREATE OR REPLACE FUNCTION after_insert_resolution_trg()
 RETURNS trigger AS $BODY$
     DECLARE
@@ -298,7 +297,7 @@ CREATE OR REPLACE TRIGGER edit_resolutions
     FOR EACH ROW
     EXECUTE FUNCTION public.buffer_geom();
 
-CREATE OR REPLACE TRIGGER edit_resolutions
+CREATE OR REPLACE TRIGGER after_edit_resolutions
     AFTER INSERT OR DELETE
     ON public.spec_resolutions
     FOR EACH ROW
