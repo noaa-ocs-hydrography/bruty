@@ -409,6 +409,7 @@ def combine_and_export(config, tile_info, use_caches=False):
         # 3) Extract data from all necessary Bruty DBs
         if tile_info.public or tile_info.internal or tile_info.navigation:
             try:
+                # the temp directory is controlled by these env variables or the system if these are not specified TMPDIR, TEMP or TMP
                 fobj, cache_file = tempfile.mkstemp(".cache.tif")
                 os.close(fobj)
                 databases = []
@@ -948,7 +949,7 @@ def complete_export_tiled(export, all_simple_records, closing_dist, epsg, decima
                     # compute the low res answer
                     coarse_dist_array = generalize_tile(coarse_elev, coarse_uncert, coarse_contrib,
                                                  new_nodata, closing_dist, resolution * reduction, ext_progress=None)
-                    coarse_contrib[:] = 0  # set the coarse contributor to the generalized contributor value (using the default of 0 above)
+                    coarse_contrib[where_not_nodata(coarse_contrib, new_nodata)] = 0  # set the coarse contributor to the generalized contributor value (using the default of 0 above)
                     if debug_plots:
                         temp_ds = create_subdataset(original_ds, f"{block_cnt}_raw", ir - row_buffer_lower, ic - col_buffer_lower,
                                                     elevation_array, new_nodata); del temp_ds
