@@ -948,6 +948,7 @@ def complete_export_tiled(export, all_simple_records, closing_dist, epsg, decima
                     # compute the low res answer
                     coarse_dist_array = generalize_tile(coarse_elev, coarse_uncert, coarse_contrib,
                                                  new_nodata, closing_dist, resolution * reduction, ext_progress=None)
+                    coarse_contrib[:] = 0  # set the coarse contributor to the generalized contributor value (using the default of 0 above)
                     if debug_plots:
                         temp_ds = create_subdataset(original_ds, f"{block_cnt}_raw", ir - row_buffer_lower, ic - col_buffer_lower,
                                                     elevation_array, new_nodata); del temp_ds
