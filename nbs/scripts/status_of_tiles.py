@@ -106,7 +106,7 @@ def main(config):
             LOGGER.info(msg)
         else:
             tile_info.out_of_date = True
-        conn_info.database = "tile_specifications"
+        conn_info.database = conn_info.export_database
         conn, cursor = connection_with_retries(conn_info)
         tile_info.update_combine_status(cursor)
         conn.commit()

@@ -370,7 +370,7 @@ BEGIN
 			END IF;
 		END IF;
 		if NEW.request_export THEN
-            SELECT count(*) INTO _related_res_count from (select 1 FROM spec_resolutions WHERE tile_id=NEW.tile_id FOR UPDATE SKIP LOCKED) as unlocked_rows;
+            SELECT count(*) INTO _related_res_count from (select 1 FROM spec_resolutions WHERE tile_id=NEW.tile_id) as unlocked_rows;
             SELECT count(*) INTO _unlocked_related_res_count from (select 1 FROM spec_resolutions WHERE tile_id=NEW.tile_id FOR UPDATE SKIP LOCKED) as unlocked_rows;
             _export_lock_cnt := _related_res_count-_unlocked_related_res_count;
 		    if _export_lock_cnt > 0 THEN

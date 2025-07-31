@@ -78,6 +78,7 @@ class ConnectionInfo:
     hostname: str = 'OCS-VS-NBS05'
     port: str = '5434'
     tablenames: tuple = ()
+    export_database: str = ""
 
 
 def hash_id(*args):
@@ -127,9 +128,9 @@ def connect_params_from_config(config):
 
     with open(os.path.expanduser(config['CREDENTIALS_FILENAME'])) as database_credentials_file:
         username, password = [line.strip() for line in database_credentials_file][:2]
-    tablenames, database = config.get('tablenames', ""), config['database']
+    tablenames, database, export_database = config.get('tablenames', ""), config['database'], config['export_database']
     tablename_list = parse_multiple_values(tablenames)
-    return ConnectionInfo(database, username, password, hostname, port, tablename_list)
+    return ConnectionInfo(database, username, password, hostname, port, tablename_list, export_database)
 
 
 # switched to Identity column - also made values as one million * utm zone and add 800k or 900k for the prereview and sensitive tables.

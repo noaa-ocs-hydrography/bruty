@@ -12,7 +12,7 @@ import nbs.scripts
 script_dir = pathlib.Path(nbs.scripts.__path__[0])
 config_file = read_config(script_dir.joinpath(r'base_configs\nbs_postgres.config')
 conn_info = connect_params_from_config(config_file['DEFAULT'])
-conn_info.database = "tile_specifications"
+conn_info.database = conn_info.export_database
 fields, recs = get_nbs_records("xbox", conn_info, exclude_fields=['geometry', 'geometry_modified'])
 connection, cursor = connection_with_retries(conn_info)
 export_types = ['internal', 'navigation', 'public']

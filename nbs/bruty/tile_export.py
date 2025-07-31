@@ -31,7 +31,7 @@ except ModuleNotFoundError:
 from data_management.db_connection import connect_with_retries
 from fuse_dev.fuse.meta_review import meta_review
 from nbs.configs import iter_configs, read_config
-from nbs.bruty.utils import affine, get_crs_transformer, make_mllw_height_wkt, user_action, tqdm, remove_file, \
+from nbs.bruty.utils import affine, get_crs_transformer, make_height_wkt, user_action, tqdm, remove_file, \
     iterate_gdal_image, BufferedImageOps, QUIT, HELP, contributor_int_to_float, contributor_float_to_int
 from nbs.bruty.nbs_postgres import id_to_scoring, get_nbs_records, nbs_survey_sort, ConnectionInfo, connection_with_retries, connect_params_from_config
 from nbs.bruty.nbs_postgres import REVIEWED, PREREVIEW, SENSITIVE, ENC, GMRT, INTERNAL, NAVIGATION, PUBLIC, SCORING_METADATA_COLUMNS, EXPORT_METADATA_COLUMNS
@@ -646,7 +646,7 @@ def setup_export_raster(filename, tile_info, db):
         maxx = max(cx)
         miny = min(cy)
         maxy = max(cy)
-    wkt = make_mllw_height_wkt(db.db.tile_scheme.epsg)
+    wkt = make_height_wkt(db.db.tile_scheme.epsg, tile_info.datum)
     res = tile_info.resolution  # tile_record[resolution_index]
     # center the output cells at origin of UTM like Coast Survey standard -- this will align with Coast Survey Bruty tiles
     # basically a cell center would fall at 0,0 of the coordinate system

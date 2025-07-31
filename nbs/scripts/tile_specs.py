@@ -51,8 +51,7 @@ class SQLConnectionAndCursor:
         except (TypeError, KeyError):  # either a ConnectionInfo object or a tuple of connection and cursor
             conn_info = conn_info_or_cursor
         try:
-            # @TODO allow for variable SOURCE_DATABASE locations
-            conn_copy = ConnectionInfo(CombineTileInfo.SOURCE_DATABASE, conn_info.username, conn_info.password, conn_info.hostname,
+            conn_copy = ConnectionInfo(conn_info.export_database, conn_info.username, conn_info.password, conn_info.hostname,
                                        conn_info.port, [])
             self.conn, self.cursor = connection_with_retries(conn_copy)
         except AttributeError:  # must be a tuple
@@ -152,7 +151,6 @@ class ExportOperation(BrutyOperation):
 
 
 class TileInfo:
-    SOURCE_DATABASE = "tile_specifications"
     SOURCE_TABLE = "spec_tiles"
     JOINED_TABLE = "spec_tiles"
     IS_LOCKED = 'is_locked'
@@ -415,15 +413,6 @@ class TileInfo:
         None
         """
 
-        # if database is None:
-        #     database = cls.SOURCE_DATABASE
-        # if table is None:
-        #     table = cls.SOURCE_TABLE
-        # if isinstance(connection_info, ConnectionInfo):
-        #     conn_info = ConnectionInfo(database, connection_info.username, connection_info.password, connection_info.hostname, connection_info.port, [table])
-        #     conn, cursor = connection_with_retries(conn_info)
-        # else:
-        #     cursor = connection_info
         if not self.sql_obj:
             raise BaseLockException("No cursor to update the table")
         pg_update(self.sql_obj.cursor, self.SOURCE_TABLE, where, **kwargs)

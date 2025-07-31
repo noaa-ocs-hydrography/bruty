@@ -138,16 +138,21 @@ def user_action():
     return action
 
 
-def make_mllw_height_wkt(horz_epsg):
-    wkt = make_wkt(horz_epsg, 5866)
-    # 5866 with GDAL will not accept the Up axis, so have to strip the 5866 epsg authority
-    down_string = 'AXIS["Depth",DOWN],AUTHORITY["EPSG","5866"]'
-    if down_string not in wkt:
-        raise Exception("Down not found in VertCS, did gdal change?")
+def make_height_wkt(horz_epsg, datum):
+    datum = datum.upper()
+    if datum in ("MLLW",):
+        vert_epsg = 5866
+        datum_str = "MLLW"
+    elif datum in ("IGLD", "IGLD85", "IGLD85LWD"):
+        vert_epsg = 5609
+        datum_str = "IGLD"
     else:
-        # wkt = wkt.replace('AXIS["Depth",DOWN]', 'AXIS["gravity-related height",UP]')
-        # wkt = wkt.replace('AXIS["Depth",DOWN]', 'AXIS["Height",UP]')
-        wkt = wkt.replace(down_string, 'AXIS["gravity-related height",UP]').replace("MLLW depth", "MLLW")
+        raise ValueError(f"datum {datum} not recognized or supported")
+    wkt = make_wkt(horz_epsg, vert_epsg)
+    # 5866 with GDAL will not accept the Up axis, so have to strip the 5866 epsg authority
+    down_string = f'AXIS["Depth",DOWN],AUTHORITY["EPSG","{vert_epsg}"]'
+    if down_string in wkt:
+        wkt = wkt.replace(down_string, 'AXIS["gravity-related height",UP]').replace(f"{datum_str} depth", f"{datum_str}")
 
         pass
     return wkt

@@ -387,6 +387,7 @@ def main(config):
                                 else:
                                     if tile.hash_id() in tile_manager.remaining_tiles:
                                         LOGGER.info(f"Export of {tile_info} needs {tile} to combine first - trying to promote it")
+                                        LOGGER.info(f"Changing to start Combine for {tile_info}")
                                         tile_info = tile
                                         run_combine = True
                                     else:
