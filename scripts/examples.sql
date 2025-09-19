@@ -34,6 +34,16 @@ WHERE
     AND st.production_branch = 'PBD'
     AND st.utm IN (16, 17, 18);
 
+-- update the D: paths to UNC (windows style)
+UPDATE spec_resolutions
+SET export_warnings_log = REPLACE(export_warnings_log,
+'D:\git_repos\bruty\nbs\scripts\OCS.SVC.NBS\logs',
+'\\OCS-S-HyperV17\NBS_Store1\configs\bruty\windows\logs')
 
 
+UPDATE spec_combines
+SET combine_warnings_log = REPLACE(combine_warnings_log,
+'D:\git_repos\bruty\nbs\scripts\OCS.SVC.NBS\logs',
+'\\OCS-S-HyperV17\NBS_Store1\configs\bruty\windows\logs')
+WHERE combine_warnings_log LIKE '%config_combine_3686_40848%'
 -- DELETE FROM spec_resolutions WHERE r_id > 3677;

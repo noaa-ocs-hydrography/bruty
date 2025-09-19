@@ -52,7 +52,7 @@ AREA_COVERAGE = 'area_complete_coverage'
 BOOLEAN_QUALITY_FACTORS = (COVERAGE, BATHY_COVERAGE, FEATURE_LD, SIGNIFICANT_FEATURES)
 DEFAULT_QUALITY_FACTORS = (DATA_ASSESSMENT, BATHY_COVERAGE, COVERAGE, SIGNIFICANT_FEATURES, FEATURE_LD, FEATURE_SIZE, HORZ_UNCERT_FIXED, HORZ_UNCERT_VAR)
 
-LOGGER = get_logger('xipe.raster.attr')
+LOGGER = get_logger('nbs.raster.attr')
 
 class RasterAttributeRecord(dict):
     TYPE_INDEX, USAGE_INDEX, DEFAULT_VALUE = range(3)
@@ -319,7 +319,7 @@ class RasterAttributeTableDataset(list):
                             else:
                                 raise e
                         except Exception as e:
-                            print("failure with", index, field, record)
+                            LOGGER.error(f"failure with RAT record {index}, {field}, {record}")
                             raise e
             try:
                 os.remove(raster_filename+RAT_EXTENSION)

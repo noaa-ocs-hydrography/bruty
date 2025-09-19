@@ -9,7 +9,7 @@ from fuse_dev.fuse.meta_review.meta_review import MetadataDatabase
 from nbs.configs import get_logger
 from nbs.bruty.constants import CONTRIBUTOR_BAND_NAME
 
-LOGGER = get_logger('xipe.csar.meta')
+LOGGER = get_logger('nbs.bruty.csar.meta')
 
 # indices of fields in the CARIS Contributor string
 DEFAULT_INTERPOLATED_COLUMN = 19

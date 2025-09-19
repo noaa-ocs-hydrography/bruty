@@ -6,7 +6,7 @@ from nbs.scripts import combine
 from nbs.configs import get_logger
 from nbs.bruty.world_raster_database import LockNotAcquired, AreaLock, FileLock, BaseLockException, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, Lock
 
-LOGGER = get_logger('bruty.scripts.convert')
+LOGGER = get_logger('nbs.bruty.scripts.convert')
 
 if __name__ == "__main__":
     for config_filename, config_file in iter_configs([r'C:\git_repos\bruty\nbs\scripts\barry.gallagher.la\debug.config']):

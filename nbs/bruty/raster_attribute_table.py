@@ -17,7 +17,7 @@ from nbs.bruty.raster_funcs import raster_band_name_index
 
 gdal.DontUseExceptions()
 
-LOGGER = get_logger('xipe.scripts.RAT')
+LOGGER = get_logger('nbs.scripts.RAT')
 CONFIG_SECTION = 'combined_raster_processing'
 QUALITY_BAND_NAME = "Quality"
 SOURCE_EXT = '.source_information'

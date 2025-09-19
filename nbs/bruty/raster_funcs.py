@@ -6,7 +6,7 @@ import rasterio
 
 from nbs.configs import get_logger
 
-LOGGER = get_logger('xipe.rastr')
+LOGGER = get_logger('nbs.rastr')
 
 
 def parse_filename(filename: str) -> (str, Union[str, int]):

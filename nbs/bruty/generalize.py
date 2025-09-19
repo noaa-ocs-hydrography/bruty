@@ -27,7 +27,7 @@ from nbs.bruty.utils import iterate_gdal_image, BufferedImageOps
 
 gdal.DontUseExceptions()
 
-LOGGER = get_logger('bruty.generalize')
+LOGGER = get_logger('nbs.bruty.generalize')
 CONFIG_SECTION = 'combined_raster_processing'
 
 DEFAULT_CARIS_ENVIRONMENT = 'CARIS35'
