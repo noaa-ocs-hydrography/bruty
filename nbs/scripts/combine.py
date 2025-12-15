@@ -23,7 +23,7 @@ from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, Bruty
 from nbs.bruty.world_raster_database import LockNotAcquired, AreaLock, FileLock, BaseLockException, EXCLUSIVE, SHARED, NON_BLOCKING, SqlLock, NameLock, Lock, AdvisoryLock
 from nbs.bruty.utils import onerr, user_action, remove_file, QUIT, HELP
 from nbs.configs import get_logger, read_config, log_config, make_family_of_logs, show_logger_handlers, get_log_level
-from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_metadata, ConnectionInfo, connect_params_from_config, SCORING_METADATA_COLUMNS, TRANSFORM_METADATA_COLUMNS
+from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_metadata, ConnectionInfo, connect_params_from_config, SCORING_METADATA_COLUMNS, TRANSFORM_METADATA_COLUMNS, REVIEWED
 from nbs.scripts.convert_csar import convert_csar_python
 from nbs.scripts.tile_specs import TileInfo, CombineTileInfo, ResolutionTileInfo, create_world_db, \
     SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION, SQLITE_READ_FAILURE
@@ -293,10 +293,16 @@ def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=Tr
             sorted_recs, names_list, sort_dict, comp, transform_metadata = get_postgres_processing_info(world_db_path, conn_info, (use_navigation_flag, tile_info.for_nav), exclude=exclude)
             clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=1, delete_existing=delete_existing, log_level=log_level)
             if not names_list:  # still call process_nbs_records to have it write the transaction group records
-                LOGGER.info(f"No matching records found in tables {conn_info.tablenames}")
-                LOGGER.info(f"  for_navigation_flag used:{use_navigation_flag}")
+                if tile_info.datatype == REVIEWED:
+                    log_func = LOGGER.warning
+                else:
+                    log_func = LOGGER.info
+                log_func(f"No matching records found in tables {conn_info.tablenames}")
+                if tile_info.datatype == REVIEWED:
+                    log_func(f"  On a {REVIEWED} table this normally means the product branch, utm, datum, hemisphere, locality is set wrong for the Tile")
+                log_func(f"  for_navigation_flag used:{use_navigation_flag}")
                 if use_navigation_flag:
-                    LOGGER.info(f"  and for_navigation value must equal: {tile_info.for_nav}")
+                    log_func(f"  and for_navigation value must equal: {tile_info.for_nav}")
             ret = process_nbs_records(world_db_path, names_list, sort_dict, comp, transform_metadata, extra_debug, override, crop=crop, log_level=log_level)
             # if not extra_debug:
             if world_raster_database.NO_LOCK:
