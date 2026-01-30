@@ -13,8 +13,12 @@ import rasterio.crs
 from osgeo import gdal, osr, ogr
 import pyproj.exceptions
 from pyproj import Transformer, CRS
+import vyperdatum_register
+from vyperdatum_register.build_db_from_NOAA import setup_pyproj
+
 from nbs.bruty.exceptions import BrutyFormatError, BrutyMissingScoreError, BrutyUnkownCRS, BrutyError
 
+setup_pyproj()
 gdal.DontUseExceptions()
 osr.DontUseExceptions()
 
@@ -138,27 +142,37 @@ def user_action():
     return action
 
 
-def make_height_wkt(horz_epsg, datum):
+def make_height_wkt(horz_epsg: int, datum: str):
+    """ Returns a wkt string provided by pyproj via the vyperdatum 2.0 register.
+    All datums will be returned as heights.
+
+    Parameters
+    ----------
+    horz_epsg : integer EPSG code (there are no NOAA horizontals so it is assumed to be EPSG 2d
+    datum : vertical datum, accepted values are MLLW, NCD, LWRP, IGLD, IGLD85, IGLD85LWD
+
+    Returns
+    -------
+    wkt : string of Well Known Text (WKT) as a compound of the EPSG horizontal and the NOAA vertical in height orientation
+    """
+
     datum = datum.upper()
     if datum in ("MLLW",):
-        vert_epsg = 5866
+        vert_code = 98
         datum_str = "MLLW"
+    elif datum in ("NCD", ):
+        vert_code = 101
+    elif datum in ("LWRP", ):
+        vert_code = 89
     elif datum in ("IGLD", "IGLD85", "IGLD85LWD"):
-        vert_epsg = 5609
-        datum_str = "IGLD"
+        vert_code = 92
     else:
         raise ValueError(f"datum {datum} not recognized or supported")
-    wkt = make_wkt(horz_epsg, vert_epsg)
-    # 5866 with GDAL will not accept the Up axis, so have to strip the 5866 epsg authority
-    down_string = f'AXIS["Depth",DOWN],AUTHORITY["EPSG","{vert_epsg}"]'
-    if down_string in wkt:
-        wkt = wkt.replace(down_string, 'AXIS["gravity-related height",UP]').replace(f"{datum_str} depth", f"{datum_str}")
-
-        pass
+    wkt = make_wkt("EPSG", horz_epsg, "NOAA", vert_code)
     return wkt
 
 
-def make_wkt(horz_epsg, vert_epsg):
+def make_wkt(horz_auth, horz_code, vert_auth, vert_code):
     """ Calls gdalsrsinfo with the epsgs supplied.  MLLW (5866) is the default vertical.
     down_to_up flag will change AXIS["Depth",DOWN] to AXIS["gravity-related height",UP]
     see:  https://docs.opengeospatial.org/is/18-010r7/18-010r7.html#47
@@ -169,11 +183,8 @@ def make_wkt(horz_epsg, vert_epsg):
     # wkt_old = srs_process.stdout.read().decode().strip()
     # stderr = srs_process.stderr.read().decode().strip()
 
-    srs = osr.SpatialReference()
-    srs.SetFromUserInput(f"EPSG:{horz_epsg}+{vert_epsg}")
-    # srs.ExportToWkt(["FORMAT=WKT2"])
-    wkt = srs.ExportToWkt(["FORMAT=WKT1"])
-    if "COMPD_CS" not in wkt:
+    wkt = pyproj.CRS(f"{horz_auth}:{horz_code}+{vert_auth}:{vert_code}").to_wkt()
+    if "COMPOUNDCRS" not in wkt:
         raise Exception("compound CRS not found")
 
     return wkt
