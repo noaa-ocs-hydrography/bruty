@@ -54,3 +54,39 @@ def get_dbg_log_path():
         if isinstance(h, logging.FileHandler):
             return h.baseFilename
 
+
+if __name__ == '__main__':
+    import pyarrow.parquet as pq
+    import geopandas as gpd
+    import time, json
+
+    t = time.time()
+    path_to_survey_data = r"V:\NBS_Data_Qualified\PBD_California_UTM11N_MLLW\NOAA_Direct_OCS\ESD\Original\E01008\E01008_MB_MLLW_1of2.parquet"
+    schema_dict = {field.name: str(field.type) for field in pq.read_schema(path_to_survey_data)}
+    UNCERTAINTY = 'Uncertainty'
+    GEOMETRY = 'geometry'
+    CLASSIFICATION = 'Classification'
+    expected_fields = [UNCERTAINTY, CLASSIFICATION, GEOMETRY]
+    missing_fields = [field for field in expected_fields if field not in schema_dict]
+
+    # stage the file for reading
+    parquet_file = pq.ParquetFile(path_to_survey_data)
+
+    # use crs from file if found in the "primary column" metadata
+    metadata = parquet_file.metadata
+    geo_metadata = json.loads(metadata.metadata[b'geo'])
+    primary_column = geo_metadata.get('primary_column', None)
+    srs = geo_metadata.get('columns', {}).get(primary_column, {}).get('crs', {})
+    wkt = gpd.GeoDataFrame(columns=[GEOMETRY]).set_crs(srs).crs.to_wkt()
+
+    # read the file into dataframe batches yielding numpy arrays
+    for batch in parquet_file.iter_batches(batch_size=10, columns=expected_fields):
+        df = batch.to_pandas()
+        pts = gpd.GeoSeries.from_wkb(df[GEOMETRY])
+        x = pts.x.values
+        y = pts.y.values
+        depth = pts.z.values
+        uncertainty = df[UNCERTAINTY].values
+        print(wkt, x, y, depth, uncertainty)
+        break
+    print(time.time() - t)
