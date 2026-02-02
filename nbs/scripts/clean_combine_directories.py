@@ -61,8 +61,6 @@ if trim_to_aoi:
     for search_root, dirs, files in os.walk(data_dir, topdown=True):
         break
     for subdir in dirs:
-        if "Alaska" in subdir:
-            continue
         db_dir = pathlib.Path(search_root).joinpath(subdir)
         print(db_dir)
         try:
@@ -73,10 +71,14 @@ if trim_to_aoi:
             aoi = set([(int(tx), int(ty)) for tx,ty in db.tiles_of_interest])
             for cur_dir_str, dirs, files in os.walk(db_dir, topdown=False):
                 cur_dir = pathlib.Path(cur_dir_str)
-                if cur_dir.name.isdigit() and cur_dir.parent.name.isdigit() and cur_dir.parent.parent == db_dir:
-                    tx = int(cur_dir.name)
-                    ty = int(cur_dir.parent.name)
-                    if (ty, tx) not in aoi:
-                        print("***************            trimming", cur_dir_str)
-                        # shutil.rmtree(parent, ignore_errors=True)
-                    # print(".", end="")
+                if cur_dir.parent.parent == db_dir:
+                    try:
+                        tx = int(cur_dir.name)
+                        ty = int(cur_dir.parent.name)
+                    except ValueError:
+                        pass  # not a number (can't use isdigit because minus signs get missed)
+                    else:
+                        if (ty, tx) not in aoi:
+                            print("***************            trimming", cur_dir_str)
+                            shutil.rmtree(cur_dir_str, ignore_errors=True)
+                        # print(".", end="")
