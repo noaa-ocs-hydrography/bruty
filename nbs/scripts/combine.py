@@ -384,13 +384,14 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
                 sid = survey.sid
                 path = survey.data_path
                 sort_info = (survey.decay, survey.resolution)
-                # if extra_debug:
-                    # pth = path.upper()
-                    # if not ('H12010' in pth or 'H06443' in pth or 'H12023' in pth):  # a VR, gdal raster and points survey (points is in not__for_nav)
+                if extra_debug:
+                    pth = path.upper()
+                    # if not ('E01096' in pth):  # a VR, gdal raster and points survey (points is in not__for_nav)
+                    # if not (".bag" in pth.lower()):  # a VR, gdal raster and points survey (points is in not__for_nav)
                     # if extra_debug and sid not in (721744, 720991, 720301):  # , 764261, 764263
                     # if extra_debug and i > 3:  # , 764261, 764263
-                    #     names_list.pop(i)
-                    #     continue
+                    #    names_list.pop(i)
+                    #    continue
                     # print(path)
                 LOGGER.debug(f'starting {sid} {path}')
                 # # @FIXME is contributor an int or float -- needs to be int 32 and maybe int 64 (or two int 32s)
@@ -705,11 +706,14 @@ if __name__ == "__main__":
     LOGGER.info(str(sys.argv))
     parser = make_parser()
     args = parser.parse_args()
-    if args.show_help or not args.bruty_root or not args.combine_pk_id or not args.config_path:
+    if args.show_help or not args.bruty_root or (args.combine_pk_id is None and not args.debug) or not args.config_path:
         parser.print_help()
         ret = NOT_ENOUGH_ARGS
     proc_start = time.time()
     if args.bruty_root:
+        if args.debug and args.combine_pk_id is None:
+            config_obj = read_config(args.config_path, log_files=False)
+            args.combine_pk_id = int(config_obj['DEFAULT']['DEBUG_COMBINE_ID'])
         config_obj = read_config(args.config_path, log_files=True, log_prefix=f"_combine_{args.combine_pk_id}", base_log_dirs=None, pid_log_dirs=['logs', 'combines'])
         config = config_obj['DEFAULT']
         conn_info = connect_params_from_config(config)

@@ -1487,6 +1487,8 @@ def make_parser():
                         help=f"primary key of the tile to export from the {ResolutionTileInfo.SOURCE_TABLE} table")
     parser.add_argument("-f", "--fingerprint", type=str, metavar='fingerprint', default="",
                         help="fingerprint to store success/fail code with in sqlite db within the REVIEWED (qualified), for_navigation database")
+    parser.add_argument('--debug', action='store_true', dest='debug',
+                        default=False, help="turn on debugging code")
     return parser
 
 
@@ -1499,17 +1501,18 @@ if __name__ == "__main__":
     parser = make_parser()
     args = parser.parse_args()
     proc_start = time.time()
-    if args.show_help or not args.config or not args.res_tile_pk_id:
+    if args.show_help or not args.config or (args.res_tile_pk_id is None and not args.debug):
         parser.print_help()
         ret = 1
-
+    if args.debug and args.res_tile_pk_id is None:
+        config_obj = read_config(args.config, log_files=False)
+        args.res_tile_pk_id = int(config_obj['DEFAULT']['DEBUG_EXPORT_RES_ID'])
     if args.config and args.res_tile_pk_id:
         config_file = read_config(args.config, log_files=True, log_prefix=f"_export_{args.res_tile_pk_id}", base_log_dirs=None, pid_log_dirs=['logs', 'exports'])
         log_path = pathlib.Path(args.config)
         config = config_file['DEFAULT']
         # use_locks(args.lock_server)
         conn_info = connect_params_from_config(config)
-
         tile_info = ResolutionTileInfo.from_table(conn_info, args.res_tile_pk_id)
         try:
             LOGGER.info(f"Exporting {tile_info}")
