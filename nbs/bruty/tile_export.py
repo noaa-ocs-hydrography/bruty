@@ -1151,7 +1151,12 @@ def complete_export_tiled(export, all_simple_records, closing_dist, epsg, decima
     make_raster_attr_table(str(export.cog_filename), all_simple_records)  # make a raster attribute table for the generalized dataset
     # FIXME - remove when Caris is fixed
     #  -- change raster attributes for Caris which is failing on 'metre'
-    rat_text = open(export.rat_filename, 'rb').read()
+    try:
+        rat_text = open(export.rat_filename, 'rb').read()
+    except FileNotFoundError:
+        time.sleep(10)  # it seems gdal isn't releasing the file right away, try a delay.
+        rat_text = open(export.rat_filename, 'rb').read()
+
     new_rat_text = rat_text.replace(b"<UnitType>metre</UnitType>", b"<UnitType>m</UnitType>")
     if b"<UnitType>m</UnitType>" not in new_rat_text:
         new_rat_text = rat_text.replace(b"</Description>", b"</Description><UnitType>m</UnitType>")

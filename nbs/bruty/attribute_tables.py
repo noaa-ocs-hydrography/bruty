@@ -275,7 +275,7 @@ class RasterAttributeTableDataset(list):
         else:
             if not fields:
                 fields = first_record.names()  # assumes all records are the same type
-            dataset = gdal.Open(raster_filename, gdal.GA_Update)
+            dataset = gdal.OpenEx(raster_filename, gdal.GA_Update,open_options=["IGNORE_COG_LAYOUT_BREAK=YES"])
             if isinstance(band, str):
                 contributor_band_index = raster_band_name_index(raster_filename, band)
             else:
