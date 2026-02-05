@@ -429,9 +429,12 @@ def combine_and_export(config, tile_info, use_caches=False):
                 root_dir = pathlib.Path(bruty_dir)
                 for combine_tile in combine_tiles:
                     try:
+                        if combine_tile.combine.data_location is None:
+                            combine_tile.combine.data_location = "Null"
+                            raise FileNotFoundError()
                         db = WorldDatabase.open(combine_tile.combine.data_location)
                     except FileNotFoundError as e:
-                        LOGGER.warning(f"Bruty data not found:\n  {combine_tile} at {combine_tile.data_location}")
+                        LOGGER.warning(f"Bruty data not found:\n  {combine_tile} at {combine_tile.combine.data_location}")
                     else:
                         if dataset is None:
                             dataset, dataset_score = setup_export_raster(cache_file, tile_info, db)
