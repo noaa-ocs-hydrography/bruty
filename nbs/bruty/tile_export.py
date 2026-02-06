@@ -30,7 +30,7 @@ except ModuleNotFoundError:
 
 from data_management.db_connection import connect_with_retries
 from fuse_dev.fuse.meta_review import meta_review
-from nbs.configs import iter_configs, read_config
+from nbs.configs import iter_configs, read_config, log_config
 from nbs.bruty.utils import affine, get_crs_transformer, make_height_wkt, user_action, tqdm, remove_file, \
     iterate_gdal_image, BufferedImageOps, QUIT, HELP, contributor_int_to_float, contributor_float_to_int
 from nbs.bruty.nbs_postgres import id_to_scoring, get_nbs_records, nbs_survey_sort, ConnectionInfo, connection_with_retries, connect_params_from_config
@@ -1519,6 +1519,11 @@ if __name__ == "__main__":
         tile_info = ResolutionTileInfo.from_table(conn_info, args.res_tile_pk_id)
         try:
             LOGGER.info(f"Exporting {tile_info}")
+            LOGGER.info(f"Running python executable: {sys.executable}")
+            LOGGER.info(f"Conda environment (if applicable): {os.environ.get('CONDA_PREFIX', 'None')}")
+            LOGGER.info(f"Command line args:  {str(args)}")
+            LOGGER.info(f"Config file parameters:")
+            log_config(config_obj, LOGGER)
             ret = combine_and_export(config, tile_info, args.use_caches)
         except Exception as e:
             traceback.print_exc()

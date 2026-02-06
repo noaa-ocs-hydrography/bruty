@@ -529,6 +529,8 @@ def run_configs(func, title, use_configs, section="DEFAULT", logger=default_logg
         # @TODO expose the stringio_warnings to the caller
         stringio_warnings = set_stream_logging("bruty", file_level=logging.WARNING, remove_other_file_loggers=False)
         logger.info(f'***************************** Start {title}  *****************************')
+        logger.info(f"Running python executable: {sys.executable}")
+        logger.info(f"Conda environment (if applicable): {os.environ.get('CONDA_PREFIX', 'None')}")
         logger.info(f'reading "{config_filename}"')
         log_config(config_file, logger)
         config = config_file[section if section in config_file else 'DEFAULT']

@@ -741,6 +741,11 @@ if __name__ == "__main__":
                 conn_info.tablenames = [tile_info.metadata_table_name()]
                 tile_info.acquire_lock(conn_info)
                 LOGGER.info(f"Combining {tile_info} for_navigation_flag={(not args.ignore_for_nav, tile_info.for_nav)}")
+                LOGGER.info(f"Running python executable: {sys.executable}")
+                LOGGER.info(f"Conda environment (if applicable): {os.environ.get('CONDA_PREFIX', 'None')}")
+                LOGGER.info(f"Command line args:  {str(args)}")
+                LOGGER.info(f"Config file parameters:")
+                log_config(config_obj, LOGGER)
                 ret = process_nbs_database(args.bruty_root, conn_info, tile_info, use_navigation_flag=not args.ignore_for_nav,
                                            extra_debug=args.debug, override_epsg=args.override_epsg, exclude=args.exclude, crop=args.crop,
                                            delete_existing=args.delete_existing, log_level=log_level)
