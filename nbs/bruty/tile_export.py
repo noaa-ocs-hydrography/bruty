@@ -1523,7 +1523,7 @@ if __name__ == "__main__":
             LOGGER.info(f"Conda environment (if applicable): {os.environ.get('CONDA_PREFIX', 'None')}")
             LOGGER.info(f"Command line args:  {str(args)}")
             LOGGER.info(f"Config file parameters:")
-            log_config(config_obj, LOGGER)
+            log_config(config_file, LOGGER)
             ret = combine_and_export(config, tile_info, args.use_caches)
         except Exception as e:
             traceback.print_exc()
