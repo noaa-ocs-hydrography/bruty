@@ -441,7 +441,9 @@ def combine_and_export(config, tile_info, use_caches=False):
                         all_times.extend([rec.ttime for rec in db.transaction_groups.values() if rec.modified_data])
                         del db
                 if not dataset:
-                    raise FileNotFoundError(f"No bruty data was found under{root_dir}")
+                    raise FileNotFoundError(f"No bruty data was found under {root_dir}")
+                if not all_times:
+                    raise BrutyError(f"No combined data (were all surveys marked never post etc?) found under {root_dir}")
 
                 time_format = "%Y%m%d_%H%M%S"
                 if all_times:
