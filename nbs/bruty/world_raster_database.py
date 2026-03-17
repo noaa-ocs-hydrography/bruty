@@ -1424,9 +1424,9 @@ class WorldDatabase(VABC):
         """
         # check schema for missing fields before reading data
         schema_dict = {field.name: str(field.type) for field in pq.read_schema(path_to_survey_data)}
-        UNCERTAINTY = 'Uncertainty'
+        UNCERTAINTY = 'uncertainty'  # match the procio case from Fuse
         GEOMETRY = 'geometry'
-        CLASSIFICATION = 'Classification'
+        CLASSIFICATION = 'classification'
         expected_fields = [UNCERTAINTY, CLASSIFICATION, GEOMETRY]
         missing_fields = [field for field in expected_fields if field not in schema_dict]
         if missing_fields:
