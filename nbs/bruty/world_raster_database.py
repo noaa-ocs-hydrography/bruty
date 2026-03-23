@@ -1425,12 +1425,7 @@ class WorldDatabase(VABC):
         # check schema for missing fields before reading data
         schema_dict = {field.name: str(field.type) for field in pq.read_schema(path_to_survey_data)}
         UNCERTAINTY = 'uncertainty'  # match the procio case from Fuse
-        GEOMETRY = 'geometry'
         CLASSIFICATION = 'classification'
-        expected_fields = [UNCERTAINTY, CLASSIFICATION, GEOMETRY]
-        missing_fields = [field for field in expected_fields if field not in schema_dict]
-        if missing_fields:
-            self.db.LOGGER.warning(f"GeoParquet {path_to_survey_data} missing field(s): {missing_fields}")
 
         # stage the file for reading
         parquet_file = pq.ParquetFile(path_to_survey_data)
@@ -1440,12 +1435,17 @@ class WorldDatabase(VABC):
         geo_metadata = json.loads(metadata.metadata[b'geo'])
         primary_column = geo_metadata.get('primary_column', None)
         srs = geo_metadata.get('columns', {}).get(primary_column, {}).get('crs', {})
-        wkt = gpd.GeoDataFrame(columns=[GEOMETRY]).set_crs(srs).crs.to_wkt()
+        wkt = gpd.GeoDataFrame(columns=['geometry']).set_crs(srs).crs.to_wkt()
+
+        expected_fields = [UNCERTAINTY, CLASSIFICATION, primary_column]
+        missing_fields = [field for field in expected_fields if field not in schema_dict]
+        if missing_fields:
+            self.db.LOGGER.warning(f"GeoParquet {path_to_survey_data} missing field(s): {missing_fields}")
 
         # read the file into dataframe batches yielding numpy arrays
         for batch in parquet_file.iter_batches(batch_size=block_size, columns=expected_fields):
             df = batch.to_pandas()
-            pts = gpd.GeoSeries.from_wkb(df[GEOMETRY])
+            pts = gpd.GeoSeries.from_wkb(df[primary_column])
             x = pts.x.values
             y = pts.y.values
             depth = pts.z.values
@@ -1624,8 +1624,8 @@ class WorldDatabase(VABC):
                 parquet_file = pq.ParquetFile(path_to_survey_data)
                 metadata = parquet_file.metadata
                 geo_metadata = json.loads(metadata.metadata[b'geo'])
-                lx, ly, ux, uy = geo_metadata['columns']['geometry']['bbox']
                 primary_column = geo_metadata.get('primary_column', None)
+                lx, ly, ux, uy = geo_metadata['columns'][primary_column]['bbox']
                 srs = geo_metadata.get('columns', {}).get(primary_column, {}).get('crs', {})
                 wkt = gpd.GeoDataFrame(columns=['geometry']).set_crs(srs).crs.to_wkt()
                 if wkt is not None and override_epsg == NO_OVERRIDE:
