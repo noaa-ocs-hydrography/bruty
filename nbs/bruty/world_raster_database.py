@@ -1423,12 +1423,22 @@ class WorldDatabase(VABC):
 
         """
         # check schema for missing fields before reading data
-        schema_dict = {field.name: str(field.type) for field in pq.read_schema(path_to_survey_data)}
-        UNCERTAINTY = 'uncertainty'  # match the procio case from Fuse
-        CLASSIFICATION = 'classification'
+        def find_case_insensitive_match(target, options):
+            """
+            Returns the original value from 'options' that matches 'target'
+            regardless of casing. Returns target if no match is found.
+            """
+            target_lower = target.lower()
+            for item in options:
+                if item.lower() == target_lower:
+                    return item
+            return target
+
 
         # stage the file for reading
         parquet_file = pq.ParquetFile(path_to_survey_data)
+        UNCERTAINTY = find_case_insensitive_match('uncertainty', parquet_file.schema.names)
+        CLASSIFICATION = find_case_insensitive_match('classification', parquet_file.schema.names)
 
         # use crs from file if found in the "primary column" metadata
         metadata = parquet_file.metadata
@@ -1438,10 +1448,11 @@ class WorldDatabase(VABC):
         wkt = gpd.GeoDataFrame(columns=['geometry']).set_crs(srs).crs.to_wkt()
 
         expected_fields = [UNCERTAINTY, CLASSIFICATION, primary_column]
-        missing_fields = [field for field in expected_fields if field not in schema_dict]
+        missing_fields = [field for field in expected_fields if field not in parquet_file.schema.names]
         if missing_fields:
             self.db.LOGGER.warning(f"GeoParquet {path_to_survey_data} missing field(s): {missing_fields}")
 
+        # schema_dict = {field.name: str(field.type) for field in pq.read_schema(path_to_survey_data)}
         # read the file into dataframe batches yielding numpy arrays
         for batch in parquet_file.iter_batches(batch_size=block_size, columns=expected_fields):
             df = batch.to_pandas()
