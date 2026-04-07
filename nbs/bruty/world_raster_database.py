@@ -1624,7 +1624,7 @@ class WorldDatabase(VABC):
                 metadata = parquet_file.metadata
                 geo_metadata = json.loads(metadata.metadata[b'geo'])
 
-                bbox = geo_metadata['columns'][primary_column]['bbox']
+                bbox = geo_metadata['columns']['geometry']['bbox']
                 if len(bbox) == 6:
                     lx, ly, lz, ux, uy, uz = bbox
                 elif len(bbox) == 4:
