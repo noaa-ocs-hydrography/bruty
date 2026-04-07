@@ -1623,7 +1623,6 @@ class WorldDatabase(VABC):
                 parquet_file = pq.ParquetFile(path_to_survey_data)
                 metadata = parquet_file.metadata
                 geo_metadata = json.loads(metadata.metadata[b'geo'])
-
                 bbox = geo_metadata['columns']['geometry']['bbox']
                 if len(bbox) == 6:
                     lx, ly, lz, ux, uy, uz = bbox
@@ -1631,7 +1630,6 @@ class WorldDatabase(VABC):
                     lx, ly, ux, uy = bbox
                 else:
                     self.db.LOGGER.error(f"Unexpected bbox format. Bbox has {len(bbox)} entries")
-
                 primary_column = geo_metadata.get('primary_column', None)
                 srs = geo_metadata.get('columns', {}).get(primary_column, {}).get('crs', {})
                 wkt = gpd.GeoDataFrame(columns=['geometry']).set_crs(srs).crs.to_wkt()
