@@ -1636,7 +1636,14 @@ class WorldDatabase(VABC):
                 metadata = parquet_file.metadata
                 geo_metadata = json.loads(metadata.metadata[b'geo'])
                 primary_column = geo_metadata.get('primary_column', None)
-                lx, ly, ux, uy = geo_metadata['columns'][primary_column]['bbox']
+                bbox = geo_metadata['columns'][primary_column]['bbox']
+                if len(bbox) == 6:
+                    lx, ly, lz, ux, uy, uz = bbox
+                elif len(bbox) == 4:
+                    lx, ly, ux, uy = bbox
+                else:
+                    self.db.LOGGER.error(f"Unexpected bbox format. Bbox has {len(bbox)} entries")
+                    raise BrutyFormatError(f"Unexpected bbox format. Bbox has {len(bbox)} entries")
                 srs = geo_metadata.get('columns', {}).get(primary_column, {}).get('crs', {})
                 wkt = gpd.GeoDataFrame(columns=['geometry']).set_crs(srs).crs.to_wkt()
                 if wkt is not None and override_epsg == NO_OVERRIDE:
@@ -2426,8 +2433,11 @@ class WorldDatabase(VABC):
                                 isle_pts = s_pts[:, numpy.logical_and(txs == isle_tx, tys == isle_ty)]
                                 if isle_pts.size > 0:
                                     pass
-                            if crs_transformer:
-                                x, y = crs_transformer.transform(x, y)
+                            try:
+                                if crs_transformer:
+                                    x, y = crs_transformer.transform(x, y)
+                            except Exception as e:
+                                 raise e
                             depth = pts[2]
                             if reverse_z:
                                 depth *= -1
