@@ -9,22 +9,11 @@ from nbs.configs import iter_configs, read_config
 from nbs.bruty.utils import remove_file
 import nbs.scripts
 
-script_dir = pathlib.Path(nbs.scripts.__path__[0])
-config_file = read_config(script_dir.joinpath(r'base_configs\nbs_postgres.config'))
-conn_info = connect_params_from_config(config_file['DEFAULT'])
-conn_info.database = conn_info.export_database
-fields, recs = get_nbs_records("xbox", conn_info, exclude_fields=['geometry', 'geometry_modified'])
-connection, cursor = connection_with_retries(conn_info)
-export_types = ['internal', 'navigation', 'public']
-keeps = {}
-deletes = {}
-retain = config_file['DEFAULT'].getint('retain', 4)
-
 def cmppath(pth):
     pathobj = pathlib.Path(pth)
     return os.path.join(pathobj.parent.parent.name, pathobj.parent.name, pathobj.name).lower()
 
-def move_orphans(in_dir, out_dir, dry_run=True):
+def move_orphans(conn_info, in_dir, out_dir, remove=False, dry_run=True):
     # FIXME - This will move the hardlinks that are now being created by the export script
     """ FIXME - This will move the hardlinks that are now being created by the export script
 
@@ -47,6 +36,9 @@ def move_orphans(in_dir, out_dir, dry_run=True):
     -------
     None
     """
+    print("retrieving xbox records")
+    fields, recs = get_nbs_records(conn_info.table, conn_info, exclude_fields=['geometry', 'geometry_modified'])
+    print("finding files")
     disk_files = [str(pth) for pth in pathlib.Path(in_dir).rglob('*') if pth.is_file()]
 
     db_paths = set()
@@ -55,18 +47,23 @@ def move_orphans(in_dir, out_dir, dry_run=True):
             recdir = pathlib.Path(pth)
             rel_path = cmppath(recdir)
             db_paths.add(rel_path)
-
+    action = "move to" if not remove else "delete"
     for disk_file in disk_files:
         rel_path = cmppath(disk_file)
         if rel_path not in db_paths:
-            print(f"Orphan file: {disk_file}")
+
             new_path = disk_file.replace(in_dir, out_dir)
             if dry_run:
-                print(f"    Would move to {new_path}")
+                print(f"    Would {action} {new_path}")
             else:
-                print(f"    Moving to {new_path}")
-                os.makedirs(pathlib.Path(new_path).parent, exist_ok=True)
-                shutil.move(disk_file, new_path)
+
+                if not remove:
+                    print(f"    Moving to {new_path}")
+                    os.makedirs(pathlib.Path(new_path).parent, exist_ok=True)
+                    shutil.move(disk_file, new_path)
+                else:
+                    print(f"    Deleting {disk_file}")
+                    remove_file(disk_file, allow_permission_fail=True)
         else:
             print(f"File in database: {disk_file}")
 
@@ -76,9 +73,14 @@ def make_key(r):
 
 # TODO - The export was making files that were not captured in the xbox table.
 #  We should look at the ouptut directories to remove files not referenced in the xbox table
-def main(dryrun=True):
-    # We'll keep all the row records in groups.  Each distinct export category should keep it's own files on disk
+def main(conn_info, retain=2, dryrun=True):
+    # We'll keep all the row records in groups.  Each distinct export category should keep its own files on disk
     # First we'll gather all exported files into dictionaries of lists that specify all the exports that exist for a utm zone/product branch/datum/res/tile
+    fields, recs = get_nbs_records(conn_info.table, conn_info, exclude_fields=['geometry', 'geometry_modified'])
+    connection, cursor = connection_with_retries(conn_info)
+    export_types = ['internal', 'navigation', 'public']
+    keeps = {}
+    deletes = {}
     exports = {export_type: {} for export_type in export_types}
     for rec in recs:
         k = make_key(rec)
@@ -101,13 +103,14 @@ def main(dryrun=True):
             # sort the exported files by descneing export time
             vals.sort(key=lambda r: r["export_time"], reverse=True)
             for rec in vals:
-                # count the number of approved exports so that we retain the most recent two and any non-accepted files that are newer than the last accepted file
-                if rec['approved']:
-                    num_accepted += 1
                 # if the number of accepts is greater than the user selected number of files to keep, then add to the set of possible deletes
                 # This will include any non-accepted files that are older than the last accepted file
-                if num_accepted > retain:
+                if num_accepted >= retain:
                     place_filename_in = deletes
+                # count the number of approved exports so that we retain the most recent two and any non-accepted files that are newer than the last accepted file
+                # @NOTE Do this after the count check above so that if the retain number was reached that either approved or non-approved get removed
+                if rec['approved']:
+                    num_accepted += 1
                 # keep the lower case for comparison but the original for deletion (Linux is case sensitive but Windows is not)
                 place_filename_in[rec['data_location'].lower()] = rec
     would_keep_overlap = set(deletes).intersection(set(keeps))
@@ -138,7 +141,7 @@ def main(dryrun=True):
 
 
 def make_parser():
-    parser = argparse.ArgumentParser(description='This script will clean up old exports from the xbox table and the file system.\nThe most recent two APPROVED exports, and any not yet approved that are more recent than the two approved, will be kept and the older ones will be deleted.')
+    parser = argparse.ArgumentParser(description='This script will clean up old exports.  If orphan_source is specified then a directory will be cleaned of all files not in the export table.  Otherwise, the xbox table and the file system will be searched.\nThe most recent two APPROVED exports, and any not yet approved that are more recent than the two approved, will be kept and the older ones will be deleted.')
     parser.add_argument("-?", "--show_help", action="store_true",
                         help="show this help message and exit")
 
@@ -147,6 +150,11 @@ def make_parser():
     # parser.add_argument("-d", "--decimals", type=int, metavar='decimals', default=None,  # nargs="+"
     #                     help="number of decimals to keep in elevation and uncertainty bands")
     parser.add_argument("-d", "--dryrun", action="store_true", help="remove the records cache file after reading it")
+    parser.add_argument("-o", "--orphan_src", type=str, default="", help="move or delete orphan files, requires -r or -m flag as well")
+    parser.add_argument("-r", "--remove_orphans", action="store_true", help="remove orphan files")
+    parser.add_argument("-m", "--orphan_dest", type=str, default="", help="move orphan files")
+    parser.add_argument("-c", "--config_path", type=str, metavar='config_path', default="",
+                        help="location to config file for connection info")
     return parser
 
 
@@ -159,4 +167,16 @@ if __name__ == "__main__":
     if args.show_help:
         parser.print_help()
     else:
-        main(dryrun=args.dryrun)
+        config_path = args.config_path
+        if not config_path:
+            script_dir = pathlib.Path(nbs.scripts.__path__[0])
+            config_path = script_dir.joinpath(r'base_configs\nbs_postgres.config')
+        config_file = read_config(config_path)
+        connect_info = connect_params_from_config(config_file['DEFAULT'])
+        connect_info.database = connect_info.export_database
+        retain_cnt = config_file['DEFAULT'].getint('retain', 2)
+        connect_info.table = config_file['DEFAULT'].get("export_table", "xbox")
+        if args.orphan_src:
+            move_orphans(connect_info, args.orphan_src, args.orphan_dest, args.remove_orphans, args.dryrun)
+        else:
+            main(connect_info, retain_cnt, dryrun=args.dryrun)
