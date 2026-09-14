@@ -20,7 +20,7 @@ def main(config):
         LOGGER.info("request_enc field set to true")
     except Exception as e:
         traceback.print_exc()
-        msg = f"combine_tiles.py had an unhandled exception - see message above"
+        msg = f"request_enc_combines.py had an unhandled exception - see message above"
         print(msg)
         LOGGER.error(traceback.format_exc())
         LOGGER.error(msg)
