@@ -152,7 +152,7 @@ def launch_combine(root_path, view_pk_id, config_pth, use_navigation_flag=True, 
     # spawn a new console, activate a python environment and run the combine.py script with appropriate arguments
 
     script_dir = nbs.scripts.__path__._path[0]
-    script_path = os.path.join(script_dir, "combine.py")
+    script_path = os.path.join(script_dir, "combine.py") # gail_bruty_status_test.py
     args = ['python', script_path]
     for exclusion in exclude:
         args.extend(['-x', exclusion])
@@ -317,7 +317,7 @@ def create_bruty_status(config, tile_info, worker_pid):
         connection.close()
 
 
-def get_request_exit(config, pid):
+def get_request_exit(config, manager_status_id):
     conn_info = connect_params_from_config(config)
     conn_info.database = config.get('export_database')
 
@@ -328,9 +328,9 @@ def get_request_exit(config, pid):
             """
             SELECT request_exit
             FROM public.bruty_status
-            WHERE pid = %s
+            WHERE status_id = %s
             """,
-            (pid,)
+            (manager_status_id,)
         )
 
         row = cursor.fetchone()
@@ -591,13 +591,37 @@ def reached_max_load(tile_processes, max_processes):
     return cnt >= max_processes
 
 
+def get_global_bruty_status_flags(config):
+    conn_info = connect_params_from_config(config)
+    conn_info.database = config.get('export_database')
+    connection, cursor = connection_with_retries(conn_info)
+
+    try:
+        cursor.execute("""
+        SELECT enc_request_pause, request_exit
+        FROM public.bruty_status
+        WHERE status_id = 1
+            AND description = 'Global Bruty'
+        """)
+
+        row = cursor.fetchone()
+
+        return bool(row[0])
+
+    finally:
+        cursor.close()
+        connection.close()
+
 def main(config):
     """
     Returns
     -------
 
     """
+    GLOBAL_BRUTY_STATUS_ID = 1
+
     manager_status_id = create_bruty_manager_status(config)
+
     manager_pid = os.getpid()
     manager_is_paused = False
 
@@ -652,7 +676,8 @@ def main(config):
 
             # Handle issues with checking exit status
             try:
-                request_exit = get_request_exit(config, manager_pid)
+                request_exit = get_request_exit(config, manager_status_id) or get_request_exit(config, GLOBAL_BRUTY_STATUS_ID)
+
             except Exception:
                 LOGGER.exception("Failed to check Bruty exit request for manager PID %s", manager_pid)
                 time.sleep(2)
@@ -671,11 +696,11 @@ def main(config):
                 # If request_exit is TRUE and workers still exist, the manager does not proceed to all_priorities
                 continue
 
-            pause_requested = get_enc_request_pause(config, manager_pid)
+            pause_requested = get_enc_request_pause(config, manager_status_id) or get_enc_request_pause(config, GLOBAL_BRUTY_STATUS_ID)
 
             # Enter paused state.
             if pause_requested and not manager_is_paused:
-                update_is_paused(config, manager_pid, True)
+                update_is_paused(config, manager_status_id, True)
                 manager_is_paused = True
                 LOGGER.info(f"Bruty manager pause requested, PID {manager_pid}. "
                             f"No new processes will be started.")
@@ -683,7 +708,7 @@ def main(config):
             # Leave paused state.
             # Db no longer asking for a pause, but manager still thinks it is currently paused
             elif not pause_requested and manager_is_paused:
-                update_is_paused(config, manager_pid, False)
+                update_is_paused(config, manager_status_id, False)
                 manager_is_paused = False
                 LOGGER.info(f"Bruty manager pause cleared, PID {manager_pid}. "
                             f"Resuming process scheduling.")

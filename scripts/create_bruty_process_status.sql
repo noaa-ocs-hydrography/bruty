@@ -41,3 +41,19 @@ CREATE TABLE IF NOT EXISTS public.bruty_status
         )
 );
 
+INSERT INTO public.bruty_status
+	(status_id,
+	description,
+	enc_request_pause,
+	is_paused,
+	request_exit)
+
+VALUES (
+	1,
+	'Global Bruty',
+	FALSE,
+	FALSE,
+	FALSE
+);
+
+ALTER TABLE public.bruty_status ALTER COLUMN status_id RESTART WITH 2;
