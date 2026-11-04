@@ -22,18 +22,6 @@ CREATE TABLE IF NOT EXISTS public.bruty_status
     progress REAL,
     host TEXT,
 
-    CONSTRAINT status_tile_fk
-        FOREIGN KEY (tile_id)
-        REFERENCES public.spec_tiles (t_id),
-
-    CONSTRAINT status_res_fk
-        FOREIGN KEY (res_id)
-        REFERENCES public.spec_resolutions (r_id),
-
-    CONSTRAINT status_combine_fk
-        FOREIGN KEY (combine_id)
-        REFERENCES public.spec_combines (c_id),
-
     CONSTRAINT progress_range
         CHECK (
             progress IS NULL
