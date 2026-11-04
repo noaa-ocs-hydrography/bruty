@@ -505,18 +505,47 @@ def export_tile(tile_info, config, sql_info, console_capture=""):
         # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
 
         #   NEW: Added for bruty status table
-        status_id = None
-        try:
-            status_id = create_bruty_status(config, tile_info, running_process.app.last_pid) # worker_id
+        # status_id = None
+        worker_pid = get_worker_pid(running_process)
 
-        except Exception:
-            LOGGER.exception("Failed to create Bruty status for worker PID %s, tile_info=%r",
-                             running_process.app.last_pid, tile_info)
+        status_id = None
+
+        if worker_pid is not None:
+            try:
+                status_id = create_bruty_status(config, tile_info, worker_pid)
+
+            except Exception:
+                LOGGER.exception(
+                    "Failed to create Bruty status for worker PID %s, tile_info=%r",
+                    worker_pid, tile_info
+                )
+        else:
+            LOGGER.warning("Could not detect worker PID for %r", tile_info)
+
+        return_process = TileProcess(
+            running_process, tile_info, fingerprint, status_id
+        )
 
         return_process = TileProcess(running_process, tile_info, fingerprint, status_id)
 
     return return_process
 
+
+def get_worker_pid(running_process):
+    """Wait briefly for the Python worker process to become detectable."""
+    worker_pid = running_process.app.last_pid
+
+    for _ in range(20):
+        if worker_pid is not None:
+            break
+
+        time.sleep(0.5)
+        worker_pid = running_process.app.find()
+
+    if worker_pid is not None:
+        running_process.app.last_pid = worker_pid
+
+    return worker_pid
 
 def combine_tile(tile_info, config, conn_info, debug_config=False, console_capture=""):
     env_path = config.get('environment_path')
@@ -560,20 +589,23 @@ def combine_tile(tile_info, config, conn_info, debug_config=False, console_captu
 
         # NEW TEST: create status record for the actual Python worker
         # Use the detected worker PID rather than initial launcher
-        worker_pid = running_process.app.last_pid
+        #worker_pid = running_process.app.last_pid
+        worker_pid = get_worker_pid(running_process)
 
         status_id = None
 
-        try:
-            status_id = create_bruty_status(config, tile_info, worker_pid)
-            print(f"Created Bruty status row: {status_id}")
-            print(f"Worker PID: {worker_pid}")
-            print(f"Parent ID: {os.getpid()}")
+        if worker_pid is not None:
+            try:
+                status_id = create_bruty_status(config, tile_info, worker_pid)
+                print(f"Created Bruty status row: {status_id}")
+                print(f"Worker PID: {worker_pid}")
+                print(f"Parent ID: {os.getpid()}")
 
-        except Exception:
-            LOGGER.exception("Failed to create Bruty status for worker PID %s, tile_info=%r",
+            except Exception:
+                LOGGER.exception("Failed to create Bruty status for worker PID %s, tile_info=%r",
                              worker_pid, tile_info)
-
+        else:
+            LOGGER.warning("Cound not detect worker PID for %r", tile_info)
         # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
         return_process = TileProcess(running_process, tile_info, fingerprint, status_id)
     return return_process
