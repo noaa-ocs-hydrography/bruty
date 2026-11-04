@@ -31,7 +31,6 @@ DATA_ERRORS = 3
 TILE_LOCKED = 4
 FAILED_VALIDATION = 5
 SQLITE_READ_FAILURE = 6
-CANCELLED = 7
 UNHANDLED_EXCEPTION = 99
 
 _debug = False
@@ -978,11 +977,6 @@ def iterate_combine_table(config, iff_needs_to_process=False, max_retries=3, sql
     records = get_combine_records(config, max_retries=max_retries, sql_info=sql_info)
     for review_tile in records:
         info = CombineTileInfo(**review_tile)
-
-        # new: check whether this is a new processing request
-        new_request = (info.combine.request_time is not None and (info.combine.start_time is None or info.combine.start_time < info.combine.request_time))
-
-        # retries after cancellation unless newly requested
-        if not iff_needs_to_process or (info.combine.needs_processing() and (info.combine.tries is None or info.combine.tries < max_retries)) and (info.combine.exit_code != CANCELLED or new_request):
+        if not iff_needs_to_process or (info.combine.needs_processing() and (info.combine.tries is None or info.combine.tries < max_retries)):
             yield info
 

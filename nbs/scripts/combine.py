@@ -26,17 +26,13 @@ from nbs.configs import get_logger, read_config, log_config, make_family_of_logs
 from nbs.bruty.nbs_postgres import get_records, get_sorting_info, get_transform_metadata, ConnectionInfo, connect_params_from_config, SCORING_METADATA_COLUMNS, TRANSFORM_METADATA_COLUMNS, REVIEWED
 from nbs.scripts.convert_csar import convert_csar_python
 from nbs.scripts.tile_specs import TileInfo, CombineTileInfo, ResolutionTileInfo, create_world_db, \
-    SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION, SQLITE_READ_FAILURE, CANCELLED
+    SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, FAILED_VALIDATION, SQLITE_READ_FAILURE
 from nbs_utils.points_utils import to_npz
 from nbs.debugging import log_calls, get_call_logger, get_dbg_log_path, setup_call_logger
 
-# BRUTY STATUS TABLE
-from copy import copy
-from nbs.bruty.bruty_status_db import BrutyStatusDB
-
 gdal.DontUseExceptions()
 
-interactive_debug = True
+interactive_debug = False
 if interactive_debug and sys.gettrace() is None:  # this only is set when a debugger is run (?)
     interactive_debug = False
 
@@ -216,7 +212,7 @@ def clean_nbs_database(world_db_path, names_list, sort_dict, comp, subprocesses=
 
 @log_calls
 def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=True, extra_debug=False, override_epsg=False,
-                         exclude=None, crop=False, delete_existing=False, log_level=logging.INFO, status_db=None):
+                         exclude=None, crop=False, delete_existing=False, log_level=logging.INFO):
     """ Reads the NBS postgres metadata table to find all surveys in a region and insert them into a Bruty combined database.
 
     Parameters
@@ -232,7 +228,6 @@ def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=Tr
     extra_debug
     override_epsg
     crop
-    status_db
 
     Returns
     -------
@@ -308,7 +303,7 @@ def process_nbs_database(root_path, conn_info, tile_info, use_navigation_flag=Tr
                 log_func(f"  for_navigation_flag used:{use_navigation_flag}")
                 if use_navigation_flag:
                     log_func(f"  and for_navigation value must equal: {tile_info.for_nav}")
-            ret = process_nbs_records(world_db_path, names_list, sort_dict, comp, transform_metadata, extra_debug, override, crop=crop, log_level=log_level, status_db=status_db)
+            ret = process_nbs_records(world_db_path, names_list, sort_dict, comp, transform_metadata, extra_debug, override, crop=crop, log_level=log_level)
             # if not extra_debug:
             if world_raster_database.NO_LOCK:
                 tile_info.update_table_record(**{tile_info.combine.END_TIME: "clock_timestamp()", tile_info.combine.EXIT_CODE: ret})
@@ -341,7 +336,7 @@ def get_converted_csar(path, transform_metadata, sid):
 
 
 @log_calls
-def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug=False, override_epsg=NO_OVERRIDE, crop=False, log_level=logging.INFO, status_db=None):
+def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadata, extra_debug=False, override_epsg=NO_OVERRIDE, crop=False, log_level=logging.INFO):
     unconverted_csars = []
     files_not_found = []
     failed_to_insert = []
@@ -373,21 +368,13 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
         #     msg = f"There are surveys without valid scores in the bruty database, shut down bruty instances and run clean_db\n{invalid_surveys}"
         #     LOGGER.error(msg)
         #     raise IndexError(msg)
-        cancelled = False
 
         while names_list:
             time.sleep(1)  # when waiting for one locked file this stops it from being a cpu hog
             num_names = len(names_list)
             for i in range(num_names-1, -1, -1):
-                # Check the status table if no keyboard quit was requested
-                if action != QUIT and status_db is not None:
-                    if status_db.get_request_exit("Combine"):
-                        LOGGER.info("Combine exit requested through bruty_status")
-                        action = QUIT
-
                 action = user_action()
                 if action == QUIT:
-                    cancelled = True
                     names_list = []
                     db.transaction_groups.set_quit(trans_id)
                     break
@@ -399,22 +386,16 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
                 sort_info = (survey.decay, survey.resolution)
                 if extra_debug:
                     pth = path.upper()
-                    # if ('E01290_MB_2m_LWD_interp_1of2'.upper() in pth):  # tiff not working
-                    #     print("found file")
-                    if not ("H13170".upper() in pth):  # parquet test
-                    # if not ('PARQUET'.upper() in pth):  # parquet test
-                    # if not ('E01096'.upper() in pth):  # a VR, gdal raster and points survey (points is in not__for_nav)
+                    # if not ('E01096' in pth):  # a VR, gdal raster and points survey (points is in not__for_nav)
                     # if not (".bag" in pth.lower()):  # a VR, gdal raster and points survey (points is in not__for_nav)
                     # if extra_debug and sid not in (721744, 720991, 720301):  # , 764261, 764263
                     # if extra_debug and i > 3:  # , 764261, 764263
-                        names_list.pop(i)
-                        continue
-                    print(path)
+                    #    names_list.pop(i)
+                    #    continue
+                    # print(path)
                 LOGGER.debug(f'starting {sid} {path}')
                 # # @FIXME is contributor an int or float -- needs to be int 32 and maybe int 64 (or two int 32s)
                 msg = f"{datetime.now().isoformat()}  processing {num_names - i} of {num_names}"
-                # @TODO add progress to the postgres table related to bruty status cleanup
-                #   make sure if record is not found to handle exception
                 LOGGER.debug(msg)
                 print(msg)  # we want this on screen and the debug file but not the info file (info is the default screen level)
 
@@ -492,13 +473,7 @@ def process_nbs_records(world_db, names_list, sort_dict, comp, transform_metadat
                 else:
                     LOGGER.debug(f"{sid} already in database")
                     names_list.pop(i)
-
-        if cancelled:
-            LOGGER.info("Combine was cancelled")
-            ret = CANCELLED
-            # handle cancellation here
-
-        elif unconverted_csars or files_not_found or failed_to_insert:
+        if unconverted_csars or files_not_found or failed_to_insert:
             LOGGER.debug("\n\n")  # extra space on screen
             LOGGER.warning("\nMissing, failed or skipped files:")
             for survey in unconverted_csars:
@@ -723,6 +698,7 @@ def make_parser():
     parser.add_argument("-f", "--fingerprint", type=str, metavar='fingerprint', default="",
                         help="fingerprint to store success/fail code with in sqlite db")
 
+
     return parser
 
 
@@ -741,10 +717,6 @@ if __name__ == "__main__":
         config_obj = read_config(args.config_path, log_files=True, log_prefix=f"_combine_{args.combine_pk_id}", base_log_dirs=None, pid_log_dirs=['logs', 'combines'])
         config = config_obj['DEFAULT']
         conn_info = connect_params_from_config(config)
-        status_conn_info = copy(conn_info)
-        status_conn_info.database = config.get('export_database')
-        # Initialize the status db helper
-        status_db = BrutyStatusDB(status_conn_info)
 
         use_locks(None)  # @TODO change all locks to use postgres
         log_level = get_log_level(config)
@@ -776,7 +748,7 @@ if __name__ == "__main__":
                 log_config(config_obj, LOGGER)
                 ret = process_nbs_database(args.bruty_root, conn_info, tile_info, use_navigation_flag=not args.ignore_for_nav,
                                            extra_debug=args.debug, override_epsg=args.override_epsg, exclude=args.exclude, crop=args.crop,
-                                           delete_existing=args.delete_existing, log_level=log_level, status_db=status_db)
+                                           delete_existing=args.delete_existing, log_level=log_level)
                 if args.debug:
                     try:
                         shutil.copyfile(pathlib.Path(get_dbg_log_path()).parent.parent.joinpath("wdb_metadata.sqlite"),
