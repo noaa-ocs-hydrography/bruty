@@ -636,6 +636,8 @@ class TileProcess:
     console_process: ConsoleProcessTracker
     tile_info: TileInfo
     fingerprint: str
+    # NEW: for bruty status
+    status_id: int | None = None
 
 
 @dataclass(frozen=True)
