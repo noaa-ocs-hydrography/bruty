@@ -8,7 +8,7 @@ from nbs.configs import get_logger
 LOGGER = get_logger('nbs.bruty.insert')
 
 
-def get_enc_request_pause(config, pid):
+def get_enc_request_pause(config, status_id):
     conn_info = connect_params_from_config(config)
     conn_info.database = config.get('export_database')
 
@@ -19,9 +19,9 @@ def get_enc_request_pause(config, pid):
             """
             SELECT enc_request_pause
             FROM public.bruty_status
-            WHERE pid = %s
+            WHERE status_id = %s
             """,
-            (pid,)
+            (status_id,)
         )
 
         row = cursor.fetchone()
@@ -33,7 +33,7 @@ def get_enc_request_pause(config, pid):
         connection.close()
 
 
-def update_is_paused(config, pid, is_paused):
+def update_is_paused(config, status_id, is_paused):
     conn_info = connect_params_from_config(config)
     conn_info.database = config.get('export_database')
 
@@ -46,18 +46,18 @@ def update_is_paused(config, pid, is_paused):
                 UPDATE public.bruty_status
                 SET is_paused = TRUE,
                     is_paused_at = clock_timestamp()
-                WHERE pid = %s
+                WHERE status_id = %s
                 """,
-                (pid,)
+                (status_id,)
             )
         else:
             cursor.execute(
                 """
                 UPDATE public.bruty_status
                 SET is_paused = FALSE
-                WHERE pid = %s
+                WHERE status_id = %s
                 """,
-                (pid,)
+                (status_id,)
             )
 
         connection.commit()
@@ -67,7 +67,7 @@ def update_is_paused(config, pid, is_paused):
         connection.close()
 
 
-def update_progress(config, pid, progress):
+def update_progress(config, status_id, progress):
     progress = max(0, min(100, int(progress)))
 
     conn_info = connect_params_from_config(config)
@@ -79,9 +79,9 @@ def update_progress(config, pid, progress):
         """
         UPDATE public.bruty_status
         SET progress = %s
-        WHERE pid = %s
+        WHERE status_id = %s
         """,
-        (progress, pid)
+        (progress, status_id)
     )
 
     connection.commit()
