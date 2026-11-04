@@ -522,10 +522,6 @@ def export_tile(tile_info, config, sql_info, console_capture=""):
         else:
             LOGGER.warning("Could not detect worker PID for %r", tile_info)
 
-        return_process = TileProcess(
-            running_process, tile_info, fingerprint, status_id
-        )
-
         return_process = TileProcess(running_process, tile_info, fingerprint, status_id)
 
     return return_process
@@ -605,7 +601,7 @@ def combine_tile(tile_info, config, conn_info, debug_config=False, console_captu
                 LOGGER.exception("Failed to create Bruty status for worker PID %s, tile_info=%r",
                              worker_pid, tile_info)
         else:
-            LOGGER.warning("Cound not detect worker PID for %r", tile_info)
+            LOGGER.warning("Could not detect worker PID for %r", tile_info)
         # print(running_process.console.is_running(), running_process.app.is_running(), running_process.app.last_pid)
         return_process = TileProcess(running_process, tile_info, fingerprint, status_id)
     return return_process
