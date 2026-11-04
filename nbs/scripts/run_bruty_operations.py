@@ -538,8 +538,8 @@ def get_worker_pid(running_process):
         time.sleep(0.5)
         worker_pid = running_process.app.find()
 
-    if worker_pid is not None:
-        running_process.app.last_pid = worker_pid
+        if worker_pid is not None:
+            running_process.app.last_pid = worker_pid
 
     return worker_pid
 
