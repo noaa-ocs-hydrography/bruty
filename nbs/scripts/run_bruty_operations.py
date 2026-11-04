@@ -120,7 +120,7 @@ def launch_export(config_path, tile_info, use_caches=False,
     # if profiling:
     #     args.extend(["-m", "cProfile", "-o", str(pathlib.Path(config_path).parent) + f"\\timing{tile_info.tile}_{tile_info.resolution}.profile"])
     bruty_code = nbs.bruty.__path__._path[0]
-    # swap "tile_export.py" with fake worker test in dev/debug for bruty status, i.e gail_bruty_status_test.py
+    # swap "tile_export.py" with fake worker test in dev/debug for bruty status,
     script_path = os.path.join(bruty_code, "tile_export.py")
     args.extend([script_path, "-c", config_path, "-k", str(tile_info.pk)])
     if fingerprint:
@@ -152,7 +152,7 @@ def launch_combine(root_path, view_pk_id, config_pth, use_navigation_flag=True, 
     # spawn a new console, activate a python environment and run the combine.py script with appropriate arguments
 
     script_dir = nbs.scripts.__path__._path[0]
-    script_path = os.path.join(script_dir, "combine.py") # gail_bruty_status_test.py
+    script_path = os.path.join(script_dir, "combine.py")
     args = ['python', script_path]
     for exclusion in exclude:
         args.extend(['-x', exclusion])
@@ -590,27 +590,6 @@ def reached_max_load(tile_processes, max_processes):
             cnt+=2
     return cnt >= max_processes
 
-
-def get_global_bruty_status_flags(config):
-    conn_info = connect_params_from_config(config)
-    conn_info.database = config.get('export_database')
-    connection, cursor = connection_with_retries(conn_info)
-
-    try:
-        cursor.execute("""
-        SELECT enc_request_pause, request_exit
-        FROM public.bruty_status
-        WHERE status_id = 1
-            AND description = 'Global Bruty'
-        """)
-
-        row = cursor.fetchone()
-
-        return bool(row[0])
-
-    finally:
-        cursor.close()
-        connection.close()
 
 def main(config):
     """
