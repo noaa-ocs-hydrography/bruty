@@ -706,27 +706,33 @@ def main(config):
             pause_requested = get_enc_request_pause(config, manager_status_id) or get_enc_request_pause(config, GLOBAL_BRUTY_STATUS_ID)
 
             # Enter paused state.
-            if pause_requested and not manager_is_paused:
-                update_is_paused(config, manager_status_id, True)
-                manager_is_paused = True
-                LOGGER.info(f"Bruty manager pause requested, PID {manager_pid}. "
-                            f"No new processes will be started.")
-
-            # Leave paused state.
-            # Db no longer asking for a pause, but manager still thinks it is currently paused
-            elif not pause_requested and manager_is_paused:
-                update_is_paused(config, manager_status_id, False)
-                manager_is_paused = False
-                LOGGER.info(f"Bruty manager pause cleared, PID {manager_pid}. "
-                            f"Resuming process scheduling.")
-
-            # While the manager is paused, don't spawn anything new.
-            if manager_is_paused:
+            # Handle pause request.
+            if pause_requested:
+                # Remove workers that have finished.
                 remove_finished_processes(tile_processes, tile_manager, config)
-                # Keep manager responsive while paused.
+
+                # Only acknowledge the pause when all workers have exited.
+                if not tile_processes and not manager_is_paused:
+                    update_is_paused(config, manager_status_id, True)
+                    manager_is_paused = True
+                    LOGGER.info(
+                        f"Bruty manager PID {manager_pid} is fully paused. "
+                        "All active processes have finished."
+                    )
+
+                # Do not schedule new work while a pause is requested.
                 do_keyboard_actions(tile_manager, tile_processes)
                 time.sleep(2)
                 continue
+
+            # Resume when the pause request is cleared.
+            elif manager_is_paused:
+                update_is_paused(config, manager_status_id, False)
+                manager_is_paused = False
+                LOGGER.info(
+                    f"Bruty manager pause cleared, PID {manager_pid}. "
+                    "Resuming process scheduling."
+                )
 
             all_priorities = list(tile_manager.priorities.keys())
             # we will try to restart tiles that say they are running in case they crashed without filling the end_time field (meaning they are not actually running)
