@@ -251,9 +251,10 @@ def create_bruty_status(config, tile_info, worker_pid):
             cursor.execute(
                 """
                 INSERT INTO public.bruty_status
-                (description, tile_id, res_id, combine_id, pid, parent_pid, progress, host)
+                (description, process_start_time, tile_id, res_id, combine_id, pid, parent_pid, progress, host)
                 SELECT
                     %s, -- description
+                    clock_timestamp(),
                     r.tile_id, -- tile_id
                     c.res_id, -- res_id
                     c.c_id, -- combine_id
@@ -281,9 +282,10 @@ def create_bruty_status(config, tile_info, worker_pid):
             cursor.execute(
                     """
                     INSERT INTO public.bruty_status
-                    (description, tile_id, res_id, combine_id, pid, parent_pid, progress, host)
+                    (description, process_start_time, tile_id, res_id, combine_id, pid, parent_pid, progress, host)
                     SELECT
                         %s, -- description
+                        clock_timestamp(),
                         r.tile_id, -- tile_id
                         r.r_id, -- res_id
                         NULL, -- combine_id
