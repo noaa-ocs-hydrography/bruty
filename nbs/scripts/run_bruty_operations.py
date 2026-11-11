@@ -152,7 +152,7 @@ def launch_combine(root_path, view_pk_id, config_pth, use_navigation_flag=True, 
     # spawn a new console, activate a python environment and run the combine.py script with appropriate arguments
 
     script_dir = nbs.scripts.__path__._path[0]
-    script_path = os.path.join(script_dir, "gail_bruty_status_test.py")
+    script_path = os.path.join(script_dir, "combine.py")
     args = ['python', script_path]
     for exclusion in exclude:
         args.extend(['-x', exclusion])
