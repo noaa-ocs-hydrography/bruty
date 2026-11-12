@@ -30,7 +30,7 @@ from nbs.scripts.tile_specs import TileToProcess, TileProcess, TileManager, Reso
 from nbs.scripts.combine import process_nbs_database, SUCCEEDED, TILE_LOCKED, UNHANDLED_EXCEPTION, DATA_ERRORS, perform_qc_checks
 from nbs.bruty.tile_export import combine_and_export
 from nbs.debugging import get_call_logger, setup_call_logger, log_calls
-from nbs.scripts.bruty_status_process_controls import get_enc_request_pause, update_is_paused
+from nbs.scripts.bruty_status_process_controls import get_enc_request_pause, update_is_paused, update_global_is_paused
 
 interactive_debug = False  # set to False when testing worker subprocesses, PID tracking, or Bruty status records.
 if interactive_debug and sys.gettrace() is None:  # this only is set when a debugger is run (?)
@@ -251,9 +251,10 @@ def create_bruty_status(config, tile_info, worker_pid):
             cursor.execute(
                 """
                 INSERT INTO public.bruty_status
-                (description, tile_id, res_id, combine_id, pid, parent_pid, progress, host)
+                (description, process_start_time, tile_id, res_id, combine_id, pid, parent_pid, progress, host)
                 SELECT
                     %s, -- description
+                    clock_timestamp(),
                     r.tile_id, -- tile_id
                     c.res_id, -- res_id
                     c.c_id, -- combine_id
@@ -281,9 +282,10 @@ def create_bruty_status(config, tile_info, worker_pid):
             cursor.execute(
                     """
                     INSERT INTO public.bruty_status
-                    (description, tile_id, res_id, combine_id, pid, parent_pid, progress, host)
+                    (description, process_start_time, tile_id, res_id, combine_id, pid, parent_pid, progress, host)
                     SELECT
                         %s, -- description
+                        clock_timestamp(),
                         r.tile_id, -- tile_id
                         r.r_id, -- res_id
                         NULL, -- combine_id
@@ -631,6 +633,7 @@ def main(config):
 
     manager_pid = os.getpid()
     manager_is_paused = False
+    pause_request_logged = False
 
     quitter = False
     debug_config = config.getboolean('DEBUG', False)
@@ -706,28 +709,46 @@ def main(config):
             pause_requested = get_enc_request_pause(config, manager_status_id) or get_enc_request_pause(config, GLOBAL_BRUTY_STATUS_ID)
 
             # Enter paused state.
-            if pause_requested and not manager_is_paused:
-                update_is_paused(config, manager_status_id, True)
-                manager_is_paused = True
-                LOGGER.info(f"Bruty manager pause requested, PID {manager_pid}. "
-                            f"No new processes will be started.")
+            # Handle pause request.
+            if pause_requested:
+                if not pause_request_logged:
+                    LOGGER.info(f"Bruty manager pause requested, PID {manager_pid}. "
+                                f"Waiting for {len(tile_processes)} active processes to finish. "
+                                "No new processes will be started.")
+                    pause_request_logged = True
 
-            # Leave paused state.
-            # Db no longer asking for a pause, but manager still thinks it is currently paused
-            elif not pause_requested and manager_is_paused:
-                update_is_paused(config, manager_status_id, False)
-                manager_is_paused = False
-                LOGGER.info(f"Bruty manager pause cleared, PID {manager_pid}. "
-                            f"Resuming process scheduling.")
-
-            # While the manager is paused, don't spawn anything new.
-            if manager_is_paused:
+                # Remove workers that have finished.
                 remove_finished_processes(tile_processes, tile_manager, config)
-                # Keep manager responsive while paused.
+
+                # Only acknowledge the pause when all workers have exited.
+                if not tile_processes and not manager_is_paused:
+                    update_is_paused(config, manager_status_id, True)
+                    manager_is_paused = True
+                    LOGGER.info(
+                        f"Bruty manager PID {manager_pid} is fully paused. "
+                        "All active processes have finished."
+                    )
+
+                update_global_is_paused(config)
+
+                # Do not schedule new work while a pause is requested.
                 do_keyboard_actions(tile_manager, tile_processes)
                 time.sleep(2)
                 continue
 
+            # Resume when the pause request is cleared.
+            elif manager_is_paused:
+                update_is_paused(config, manager_status_id, False)
+                manager_is_paused = False
+
+                update_global_is_paused(config)
+
+                LOGGER.info(
+                    f"Bruty manager pause cleared, PID {manager_pid}. "
+                    "Resuming process scheduling."
+                )
+
+            pause_request_logged = False
             all_priorities = list(tile_manager.priorities.keys())
             # we will try to restart tiles that say they are running in case they crashed without filling the end_time field (meaning they are not actually running)
             if all_priorities == [tile_manager.RUNNING_PRIORITY] or (is_service and not all_priorities):
