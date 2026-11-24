@@ -1195,6 +1195,7 @@ class WorldDatabase(VABC):
         tile_missing = {}
         tile_extra = {}
         contributor_missing = {}
+        contributor_extra = {}
         per_tile_contributors = {}
         for tx, ty, raster, meta in self.db.iterate_filled_tiles():
             tile_history = self.db.get_tile_history_by_index(tx, ty)
@@ -1221,6 +1222,14 @@ class WorldDatabase(VABC):
                 except KeyError as e:
                     if not self.area_of_interest:  # if area of interest there are still some tiles being listed that are not in the AOI
                         raise e
+        for tx, ty, raster, meta in self.db.iterate_filled_tiles():
+            for contrib in meta['contributors'].keys():
+                try:
+                    self.included_ids[int(contrib)]
+                except KeyError:
+                    contributor_extra.setdefault(int(contrib), [])
+                    contributor_extra[int(contrib)].append((tx, ty))
+
         if tile_missing:
             bad_message("The following contributors are listed in the tile's metadata but don't have a delta in the commit history"
                   "So they were added but and are in metadata.json but have no _00000_.tif data in the directory")
@@ -1235,9 +1244,14 @@ class WorldDatabase(VABC):
                   "but don't appear in that Tile's metadata.json, most likely a remove happened and they were not reinserted correctly.")
             for tile_xy, missing in contributor_missing.items():
                 bad_message(f"Based on the global insertion metadata, Tile {tile_xy} was missing contributors from the history {missing}")
-        if not tile_missing and not tile_extra and not contributor_missing:
+        if contributor_extra:
+            bad_message("The following contributors are listed in the Tile's metadata.json but not in the world database metadata as included."
+                  "Most likely a remove happened and they were not fully removed.")
+            for contrib, tiles in contributor_extra.items():
+                bad_message(f"While not listed as included in the Bruty database, the subtile metadata.json shows contributor {contrib} was found in the following tiles {tiles}")
+        if not tile_missing and not tile_extra and not contributor_missing and not contributor_extra:
             good_message("Global contributors match individual tiles and tiles are internally consistent too")
-        return tile_missing, tile_extra, contributor_missing
+        return tile_missing, tile_extra, contributor_missing, contributor_extra
 
     @classmethod
     def metadata_filename_in_dir(cls, data_dir):

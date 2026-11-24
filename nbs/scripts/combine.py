@@ -576,7 +576,7 @@ def perform_qc_checks(tile_info, conn_info, nav_flag_value, repair=True, check_l
                     else:
                         LOGGER.info("checks ok")
             LOGGER.info("*** Checking DB consistency...")
-            tile_missing, tile_extra, contributor_missing = db.validate()
+            tile_missing, tile_extra, contributor_missing, contributor_extra = db.validate()
             if repair:
                 LOGGER.info(f"Validating {tile_info.combine.data_location}")
                 transaction = db.transaction_groups.data_class()
@@ -626,14 +626,14 @@ def perform_qc_checks(tile_info, conn_info, nav_flag_value, repair=True, check_l
                             LOGGER.info(f"Found surveys needing cleanup before running repair\n{invalid}\n{sort_dict}\n{out_of_sync}\n{mismatch}")
                             clean_nbs_database(db.db.data_path, names_list, sort_dict, comp, subprocesses=1)
                             # refresh the checks in case the clean function is causing problems
-                            tile_missing, tile_extra, contributor_missing = db.validate()
+                            tile_missing, tile_extra, contributor_missing, contributor_extra = db.validate()
                         tx_ty = set(contributor_missing.keys())
                         tx_ty.update(tile_missing.keys())
                         tx_ty.update(tile_extra.keys())
                         if tx_ty:
                             db.repair_subtiles(tx_ty, compare_callback=comp)
                             db.transaction_groups.set_modified(trans_id)
-                            tile_missing, tile_extra, contributor_missing = db.validate()
+                            tile_missing, tile_extra, contributor_missing, contributor_extra = db.validate()
                             LOGGER.info(f"Tried to repair existing subtiles issues by removal and reinsert\n{tx_ty}")
                         else:
                             LOGGER.info(f"Calling cleanup resolved subtile issues")
